@@ -84,19 +84,27 @@ Default section order:
 ## Child DOX Index
 
 - **backend/** — FastAPI trading bot backend (models, routers, services, core logic)
-- **frontend/** — React + Vite + TypeScript trading dashboard (not yet scaffolded)
-- **alembic/** — SQLAlchemy database migrations
-- **nginx/** — Production reverse-proxy and SSL config (not yet scaffolded)
+- **backend/** — FastAPI trading bot backend (models, routers, services, core logic)
+- **frontend/** — React + Vite + TypeScript trading dashboard — see `frontend/AGENTS.md`
+- **alembic/** — SQLAlchemy database migrations (not yet configured)
+- **nginx/** — Production reverse-proxy and SSL config — see `nginx/AGENTS.md`
 - **FUBOT_STEPS/** — 42-step build guide (PHASE1–PHASE6); each step is a markdown file
-- **scripts/** — Automation scripts (not yet scaffolded)
+- **scripts/** — Automation scripts (create_admin.py, init_db.py, setup_ssl.sh, fubotctl.sh)
 - **tests/** — Test suite (not yet scaffolded)
 
 ## Project Overview
 
 **FUBOT** — Binance Futures automated trading bot with React dashboard.
 **URL:** https://fubot.bedikian.cc
-**Stack:** FastAPI (Python) · PostgreSQL · React + Vite + TypeScript · Binance Futures USDS-M · Nginx
+**Stack:** FastAPI (Python) · PostgreSQL · React + Vite + TypeScript + Tailwind CSS + Zustand · Binance Futures USDS-M · Nginx
 **Strategy:** Crypto Banter 6-pillars (50 SMA filter, FVG entries, structural stops, 3:1+ R:R, -3R daily loss limit)
+
+## Current Status
+
+- **Backend**: Phase 1 scaffold complete (config, database, encryption, models, auth service, Binance service, auth router). Routers for bot/dashboard/positions/trades/signals/settings/orders/performance exist as stubs.
+- **Frontend**: Phase 5 complete (all 10 steps). React + Vite + TypeScript + Tailwind v4 + Zustand. All 6 pages built (Login, Overview, TradeLog, Scanner, Performance, Settings). Builds successfully.
+- **Infrastructure**: Nginx config written, systemd service file created, SSL setup script ready, admin creation script ready.
+- **Next**: Phase 2 (indicators, signal detection) or backend router implementation.
 
 ## Key Project Files
 
