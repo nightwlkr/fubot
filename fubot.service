@@ -1,0 +1,38 @@
+[Unit]
+Description=FUBOT - Automated Binance Futures Trading Bot
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=vick
+Group=staff
+WorkingDirectory=/Users/vick/Documents/Projects/fubot
+
+# Environment
+EnvironmentFile=/Users/vick/Documents/Projects/fubot/.env
+
+# Start command
+ExecStart=/usr/bin/python3 -m uvicorn backend.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fubot
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/Users/vick/Documents/Projects/fubot /var/log/fubot
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
