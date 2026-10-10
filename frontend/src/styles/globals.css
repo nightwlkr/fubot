@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #0B0E11;
+  --color-surface: #151920;
+  --color-surface2: #1C2028;
+  --color-border: #2A2F3A;
+  --color-primary: #3B82F6;
+  --color-success: #22C55E;
+  --color-danger: #EF4444;
+  --color-warning: #F59E0B;
+  --color-text: #F9FAFB;
+  --color-muted: #6B7280;
+
+  --font-family-mono: "JetBrains Mono", "Fira Code", monospace;
+  --font-family-sans: "Inter", system-ui, sans-serif;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-text);
+    font-family: var(--font-family-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  * {
+    border-color: var(--color-border);
+  }
+}
+
+.pnl-positive { color: var(--color-success); }
+.pnl-negative { color: var(--color-danger); }
+.badge-long { background-color: color-mix(in srgb, var(--color-success) 20%, transparent); color: var(--color-success); padding: 0.125rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-family: var(--font-family-mono); }
+.badge-short { background-color: color-mix(in srgb, var(--color-danger) 20%, transparent); color: var(--color-danger); padding: 0.125rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; font-family: var(--font-family-mono); }
+.card { background-color: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem; padding: 1rem; }
