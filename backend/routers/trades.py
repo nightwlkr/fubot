@@ -5,7 +5,8 @@ from math import ceil
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from sqlalchemy import select, func, count
+from sqlalchemy import select, func
+from sqlalchemy.sql import func as sqlfunc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -67,7 +68,7 @@ async def list_trades(
             pass
 
     # Count total
-    count_query = select(func.count()).select_from(Trade)
+    count_query = select(sqlfunc.count()).select_from(Trade)
     if symbol:
         count_query = count_query.where(Trade.symbol == symbol)
     if side:

@@ -1,6 +1,6 @@
 """Bot control router — start, stop, status endpoints."""
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db

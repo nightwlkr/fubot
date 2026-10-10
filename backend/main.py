@@ -6,7 +6,7 @@ from backend.config import settings
 from backend.database import init_db, close_db
 
 # Import all routers
-from backend.routers import auth, bot, dashboard, trades, signals, positions, orders, settings, performance
+from backend.routers import auth, bot, dashboard, trades, signals, positions, orders, settings as settings_router, performance
 from backend.services import auth_service
 
 
@@ -42,7 +42,7 @@ app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
 app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
 app.include_router(positions.router, prefix="/api/positions", tags=["positions"])
 app.include_router(orders.router, prefix="/api/orders", tags=["orders"])
-app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
 app.include_router(performance.router, prefix="/api/performance", tags=["performance"])
 
 
