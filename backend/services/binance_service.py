@@ -1,0 +1,363 @@
+"""Binance Futures service with async REST + WebSocket support."""
+import asyncio
+import logging
+import time
+from dataclasses import dataclass
+from typing import AsyncIterator
+from urllib.parse import urlencode
+
+import httpx
+from backend.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Binance Futures API endpoints
+PROD_BASE = "https://fapi.binance.com"
+TESTNET_BASE = "https://testnet.binancefuture.com"
+PROD_WS = "wss://fstream.binance.com"
+TESTNET_WS = "wss://testnet.binancefuture.com"
+
+
+@dataclass
+class BinanceAPIError(Exception):
+    code: int
+    message: str
+
+    def __init__(self, code: int, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(f"Binance API Error {code}: {message}")
+
+
+class RateLimiter:
+    """Token bucket rate limiter for Binance REST API (1200 weight/min)."""
+
+    def __init__(self, max_tokens: int = 1200, rate_per_sec: float = 20.0):
+        self.max_tokens = max_tokens
+        self.rate = rate_per_sec
+        self._tokens = float(max_tokens)
+        self._last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, weight: int = 1):
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self.max_tokens, self._tokens + elapsed * self.rate)
+            self._last_refill = now
+
+            if self._tokens < weight:
+                wait = (weight - self._tokens) / self.rate
+                await asyncio.sleep(wait)
+                self._tokens = 0.0
+            else:
+                self._tokens -= weight
+
+
+class BinanceService:
+    """Async wrapper around Binance Futures API."""
+
+    def __init__(self, api_key: str | None = None, api_secret: str | None = None, testnet: bool | None = None):
+        self._api_key = api_key or settings.BINANCE_API_KEY
+        self._api_secret = api_secret or settings.BINANCE_API_SECRET
+        self._testnet = testnet if testnet is not None else settings.BINANCE_TESTNET
+        self._base_url = TESTNET_BASE if self._testnet else PROD_BASE
+        self._limiter = RateLimiter()
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=httpx.Timeout(10.0),
+                headers={"User-Agent": "FUBOT/1.0"},
+            )
+        return self._client
+
+    async def _signed_request(
+        self, method: str, path: str, params: dict | None = None, weight: int = 1
+    ) -> dict:
+        await self._limiter.acquire(weight)
+        client = self._get_client()
+        query = urlencode(params or {})
+        url = f"/{path}{'?' + query if query else ''}"
+        timestamp = int(time.time() * 1000)
+        query_string = f"timestamp={timestamp}"
+        if query:
+            query_string = f"{query}&timestamp={timestamp}"
+        signature = self._sign(query_string)
+
+        headers = {"X-MBX-APIKEY": self._api_key}
+        full_url = f"{self._base_url}/{path}?{query_string}&signature={signature}"
+
+        for attempt in range(3):
+            try:
+                resp = await client.request(method, full_url, headers=headers)
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 1))
+                    logger.warning(f"Rate limited, waiting {retry_after}s (attempt {attempt+1})")
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, dict) and "code" in data and "msg" in data:
+                    raise BinanceAPIError(data["code"], data["msg"])
+                return data
+            except (httpx.HTTPStatusError, BinanceAPIError):
+                raise
+            except Exception as e:
+                if attempt == 2:
+                    logger.error(f"Request failed after 3 attempts: {e}")
+                    raise
+                await asyncio.sleep(2 ** attempt)
+        return {}
+
+    async def _public_request(self, path: str, params: dict | None = None, weight: int = 1) -> dict:
+        await self._limiter.acquire(weight)
+        client = self._get_client()
+        query = urlencode(params or {})
+        full_url = f"{self._base_url}/{path}{'?' + query if query else ''}"
+        for attempt in range(3):
+            try:
+                resp = await client.get(full_url)
+                if resp.status_code == 429:
+                    await asyncio.sleep(1)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, dict) and "code" in data and "msg" in data:
+                    raise BinanceAPIError(data["code"], data["msg"])
+                return data
+            except (httpx.HTTPStatusError, BinanceAPIError):
+                raise
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+        return {}
+
+    def _sign(self, query_string: str) -> str:
+        import hmac
+        import hashlib
+        return hmac.new(
+            self._api_secret.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    # ---- Market Data (Public) ----
+
+    async def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> list[dict]:
+        """GET /fapi/v1/klines"""
+        data = await self._public_request("v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+        result = []
+        for k in data:
+            result.append({
+                "open_time": k[0],
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5]),
+                "close_time": k[6],
+                "quote_volume": float(k[7]),
+                "trades": int(k[8]),
+                "taker_buy_volume": float(k[9]),
+            })
+        return result
+
+    async def get_symbol_info(self, symbol: str) -> dict:
+        """GET /fapi/v2/exchangeInfo — filtered for one symbol."""
+        data = await self._public_request("v2/exchangeInfo")
+        for s in data.get("symbols", []):
+            if s["symbol"] == symbol:
+                filters = {f["filterType"]: f for f in s.get("filters", [])}
+                return {
+                    "symbol": symbol,
+                    "tick_size": float(filters.get("PRICE_FILTER", {}).get("stepSize", "0.01")),
+                    "step_size": float(filters.get("LOT_SIZE", {}).get("stepSize", "0.001")),
+                    "min_qty": float(filters.get("LOT_SIZE", {}).get("minQty", "0")),
+                    "max_qty": float(filters.get("LOT_SIZE", {}).get("maxQty", "999999")),
+                    "notional": float(filters.get("NOTIONAL", {}).get("minNotional", "10")),
+                }
+        return {}
+
+    async def get_order_book(self, symbol: str, limit: int = 20) -> dict:
+        """GET /fapi/v1/deepBook"""
+        data = await self._public_request("v1/deepBook", {"symbol": symbol, "limit": limit})
+        return {
+            "bids": [[float(p), float(q)] for p, q in data.get("bids", [])],
+            "asks": [[float(p), float(q)] for p, q in data.get("asks", [])],
+        }
+
+    async def get_ticker(self, symbol: str) -> dict:
+        """GET /fapi/v1/ticker/price"""
+        data = await self._public_request("v1/ticker/price", {"symbol": symbol})
+        return {"symbol": symbol, "price": float(data.get("price", 0))}
+
+    async def get_mark_price(self, symbol: str) -> dict:
+        """GET /fapi/v1/ticker/markPrice"""
+        data = await self._public_request("v1/ticker/markPrice", {"symbol": symbol})
+        return {
+            "markPrice": float(data.get("markPrice", 0)),
+            "indexPrice": float(data.get("indexPrice", 0)),
+        }
+
+    async def get_open_interest(self, symbol: str) -> float:
+        """GET /fapi/v1/openInterest"""
+        data = await self._public_request("v1/openInterest", {"symbol": symbol})
+        return float(data.get("openInterest", 0))
+
+    async def get_funding_rate(self, symbol: str) -> float:
+        """GET /fapi/v1/fundingRate"""
+        data = await self._public_request("v1/fundingRate", {"symbol": symbol})
+        return float(data.get("lastFundingRate", 0))
+
+    async def get_recent_trades(self, symbol: str, limit: int = 50) -> list[dict]:
+        """GET /fapi/v1/trades"""
+        data = await self._public_request("v1/trades", {"symbol": symbol, "limit": limit})
+        return [
+            {
+                "id": t.get("id"),
+                "price": float(t.get("price", 0)),
+                "qty": float(t.get("qty", 0)),
+                "quote_qty": float(t.get("quoteQty", 0)),
+                "time": t.get("time"),
+                "is_buyer_maker": t.get("isBuyerMaker"),
+            }
+            for t in data
+        ]
+
+    # ---- Account Data (Private) ----
+
+    async def get_account_balance(self) -> list[dict]:
+        """GET /fapi/v2/balance"""
+        data = await self._signed_request("GET", "v2/balance")
+        return [
+            {"asset": a["asset"], "availableBalance": float(a.get("availableBalance", 0)), "initialMargin": float(a.get("initialMargin", 0))}
+            for a in data
+        ]
+
+    async def get_position(self, symbol: str) -> dict:
+        """GET /fapi/v2/positionRisk — single symbol."""
+        data = await self._signed_request("GET", "v2/positionRisk", {"symbol": symbol})
+        for p in data:
+            if p["symbol"] == symbol and float(p.get("positionAmt", 0)) != 0:
+                return {
+                    "symbol": p["symbol"],
+                    "side": "LONG" if float(p["positionAmt"]) > 0 else "SHORT",
+                    "quantity": abs(float(p["positionAmt"])),
+                    "entryPrice": float(p["entryPrice"]),
+                    "unrealizedPnl": float(p.get("unRealizedProfit", 0)),
+                    "leverage": int(p.get("leverage", 1)),
+                    "margin": float(p.get("isolatedWallet", 0)),
+                }
+        return {}
+
+    async def get_all_positions(self) -> list[dict]:
+        """GET /fapi/v2/positionRisk — all positions."""
+        data = await self._signed_request("GET", "v2/positionRisk")
+        return [
+            {
+                "symbol": p["symbol"],
+                "side": "LONG" if float(p["positionAmt"]) > 0 else "SHORT",
+                "quantity": abs(float(p["positionAmt"])),
+                "entryPrice": float(p["entryPrice"]),
+                "unrealizedPnl": float(p.get("unRealizedProfit", 0)),
+                "leverage": int(p.get("leverage", 1)),
+            }
+            for p in data
+            if float(p.get("positionAmt", 0)) != 0
+        ]
+
+    async def set_leverage(self, symbol: str, leverage: int) -> dict:
+        """POST /fapi/v1/leverage"""
+        return await self._signed_request("POST", "v1/leverage", {"symbol": symbol, "leverage": leverage}, weight=1)
+
+    # ---- Order Placement ----
+
+    async def place_limit_order(self, symbol: str, side: str, price: float, quantity: float) -> dict:
+        """POST /fapi/v1/order — LIMIT"""
+        data = await self._signed_request(
+            "POST", "v1/order",
+            {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
+             "quantity": quantity, "price": price},
+            weight=2,
+        )
+        return {
+            "orderId": data.get("orderId"),
+            "symbol": symbol,
+            "side": side,
+            "price": price,
+            "quantity": quantity,
+            "status": data.get("status", "NEW"),
+        }
+
+    async def place_market_order(self, symbol: str, side: str, quantity: float) -> dict:
+        """POST /fapi/v1/order — MARKET"""
+        data = await self._signed_request(
+            "POST", "v1/order",
+            {"symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity},
+            weight=2,
+        )
+        return {
+            "orderId": data.get("orderId"),
+            "symbol": symbol,
+            "side": side,
+            "executedQty": data.get("executedQty", "0"),
+            "status": data.get("status", "FILLED"),
+        }
+
+    async def cancel_order(self, symbol: str, order_id: int) -> dict:
+        """DELETE /fapi/v1/order"""
+        return await self._signed_request(
+            "DELETE", "v1/order",
+            {"symbol": symbol, "orderId": order_id},
+        )
+
+    async def get_order(self, symbol: str, order_id: int) -> dict:
+        """GET /fapi/v1/order"""
+        return await self._signed_request(
+            "GET", "v1/order",
+            {"symbol": symbol, "orderId": order_id},
+        )
+
+    async def modify_position_stop(self, symbol: str, side: str, stop_price: float, quantity: float) -> dict:
+        """POST /fapi/v1/order — STOP_MARKET"""
+        # side here is the position side: LONG means we SELL to close, SHORT means we BUY to close
+        close_side = "SELL" if side == "LONG" else "BUY"
+        data = await self._signed_request(
+            "POST", "v1/order",
+            {"symbol": symbol, "side": close_side, "type": "STOP_MARKET",
+             "stopPrice": stop_price, "quantity": quantity},
+            weight=2,
+        )
+        return {
+            "orderId": data.get("orderId"),
+            "symbol": symbol,
+            "side": close_side,
+            "status": data.get("status", "NEW"),
+        }
+
+    async def get_open_orders(self, symbol: str) -> list[dict]:
+        """GET /fapi/v1/openOrders"""
+        data = await self._signed_request("GET", "v1/openOrders", {"symbol": symbol})
+        return [
+            {
+                "orderId": o.get("orderId"),
+                "symbol": o.get("symbol"),
+                "side": o.get("side"),
+                "type": o.get("type"),
+                "price": float(o.get("price", 0)),
+                "origQty": float(o.get("origQty", 0)),
+                "executedQty": float(o.get("executedQty", 0)),
+                "status": o.get("status"),
+                "time": o.get("time"),
+            }
+            for o in data
+        ]
+
+    async def close(self):
+        if self._client:
+            await self._client.aclose()
+            self._client = None
