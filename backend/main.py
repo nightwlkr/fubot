@@ -5,6 +5,10 @@ from contextlib import asynccontextmanager
 from backend.config import settings
 from backend.database import init_db, close_db
 
+# Import all routers
+from backend.routers import auth, bot, dashboard, trades, signals, positions, orders, settings, performance
+from backend.services import auth_service
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,11 +28,22 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[f"https://{settings.DOMAIN}", f"http://{settings.VPS_HOST}:3000"],
+    allow_origins=[f"https://{settings.DOMAIN}", f"http://{settings.VPS_HOST}:3000", "http://localhost:5173", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include all routers
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(bot.router, prefix="/api/bot", tags=["bot"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
+app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
+app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
+app.include_router(positions.router, prefix="/api/positions", tags=["positions"])
+app.include_router(orders.router, prefix="/api/orders", tags=["orders"])
+app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+app.include_router(performance.router, prefix="/api/performance", tags=["performance"])
 
 
 @app.get("/health")
