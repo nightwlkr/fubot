@@ -28,6 +28,8 @@ class BinanceWebSocketManager:
         self._max_reconnect_delay = 30.0
         self._running = False
 
+
+
     async def connect(self):
         """Establish WebSocket connection."""
         self._session = aiohttp.ClientSession()
@@ -35,6 +37,7 @@ class BinanceWebSocketManager:
         self._running = True
         self._listen_task = asyncio.create_task(self._listen())
         logger.info(f"WebSocket connected to {'testnet' if self._testnet else 'prod'}")
+
 
     async def subscribe(self, stream: str, callback: Callable):
         """Subscribe to a stream. stream format: '<symbol>@<stream_type>'."""
@@ -67,6 +70,9 @@ class BinanceWebSocketManager:
         if self._session:
             await self._session.close()
         logger.info("WebSocket closed")
+
+
+
 
     async def _listen(self):
         """Main listen loop with auto-reconnect."""
