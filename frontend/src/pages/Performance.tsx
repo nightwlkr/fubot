@@ -203,7 +203,7 @@ export default function Performance() {
 
   const statCards = [
     { label: 'Total Trades', value: stats?.total_trades?.toString() ?? '—' },
-    { label: 'Win Rate', value: stats ? `${(stats.win_rate * 100).toFixed(1)}%` : '—' },
+    { label: 'Win Rate', value: stats ? `${stats.win_rate.toFixed(1)}%` : '—' },  // backend sends percent
     { label: 'Avg R/Trade', value: stats ? `${stats.avg_r >= 0 ? '+' : ''}${stats.avg_r.toFixed(2)}R` : '—' },
     { label: 'Best Trade', value: stats ? `+${stats.best_trade.toFixed(2)}R` : '—', className: 'text-success' },
     { label: 'Worst Trade', value: stats ? `${stats.worst_trade.toFixed(2)}R` : '—', className: 'text-danger' },

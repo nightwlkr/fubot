@@ -139,7 +139,7 @@ export default function TradeLog() {
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
           {[
             { label: 'Total Trades', value: stats.total_trades.toString() },
-            { label: 'Win Rate', value: `${(stats.win_rate * 100).toFixed(1)}%` },
+            { label: 'Win Rate', value: `${stats.win_rate.toFixed(1)}%` },  // backend sends percent
             { label: 'Avg R', value: `${stats.avg_r >= 0 ? '+' : ''}${stats.avg_r.toFixed(2)}R` },
             { label: 'Best Trade', value: `+${stats.best_trade.toFixed(2)}R`, className: 'text-success' },
             { label: 'Worst Trade', value: `${stats.worst_trade.toFixed(2)}R`, className: 'text-danger' },
