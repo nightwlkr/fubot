@@ -151,3 +151,29 @@ def test_overview_payload_matches_frontend_contract(client, test_user):
     today = client.get("/api/dashboard/today").json()
     assert {"pnl_r", "pnl_usdt", "wins", "losses", "trades_count", "daily_limit_status"} <= set(today)
     assert today["daily_limit_status"]["limit_r"] == 3.0
+
+
+def test_overview_ok_after_scan_sets_last_scan(client, test_user, monkeypatch):
+    """Regression: engine.get_status() returns last_scan as an ISO string; the
+    overview endpoint used to call .isoformat() on it again and 500'd once the
+    first scan had run."""
+    _login(client, test_user)
+
+    async def empty_klines(self, symbol, interval="1h", limit=100):
+        return []
+
+    async def no_position(self, symbol):
+        return None
+
+    monkeypatch.setattr("backend.services.binance_service.BinanceService.get_klines", empty_klines)
+    monkeypatch.setattr("backend.services.binance_service.BinanceService.get_position", no_position)
+
+    assert client.post("/api/bot/start", json={"mode": "paper"}).status_code == 200
+    import time
+    time.sleep(0.3)  # let the first scan complete → last_scan set
+    res = client.get("/api/dashboard/overview")
+    assert res.status_code == 200, res.text
+    bot = res.json()["bot_status"]
+    assert bot["scan_count"] >= 1
+    assert bot["last_scan"] is not None  # an ISO string, not a crash
+    client.post("/api/bot/stop")

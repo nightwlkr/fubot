@@ -110,8 +110,8 @@ async def dashboard_overview(
             mode=engine_status["mode"],
             uptime_seconds=engine_status["uptime_seconds"],
             scan_count=engine_status["scan_count"],
-            last_scan=(engine_status["last_scan"].isoformat()
-                       if engine_status.get("last_scan") else None),
+            # engine.get_status() already returns last_scan as an ISO string
+            last_scan=engine_status.get("last_scan"),
         ),
         today_stats=TodayStats(
             realized_pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
