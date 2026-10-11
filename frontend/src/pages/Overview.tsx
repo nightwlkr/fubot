@@ -254,13 +254,18 @@ export default function Overview() {
       </Card>
 
       {/* EquityCurve */}
-      <Card>
+      <Card className="relative">
         <CardHeader>
           <CardTitle>Equity Curve (7D)</CardTitle>
         </CardHeader>
         <div ref={setChartContainer} className="w-full" />
         {equityCurve.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-muted text-sm">
+          // pointer-events-none: this is a passive placeholder. Without it the
+          // absolute overlay covered the whole content area (Card isn't
+          // positioned, so inset-0 escaped to the nearest ancestor) and
+          // intercepted every click on the page — nav links and the start
+          // button included.
+          <div className="absolute inset-0 flex items-center justify-center text-muted text-sm pointer-events-none">
             No equity data yet. The bot needs to run before data appears.
           </div>
         )}
