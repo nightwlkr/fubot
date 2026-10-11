@@ -12,7 +12,8 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 ## Local Contracts
 
 - Routers mount under `/api` with no version segment: `/api/auth`, `/api/bot`, `/api/dashboard`, `/api/trades`, `/api/signals`, `/api/positions`, `/api/orders`, `/api/settings`, `/api/performance`. `/health` and `/` are mounted at root.
-- Auth: one HS256 JWT (24h expiry) issued as the `fubot_token` cookie (`httpOnly`, `secure`, `samesite=lax`). No refresh tokens. Login is rate limited to 5 failed attempts per IP per 15 minutes.
+- Auth: one HS256 JWT (24h expiry) issued as the `fubot_token` cookie (`httpOnly`, `secure`, `samesite=lax`). No refresh tokens. Login is rate limited to 5 failed attempts per IP per 15 minutes. All authenticated endpoints accept the JWT via the httpOnly cookie *or* `Authorization: Bearer <token>` header (header fallback added for localStorage-durable token flow).
+
 - API key/secret encrypted at rest using `backend/encryption.py`
 - Binance Futures USDS-M only — no spot trading
 - Database: PostgreSQL via SQLAlchemy 2.0 async

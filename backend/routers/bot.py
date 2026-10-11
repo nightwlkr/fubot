@@ -21,11 +21,11 @@ def set_bot_engine(engine):
 async def get_current_user_from_cookie(request: Request, db: AsyncSession):
     """Extract user from JWT cookie. Replicates auth pattern."""
     from backend.services import auth_service
-    token = request.cookies.get("fubot_token")
+    token = auth_service.get_token_from_request(request)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     try:
-        user = await auth_service.get_current_user_from_cookie(token, db)
+        user = await auth_service.get_current_user_from_token(token, db)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
     return user

@@ -27,11 +27,11 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 async def get_current_user_from_cookie(request: Request, db: AsyncSession):
     from backend.services import auth_service
-    token = request.cookies.get("fubot_token")
+    token = auth_service.get_token_from_request(request)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        return await auth_service.get_current_user_from_cookie(token, db)
+        return await auth_service.get_current_user_from_token(token, db)
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 

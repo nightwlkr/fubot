@@ -88,10 +88,27 @@ class RateLimitExceeded(Exception):
     pass
 
 
-async def get_current_user_from_cookie(
+def get_token_from_request(request) -> str | None:
+    """Extract JWT token from cookie or Authorization Bearer header."""
+    token = request.cookies.get("fubot_token")
+    if not token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+    return token
+
+
+async def get_current_user_from_request(request, db: AsyncSession) -> User:
+    token = get_token_from_request(request)
+    if not token:
+        raise ValueError("Missing token")
+    return await get_current_user_from_token(token, db)
+
+
+async def get_current_user_from_token(
     token: str, db: AsyncSession
 ) -> User:
-    """Decode JWT from cookie and return User. Raises 401 if invalid."""
+    """Decode JWT and return User. Raises ValueError if invalid."""
     payload = decode_access_token(token)
     if payload is None:
         raise ValueError("Invalid token")
@@ -101,3 +118,10 @@ async def get_current_user_from_cookie(
     if user is None:
         raise ValueError("User not found")
     return user
+
+
+async def get_current_user_from_cookie(
+    token: str, db: AsyncSession
+) -> User:
+    """Decode JWT from cookie and return User. Raises 401 if invalid."""
+    return await get_current_user_from_token(token, db)
