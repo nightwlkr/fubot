@@ -134,10 +134,9 @@ async def today_stats(
     result = await db.execute(select(DailySummary).where(DailySummary.date == today))
     daily = result.scalar_one_or_none()
 
-    # Calculate daily limit status
-    limit_r = abs(float(db.bind.params.get("daily_loss_limit_r", -3.0))) if db.bind else 3.0
-    # Read from settings table
+    # Calculate daily limit status — read from settings table
     from backend.models.setting import Setting
+    limit_r = 3.0
     settings_result = await db.execute(select(Setting).where(Setting.key == "daily_loss_limit_r"))
     setting = settings_result.scalar_one_or_none()
     if setting and isinstance(setting.value, dict):

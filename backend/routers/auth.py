@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.schemas.auth import LoginRequest, LoginResponse
+from backend.schemas.auth import LoginRequest, LoginResponse, UserResponse
 from backend.services import auth_service
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ async def login(
     )
     return LoginResponse(
         token=token,
-        user=auth_service.UserResponse(id=user.id, username=user.username, role=user.role),
+        user=UserResponse(id=user.id, username=user.username, role=user.role),
     )
 
 
@@ -60,4 +60,4 @@ async def get_me(
         user = await auth_service.get_current_user_from_cookie(token, db)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    return auth_service.UserResponse(id=user.id, username=user.username, role=user.role)
+    return UserResponse(id=user.id, username=user.username, role=user.role)

@@ -24,6 +24,10 @@ def calculate_rsi(closes: list[float], period: int = 14) -> Optional[float]:
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
     if avg_loss == 0:
+        # Zero losses AND zero gains (flat series) → RS is 0/0, undefined.
+        # Convention: RSI 50 (neutral). Only pure gains yield 100.
+        if avg_gain == 0:
+            return 50.0
         return 100.0
 
     rs = avg_gain / avg_loss

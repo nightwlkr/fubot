@@ -35,15 +35,16 @@ app.add_middleware(
 )
 
 # Include all routers
-app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-app.include_router(bot.router, prefix="/api/bot", tags=["bot"])
-app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
-app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
-app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
-app.include_router(positions.router, prefix="/api/positions", tags=["positions"])
-app.include_router(orders.router, prefix="/api/orders", tags=["orders"])
-app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
-app.include_router(performance.router, prefix="/api/performance", tags=["performance"])
+# Routers carry their own sub-prefix (/auth, /bot, ...) — main adds /api only.
+app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(bot.router, prefix="/api", tags=["bot"])
+app.include_router(dashboard.router, prefix="/api", tags=["dashboard"])
+app.include_router(trades.router, prefix="/api", tags=["trades"])
+app.include_router(signals.router, prefix="/api", tags=["signals"])
+app.include_router(positions.router, prefix="/api", tags=["positions"])
+app.include_router(orders.router, prefix="/api", tags=["orders"])
+app.include_router(settings_router.router, prefix="/api", tags=["settings"])
+app.include_router(performance.router, prefix="/api", tags=["performance"])
 
 
 @app.get("/health")

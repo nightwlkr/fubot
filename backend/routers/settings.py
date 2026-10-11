@@ -1,5 +1,6 @@
 """Settings router — trading params, symbol config, API key."""
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -183,9 +184,15 @@ async def get_api_key_status(
     if not account:
         return APIKeyStatusResponse(has_key=False)
 
+    try:
+        masked = mask_key(decrypt(account.api_key_encrypted))
+    except Exception:
+        logger.exception("Failed to decrypt stored API key")
+        masked = None
+
     return APIKeyStatusResponse(
         has_key=True,
-        masked_key=mask_key("placeholder"),  # In real impl, decrypt and mask
+        masked_key=masked,
     )
 
 
@@ -212,7 +219,7 @@ async def save_api_key(
     if account:
         account.api_key_encrypted = encrypted_key
         account.api_secret_encrypted = encrypted_secret
-        account.updated_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+        account.updated_at = datetime.now(timezone.utc)
     else:
         account = Account(
             api_key_encrypted=encrypted_key,

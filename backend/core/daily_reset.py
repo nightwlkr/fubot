@@ -1,10 +1,13 @@
 """Daily reset service — tracks cumulative daily P&L, enforces -3R hard stop."""
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.daily_summary import DailySummary
+
+logger = logging.getLogger(__name__)
 
 
 class DailyResetService:

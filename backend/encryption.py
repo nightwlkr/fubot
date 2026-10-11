@@ -1,4 +1,6 @@
 import base64
+import os
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from backend.config import settings
 
@@ -20,7 +22,7 @@ def encrypt(plaintext: str) -> str:
     """
     key = _get_key()
     aesgcm = AESGCM(key)
-    nonce = AESGCM.generate_nonce(12)
+    nonce = os.urandom(12)
     ciphertext = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
     return base64.b64encode(nonce + ciphertext).decode("utf-8")
 
