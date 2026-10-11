@@ -78,16 +78,10 @@ export default function App() {
     checkAuth()
   }, [checkAuth])
 
-  if (isRestoring) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center text-muted">
-        Restoring session…
-      </div>
-    )
-  }
-
   // Wire WebSocket messages: server alerts surface as toasts; data events
   // refresh the dashboard store (throttled so bursts don't stampede the API).
+  // NOTE: both effects must stay ABOVE any conditional return — a hook after
+  // an early return changes the hook count between renders (React #310).
   useEffect(() => {
     let lastRefresh = 0
     const off = wsManager.onMessage((msg) => {
@@ -107,6 +101,14 @@ export default function App() {
     })
     return () => { off() }
   }, [])
+
+  if (isRestoring) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center text-muted">
+        Restoring session…
+      </div>
+    )
+  }
 
   return (
     <BrowserRouter>
