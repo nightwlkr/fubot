@@ -67,12 +67,12 @@ export const useAuthStore = create<AuthState>((set) => ({
     // to authenticate. This covers browsers that hold the cookie but whose
     // localStorage was cleared or predates the durable-token fix.
     try {
-      const res = await api.get<{ user: User; token?: string }>(ENDPOINTS.me)
-      // /me echoes the token it authenticated with. If we came in with only
-      // the httpOnly cookie (localStorage cleared / pre-durable-token
-      // browser), seed localStorage so the Bearer header and WS auth message
-      // have a token from here on.
-      const { user, token: serverToken } = res.data
+      // /me returns a FLAT user object ({ id, username, role, token }) — NOT
+      // nested under a `user` key like the login response does. Reading
+      // res.data.user here was undefined, so `user` was never restored and
+      // every refresh bounced to /login even though auth succeeded.
+      const res = await api.get<User & { token?: string }>(ENDPOINTS.me)
+      const { token: serverToken, ...user } = res.data
       const effective = token ?? serverToken ?? null
       if (effective) setToken(effective)
       set({ user, token: effective, isRestoring: false })
