@@ -10,6 +10,26 @@ from backend.database import get_db
 from backend.models.position import Position
 from backend.schemas.position import PositionResponse, PositionListResponse, PositionUpdateRequest
 
+async def _mark_prices(symbols) -> dict:
+    """Live mark prices for the given symbols (public endpoint — no API keys)."""
+    from backend.services.binance_service import BinanceService
+    prices: dict = {}
+    binance = BinanceService()
+    for s in set(symbols):
+        try:
+            prices[s] = float((await binance.get_ticker(s))["price"])
+        except Exception:
+            prices[s] = 0.0
+    return prices
+
+
+def _unrealized_pnl(side: str, entry: float, mark: float, quantity: float) -> float:
+    if mark <= 0:
+        return 0.0
+    direction = 1.0 if side == "LONG" else -1.0
+    return (mark - entry) * quantity * direction
+
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/positions", tags=["positions"])
 
@@ -25,7 +45,7 @@ async def get_current_user_from_cookie(request: Request, db: AsyncSession):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
-def _format_position(pos: Position) -> PositionResponse:
+def _format_position(pos: Position, mark_price: float = 0.0) -> PositionResponse:
     return PositionResponse(
         id=pos.id,
         signal_id=pos.signal_id,
@@ -39,6 +59,9 @@ def _format_position(pos: Position) -> PositionResponse:
         status=pos.status,
         opened_at=pos.opened_at,
         closed_at=pos.closed_at,
+        mark_price=mark_price,
+        unrealized_pnl=_unrealized_pnl(pos.side, float(pos.entry_price), mark_price,
+                                       float(pos.quantity)),
     )
 
 
@@ -62,9 +85,10 @@ async def list_positions(
 
     result = await db.execute(query)
     positions = result.scalars().all()
+    prices = await _mark_prices([p.symbol for p in positions]) if positions else {}
 
     return PositionListResponse(
-        positions=[_format_position(p) for p in positions]
+        positions=[_format_position(p, prices.get(p.symbol, 0.0)) for p in positions]
     )
 
 

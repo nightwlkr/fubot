@@ -6,8 +6,12 @@ for every resource endpoint. Requires the local PostgreSQL `fubot` database
 """
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from tests.backend.conftest import TEST_PASSWORD  # shared constant
+from backend.config import settings
+from backend.models.position import Position as PositionModel
+from tests.backend.conftest import TEST_PASSWORD, run_async  # shared constants
 
 def _login(client, user):
     res = client.post("/api/auth/login", json={"username": user.username, "password": TEST_PASSWORD})
@@ -177,3 +181,57 @@ def test_overview_ok_after_scan_sets_last_scan(client, test_user, monkeypatch):
     assert bot["scan_count"] >= 1
     assert bot["last_scan"] is not None  # an ISO string, not a crash
     client.post("/api/bot/stop")
+
+
+def test_position_payload_has_live_mark_price(client, test_user):
+    """Regression: PositionsTable renders pos.mark_price/unrealized_pnl via .toFixed —
+    the payload used to omit them, crashing the Overview the moment a paper
+    position existed."""
+    import asyncio as _asyncio
+    from datetime import datetime, timezone as _tz
+    from sqlalchemy import select as _select
+
+    async def _make_position():
+        engine = create_async_engine(settings.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with Session() as db:
+                db.add(PositionModel(
+                    symbol="BTCUSDT", side="LONG", entry_price=100.0, quantity=1.0,
+                    leverage=10, stop_loss=95.0, take_profit=110.0, status="OPEN"))
+                await db.commit()
+                row = (await db.execute(select(PositionModel).where(
+                    PositionModel.symbol == "BTCUSDT",
+                    PositionModel.status == "OPEN"))).scalars().first()
+                return row.id if row else None
+        finally:
+            await engine.dispose()
+
+    async def _remove(pos_id):
+        engine = create_async_engine(settings.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with Session() as db:
+                row = await db.get(PositionModel, pos_id)
+                if row:
+                    await db.delete(row)
+                    await db.commit()
+        finally:
+            await engine.dispose()
+
+    _login(client, test_user)
+    pos_id = run_async(_make_position())
+    try:
+        res = client.get("/api/positions/")
+        assert res.status_code == 200
+        found = [p for p in res.json()["positions"] if p["id"] == pos_id]
+        assert found, "the open position must be returned"
+        p = found[0]
+        assert isinstance(p["mark_price"], (int, float)) and p["mark_price"] > 0
+        # BTCUSDT LONG: unrealized pnl = (mark - 100) * 1 — signed, finite
+        assert isinstance(p["unrealized_pnl"], (int, float))
+        res2 = client.get("/api/dashboard/overview")
+        overview_positions = [q for q in res2.json()["open_positions"] if q["id"] == pos_id]
+        assert overview_positions and "mark_price" in overview_positions[0]
+    finally:
+        run_async(_remove(pos_id))

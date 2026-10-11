@@ -66,6 +66,8 @@ class PositionItem(BaseModel):
     take_profit: Optional[float] = None
     status: str
     opened_at: datetime
+    mark_price: float = 0.0        # live mark price (frontend PositionsTable)
+    unrealized_pnl: float = 0.0    # USDT, signed by side
 
     class Config:
         from_attributes = True

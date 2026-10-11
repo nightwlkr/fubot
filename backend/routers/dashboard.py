@@ -21,6 +21,26 @@ from backend.schemas.dashboard import (
     DashboardOverview,
 )
 
+async def _mark_prices(symbols) -> dict:
+    """Live mark prices for the given symbols (public endpoint — no API keys)."""
+    from backend.services.binance_service import BinanceService
+    prices: dict = {}
+    binance = BinanceService()
+    for s in set(symbols):
+        try:
+            prices[s] = float((await binance.get_ticker(s))["price"])
+        except Exception:
+            prices[s] = 0.0
+    return prices
+
+
+def _unrealized_pnl(side: str, entry: float, mark: float, quantity: float) -> float:
+    if mark <= 0:
+        return 0.0
+    direction = 1.0 if side == "LONG" else -1.0
+    return (mark - entry) * quantity * direction
+
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -44,7 +64,7 @@ def _format_bot_status(is_running: bool, mode: str, uptime: float, scan_count: i
     )
 
 
-def _format_position(pos: Position) -> PositionItem:
+def _format_position(pos: Position, mark_price: float = 0.0) -> PositionItem:
     return PositionItem(
         id=pos.id,
         symbol=pos.symbol,
@@ -56,6 +76,9 @@ def _format_position(pos: Position) -> PositionItem:
         take_profit=float(pos.take_profit) if pos.take_profit is not None else None,
         status=pos.status,
         opened_at=pos.opened_at,
+        mark_price=mark_price,
+        unrealized_pnl=_unrealized_pnl(pos.side, float(pos.entry_price), mark_price,
+                                       float(pos.quantity)),
     )
 
 
@@ -75,9 +98,10 @@ async def dashboard_overview(
         engine_status = {"status": "stopped", "mode": "paper", "uptime_seconds": 0.0,
                          "scan_count": 0, "last_scan": None}
 
-    # Open positions
+    # Open positions (+ live mark prices for the table)
     result = await db.execute(select(Position).where(Position.status == "OPEN"))
     positions = result.scalars().all()
+    prices = await _mark_prices([p.symbol for p in positions]) if positions else {}
 
     # Equity curve (last 30 days)
     cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(days=30)
@@ -124,7 +148,7 @@ async def dashboard_overview(
             losses=daily.losses if daily else 0,
             trades_count=daily.total_trades if daily else 0,
         ),
-        open_positions=[_format_position(p) for p in positions],
+        open_positions=[_format_position(p, prices.get(p.symbol, 0.0)) for p in positions],
         equity_curve=[
             EquityPoint(date=r.recorded_at.isoformat(), balance_usdt=float(r.balance_usdt))
             for r in equity_rows

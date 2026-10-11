@@ -17,6 +17,8 @@ class PositionResponse(BaseModel):
     status: str
     opened_at: datetime
     closed_at: Optional[datetime] = None
+    mark_price: float = 0.0        # live mark price
+    unrealized_pnl: float = 0.0    # USDT, signed by side
 
     class Config:
         from_attributes = True
