@@ -1,6 +1,6 @@
 import axios from 'axios'
-import Cookies from 'js-cookie'
 import { API_BASE, ENDPOINTS } from './endpoints'
+import { getToken, clearToken } from './token'
 
 export const apiClient = axios.create({
   baseURL: API_BASE,
@@ -10,7 +10,7 @@ export const apiClient = axios.create({
 
 // Attach JWT token to every request
 apiClient.interceptors.request.use((config) => {
-  const token = Cookies.get('fubot_token')
+  const token = getToken()
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -22,7 +22,7 @@ apiClient.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
-      Cookies.remove('fubot_token')
+      clearToken()
       window.location.href = '/login'
     } else if (err.response?.status === 429) {
       console.warn('Rate limited')

@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { api } from '../api/client'
 import { ENDPOINTS } from '../api/endpoints'
-import Cookies from 'js-cookie'
 import { wsManager } from '../api/websocket'
+import { getToken, setToken, clearToken } from '../api/token'
 
 export interface User {
   id: number
@@ -24,7 +24,7 @@ interface AuthState {
 
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
-  token: Cookies.get('fubot_token') || null,
+  token: getToken(),
   isLoading: false,
   isRestoring: true,  // checked in checkAuth() on app load
   error: null,
@@ -37,7 +37,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         { username, password }
       )
       const { token, user } = res.data
-      Cookies.set('fubot_token', token, { expires: 7 })
+      setToken(token)
       wsManager.connect()
       set({ user, token, isLoading: false })
     } catch (err: any) {
@@ -55,13 +55,13 @@ export const useAuthStore = create<AuthState>((set) => ({
     } catch {
       // Ignore logout errors
     }
-    Cookies.remove('fubot_token')
+    clearToken()
     wsManager.disconnect()
     set({ user: null, token: null })
   },
 
   checkAuth: async () => {
-    const token = Cookies.get('fubot_token')
+    const token = getToken()
     if (!token) {
       set({ user: null, token: null, isRestoring: false })
       return
@@ -71,7 +71,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ user: res.data.user, token, isRestoring: false })
       wsManager.connect()
     } catch {
-      Cookies.remove('fubot_token')
+      clearToken()
       set({ user: null, token: null, isRestoring: false })
     }
   },

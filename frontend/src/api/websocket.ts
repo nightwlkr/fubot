@@ -1,5 +1,5 @@
 import { API_BASE } from './endpoints'
-import Cookies from 'js-cookie'
+import { getToken } from './token'
 
 export type WSType =
   | 'auth'
@@ -30,7 +30,7 @@ class WebSocketManager {
 
     this.ws.onopen = () => {
       this.reconnectDelay = 2000
-      const token = Cookies.get('fubot_token')
+      const token = getToken()
       if (token) {
         this.send({ type: 'auth', data: { token } })
       }
