@@ -149,7 +149,7 @@ class BinanceService:
 
     async def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> list[dict]:
         """GET /fapi/v1/klines"""
-        data = await self._public_request("v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+        data = await self._public_request("fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
         result = []
         for k in data:
             result.append({
@@ -168,7 +168,7 @@ class BinanceService:
 
     async def get_symbol_info(self, symbol: str) -> dict:
         """GET /fapi/v2/exchangeInfo — filtered for one symbol."""
-        data = await self._public_request("v2/exchangeInfo")
+        data = await self._public_request("fapi/v2/exchangeInfo")
         for s in data.get("symbols", []):
             if s["symbol"] == symbol:
                 filters = {f["filterType"]: f for f in s.get("filters", [])}
@@ -183,8 +183,8 @@ class BinanceService:
         return {}
 
     async def get_order_book(self, symbol: str, limit: int = 20) -> dict:
-        """GET /fapi/v1/deepBook"""
-        data = await self._public_request("v1/deepBook", {"symbol": symbol, "limit": limit})
+        """GET /fapi/v1/depth"""
+        data = await self._public_request("fapi/v1/depth", {"symbol": symbol, "limit": limit})
         return {
             "bids": [[float(p), float(q)] for p, q in data.get("bids", [])],
             "asks": [[float(p), float(q)] for p, q in data.get("asks", [])],
@@ -192,12 +192,12 @@ class BinanceService:
 
     async def get_ticker(self, symbol: str) -> dict:
         """GET /fapi/v1/ticker/price"""
-        data = await self._public_request("v1/ticker/price", {"symbol": symbol})
+        data = await self._public_request("fapi/v1/ticker/price", {"symbol": symbol})
         return {"symbol": symbol, "price": float(data.get("price", 0))}
 
     async def get_mark_price(self, symbol: str) -> dict:
         """GET /fapi/v1/ticker/markPrice"""
-        data = await self._public_request("v1/ticker/markPrice", {"symbol": symbol})
+        data = await self._public_request("fapi/v1/ticker/markPrice", {"symbol": symbol})
         return {
             "markPrice": float(data.get("markPrice", 0)),
             "indexPrice": float(data.get("indexPrice", 0)),
@@ -205,17 +205,17 @@ class BinanceService:
 
     async def get_open_interest(self, symbol: str) -> float:
         """GET /fapi/v1/openInterest"""
-        data = await self._public_request("v1/openInterest", {"symbol": symbol})
+        data = await self._public_request("fapi/v1/openInterest", {"symbol": symbol})
         return float(data.get("openInterest", 0))
 
     async def get_funding_rate(self, symbol: str) -> float:
         """GET /fapi/v1/fundingRate"""
-        data = await self._public_request("v1/fundingRate", {"symbol": symbol})
+        data = await self._public_request("fapi/v1/fundingRate", {"symbol": symbol})
         return float(data.get("lastFundingRate", 0))
 
     async def get_recent_trades(self, symbol: str, limit: int = 50) -> list[dict]:
         """GET /fapi/v1/trades"""
-        data = await self._public_request("v1/trades", {"symbol": symbol, "limit": limit})
+        data = await self._public_request("fapi/v1/trades", {"symbol": symbol, "limit": limit})
         return [
             {
                 "id": t.get("id"),
@@ -232,7 +232,7 @@ class BinanceService:
 
     async def get_account_balance(self) -> list[dict]:
         """GET /fapi/v2/balance"""
-        data = await self._signed_request("GET", "v2/balance")
+        data = await self._signed_request("GET", "fapi/v2/balance")
         return [
             {"asset": a["asset"], "availableBalance": float(a.get("availableBalance", 0)), "initialMargin": float(a.get("initialMargin", 0))}
             for a in data
@@ -240,7 +240,7 @@ class BinanceService:
 
     async def get_position(self, symbol: str) -> dict:
         """GET /fapi/v2/positionRisk — single symbol."""
-        data = await self._signed_request("GET", "v2/positionRisk", {"symbol": symbol})
+        data = await self._signed_request("GET", "fapi/v2/positionRisk", {"symbol": symbol})
         for p in data:
             if p["symbol"] == symbol and float(p.get("positionAmt", 0)) != 0:
                 return {
@@ -256,7 +256,7 @@ class BinanceService:
 
     async def get_all_positions(self) -> list[dict]:
         """GET /fapi/v2/positionRisk — all positions."""
-        data = await self._signed_request("GET", "v2/positionRisk")
+        data = await self._signed_request("GET", "fapi/v2/positionRisk")
         return [
             {
                 "symbol": p["symbol"],
@@ -272,14 +272,14 @@ class BinanceService:
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict:
         """POST /fapi/v1/leverage"""
-        return await self._signed_request("POST", "v1/leverage", {"symbol": symbol, "leverage": leverage}, weight=1)
+        return await self._signed_request("POST", "fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, weight=1)
 
     # ---- Order Placement ----
 
     async def place_limit_order(self, symbol: str, side: str, price: float, quantity: float) -> dict:
         """POST /fapi/v1/order — LIMIT"""
         data = await self._signed_request(
-            "POST", "v1/order",
+            "POST", "fapi/v1/order",
             {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
              "quantity": quantity, "price": price},
             weight=2,
@@ -296,7 +296,7 @@ class BinanceService:
     async def place_market_order(self, symbol: str, side: str, quantity: float) -> dict:
         """POST /fapi/v1/order — MARKET"""
         data = await self._signed_request(
-            "POST", "v1/order",
+            "POST", "fapi/v1/order",
             {"symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity},
             weight=2,
         )
@@ -311,25 +311,41 @@ class BinanceService:
     async def cancel_order(self, symbol: str, order_id: int) -> dict:
         """DELETE /fapi/v1/order"""
         return await self._signed_request(
-            "DELETE", "v1/order",
+            "DELETE", "fapi/v1/order",
             {"symbol": symbol, "orderId": order_id},
         )
 
     async def get_order(self, symbol: str, order_id: int) -> dict:
         """GET /fapi/v1/order"""
         return await self._signed_request(
-            "GET", "v1/order",
+            "GET", "fapi/v1/order",
             {"symbol": symbol, "orderId": order_id},
         )
 
     async def modify_position_stop(self, symbol: str, side: str, stop_price: float, quantity: float) -> dict:
-        """POST /fapi/v1/order — STOP_MARKET"""
+        """POST /fapi/v1/order — STOP_MARKET (reduce-only)"""
         # side here is the position side: LONG means we SELL to close, SHORT means we BUY to close
         close_side = "SELL" if side == "LONG" else "BUY"
         data = await self._signed_request(
-            "POST", "v1/order",
+            "POST", "fapi/v1/order",
             {"symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-             "stopPrice": stop_price, "quantity": quantity},
+             "stopPrice": stop_price, "quantity": quantity, "reduceOnly": "true"},
+            weight=2,
+        )
+        return {
+            "orderId": data.get("orderId"),
+            "symbol": symbol,
+            "side": close_side,
+            "status": data.get("status", "NEW"),
+        }
+
+    async def place_take_profit_order(self, symbol: str, side: str, tp_price: float, quantity: float) -> dict:
+        """POST /fapi/v1/order — TAKE_PROFIT_MARKET (reduce-only)"""
+        close_side = "SELL" if side == "LONG" else "BUY"
+        data = await self._signed_request(
+            "POST", "fapi/v1/order",
+            {"symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
+             "stopPrice": tp_price, "quantity": quantity, "reduceOnly": "true"},
             weight=2,
         )
         return {
@@ -341,7 +357,7 @@ class BinanceService:
 
     async def get_open_orders(self, symbol: str) -> list[dict]:
         """GET /fapi/v1/openOrders"""
-        data = await self._signed_request("GET", "v1/openOrders", {"symbol": symbol})
+        data = await self._signed_request("GET", "fapi/v1/openOrders", {"symbol": symbol})
         return [
             {
                 "orderId": o.get("orderId"),
