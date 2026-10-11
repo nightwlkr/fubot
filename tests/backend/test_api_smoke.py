@@ -23,8 +23,23 @@ TEST_PASSWORD = "test-pass-1234"
 
 def _run(coro):
     """Run an async DB operation on its own engine so the pool never crosses
-    event loops with the TestClient portal (which owns backend.database.engine)."""
-    return asyncio.run(coro)
+    event loops with the TestClient portal (which owns backend.database.engine).
+
+    asyncio.run() leaves set_event_loop(None) behind, which breaks the next
+    pytest-asyncio test depending on collection order — restore it instead.
+    """
+    policy = asyncio.get_event_loop_policy()
+    try:
+        prev = policy.get_event_loop()
+    except RuntimeError:
+        prev = None
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        asyncio.set_event_loop(prev)
+        loop.close()
 
 
 async def _create_user():
@@ -57,10 +72,21 @@ async def _delete_user(user_id):
         await engine.dispose()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def client():
+    """Fresh app lifespan per test.
+
+    Function scope keeps the bot engine's long-lived DB session from spanning
+    tests: with module scope, pytest-randomly can interleave other modules'
+    tests between smoke tests, and a session held across multiple TestClient
+    portal lifecycles ends up with invalidated pooled connections
+    (PendingRollbackError). Each test boots its own lifespan instead.
+    """
+    from backend.database import engine as shared_engine
+    _run(shared_engine.dispose())  # drop pooled connections from other loops
     with TestClient(app) as c:
         yield c
+    _run(shared_engine.dispose())
 
 
 @pytest.fixture(scope="module")
@@ -155,14 +181,40 @@ def test_settings_trading_roundtrip(client, test_user):
     assert res.json()["max_positions"] == original["max_positions"]
 
 
-def test_bot_status_without_engine(client, test_user):
+def test_bot_engine_wired(client, test_user, monkeypatch):
+    """PHASE4_STEP1: main.py lifespan builds the BotEngine and registers it."""
     _login(client, test_user)
+
     res = client.get("/api/bot/status")
     assert res.status_code == 200
-    assert res.json()["status"] == "stopped"
+    body = res.json()
+    assert body["status"] == "stopped"
+    assert body["mode"] == "paper"
+    assert body["daily_stats"] is not None  # engine.get_status() served real data
+
+    # Keep the scan loop off the network: BinanceService returns empty candles
+    async def empty_klines(self, symbol, interval="1h", limit=100):
+        return []
+
+    async def no_position(self, symbol):
+        return None
+
+    monkeypatch.setattr("backend.services.binance_service.BinanceService.get_klines", empty_klines)
+    monkeypatch.setattr("backend.services.binance_service.BinanceService.get_position", no_position)
 
     res = client.post("/api/bot/start", json={"mode": "paper"})
-    assert res.status_code == 503  # engine not wired into main.py yet
+    assert res.status_code == 200
+    assert res.json()["status"] == "running"
+
+    res = client.get("/api/bot/status")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "running"
+    assert body["scan_count"] >= 1  # the first scan runs immediately
+
+    res = client.post("/api/bot/stop")
+    assert res.status_code == 200
+    assert client.get("/api/bot/status").json()["status"] == "stopped"
 
 
 def test_missing_resources_404(client, test_user):

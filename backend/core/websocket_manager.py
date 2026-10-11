@@ -19,7 +19,7 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
 
     async def connect(self, websocket: WebSocket, user_id: int):
-        await websocket.accept()
+        """Register an already-accepted socket (the endpoint accepts before auth)."""
         async with self._lock:
             self.active_connections[user_id] = websocket
         logger.info(f"WebSocket: user {user_id} connected. Total: {len(self.active_connections)}")
@@ -62,7 +62,11 @@ class WebSocketRouter:
     """FastAPI WebSocket endpoint handler — handles auth and routes messages."""
 
     async def websocket_endpoint(self, websocket: WebSocket):
-        """WS /ws — authenticate, manage connection."""
+        """WS /ws — authenticate, manage connection.
+
+        The socket is accepted here (ASGI requires accept before receive), so
+        ConnectionManager.connect() must NOT accept again.
+        """
         await websocket.accept()
 
         # Wait for auth message (max 10 seconds)
@@ -91,11 +95,15 @@ class WebSocketRouter:
         await ws_manager.connect(websocket, user_id)
 
         try:
-            # Keep-alive loop
+            await websocket.send_json({"type": "auth_ok", "data": {"user_id": user_id}})
+            # Hold the socket open; observe disconnects from the receive side
+            # (a sleep loop never sees the close frame). Client messages other
+            # than the initial auth are ignored.
             while True:
-                await asyncio.sleep(1)
+                await websocket.receive_text()
         except WebSocketDisconnect:
-            await ws_manager.disconnect(user_id)
+            pass
         except Exception as e:
             logger.warning(f"WebSocket error for user {user_id}: {e}")
+        finally:
             await ws_manager.disconnect(user_id)

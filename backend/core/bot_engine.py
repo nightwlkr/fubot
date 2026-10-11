@@ -1,11 +1,16 @@
-"""Bot engine — main async trading loop orchestrator."""
+"""Bot engine — main async trading loop orchestrator.
+
+DB access: the engine shares a session FACTORY (AsyncSessionLocal), never a
+long-lived session — AsyncSession is not task-safe, and the scan loop runs
+concurrently with request handlers on the same event loop. Every DB operation
+opens a short-lived session.
+"""
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.symbol import Symbol
 from backend.models.equity_log import EquityLog
@@ -25,7 +30,6 @@ class BotEngine:
 
     def __init__(
         self,
-        db: AsyncSession,
         settings: dict,
         binance: BinanceService,
         signal_service: SignalService,
@@ -34,8 +38,9 @@ class BotEngine:
         order_service: OrderService,
         alert_service: AlertService,
         daily_reset: DailyResetService,
+        session_factory: Optional[Callable] = None,
     ):
-        self.db = db
+        self.session_factory = session_factory
         self.settings = settings
         self.binance = binance
         self.signals = signal_service
@@ -132,10 +137,8 @@ class BotEngine:
                 # Check daily loss limit
                 if not await self.daily_reset.check_and_enforce_limit():
                     logger.info(f"Daily limit reached, skipping {symbol}")
-                    await self.alerts.daily_limit_hit(
-                        self.daily_reset.get_daily_stats()["used_r"],
-                        self.daily_reset.get_daily_stats()["limit_r"],
-                    )
+                    stats = await self.daily_reset.get_daily_stats()
+                    await self.alerts.daily_limit_hit(stats["used_r"], stats["limit_r"])
                     break
 
                 # Scan for signals
@@ -162,10 +165,13 @@ class BotEngine:
 
     async def _get_enabled_symbols(self) -> list[str]:
         """Fetch list of enabled symbols from DB."""
-        result = await self.db.execute(
-            select(Symbol.symbol).where(Symbol.enabled == True)
-        )
-        return [row[0] for row in result.fetchall()]
+        if self.session_factory is None:
+            return []
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(Symbol.symbol).where(Symbol.enabled == True)
+            )
+            return [row[0] for row in result.fetchall()]
 
     async def _maybe_snapshot_equity(self):
         """Log equity snapshot."""
@@ -177,18 +183,20 @@ class BotEngine:
                     usdt_balance = float(asset.get("availableBalance", 0))
                     break
 
-            equity = EquityLog(
-                balance_usdt=usdt_balance,
-                recorded_at=datetime.now(timezone.utc),
-            )
-            self.db.add(equity)
-            await self.db.commit()
+            if self.session_factory is None:
+                return
+            async with self.session_factory() as session:
+                session.add(EquityLog(
+                    balance_usdt=usdt_balance,
+                    recorded_at=datetime.now(timezone.utc),
+                ))
+                await session.commit()
         except Exception as e:
             logger.debug(f"Equity snapshot failed: {e}")
 
     async def get_status(self) -> dict:
         """Current bot status for dashboard."""
-        daily_stats = self.daily_reset.get_daily_stats()
+        daily_stats = await self.daily_reset.get_daily_stats()
 
         return {
             "status": "running" if self._running else "stopped",

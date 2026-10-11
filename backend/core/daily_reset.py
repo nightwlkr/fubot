@@ -1,9 +1,13 @@
-"""Daily reset service — tracks cumulative daily P&L, enforces -3R hard stop."""
+"""Daily reset service — tracks cumulative daily P&L, enforces -3R hard stop.
+
+DB access: session factory + short-lived sessions (the service is called from
+both the engine's scan loop and request handlers concurrently).
+"""
 import logging
 from datetime import datetime, timezone
+from typing import Callable, Optional
 
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from backend.models.daily_summary import DailySummary
 
@@ -11,17 +15,17 @@ logger = logging.getLogger(__name__)
 
 
 class DailyResetService:
-    """Tracks cumulative daily P&L in R units, enforces -3R hard stop, resets at UTC midnight."""
+    """Tracks cumulative daily PnL in R units, enforces -3R hard stop, resets at UTC midnight."""
 
     def __init__(
         self,
-        db: AsyncSession,
-        settings: dict,
+        session_factory: Optional[Callable] = None,
+        settings: Optional[dict] = None,
         bot_engine=None,  # Optional reference to bot engine for stop trigger
         alert_service=None,  # Optional alert service
     ):
-        self.db = db
-        self.settings = settings
+        self.session_factory = session_factory
+        self.settings = settings or {}
         self.bot = bot_engine
         self.alerts = alert_service
         self._limit_hit_today = False
@@ -30,14 +34,33 @@ class DailyResetService:
         """Get the daily loss limit in R (positive value)."""
         return abs(self.settings.get("daily_loss_limit_r", -3.0))
 
+    def _zero_stats(self, today) -> dict:
+        limit_r = self.get_limit_r()
+        return {
+            "date": today.isoformat(),
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "total_pnl_r": 0.0,
+            "total_pnl_usdt": 0.0,
+            "used_r": 0.0,
+            "limit_r": limit_r,
+            "remaining_r": limit_r,
+            "limit_hit": False,
+        }
+
     async def get_daily_stats(self) -> dict:
         """Returns today's trading stats."""
         today = datetime.now(timezone.utc).date()
 
-        result = await self.db.execute(
-            select(DailySummary).where(DailySummary.date == today)
-        )
-        summary = result.scalar_one_or_none()
+        if self.session_factory is None:
+            return self._zero_stats(today)
+
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(DailySummary).where(DailySummary.date == today)
+            )
+            summary = result.scalar_one_or_none()
 
         limit_r = self.get_limit_r()
 
@@ -56,18 +79,7 @@ class DailyResetService:
                 "limit_hit": summary.daily_loss_limit_hit,
             }
 
-        return {
-            "date": today.isoformat(),
-            "total_trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "total_pnl_r": 0.0,
-            "total_pnl_usdt": 0.0,
-            "used_r": 0.0,
-            "limit_r": limit_r,
-            "remaining_r": limit_r,
-            "limit_hit": False,
-        }
+        return self._zero_stats(today)
 
     async def check_and_enforce_limit(self) -> bool:
         """Called before every new trade. Returns True if trading is allowed."""
@@ -94,13 +106,15 @@ class DailyResetService:
         self._limit_hit_today = True
 
         today = datetime.now(timezone.utc).date()
-        result = await self.db.execute(
-            select(DailySummary).where(DailySummary.date == today)
-        )
-        summary = result.scalar_one_or_none()
-        if summary:
-            summary.daily_loss_limit_hit = True
-            await self.db.commit()
+        if self.session_factory is not None:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    select(DailySummary).where(DailySummary.date == today)
+                )
+                summary = result.scalar_one_or_none()
+                if summary:
+                    summary.daily_loss_limit_hit = True
+                    await session.commit()
 
         if self.bot:
             await self.bot.stop()
@@ -111,33 +125,36 @@ class DailyResetService:
 
     async def update_daily_summary(self, pnl_r: float, pnl_usdt: float) -> None:
         """Called after each trade closes to update the daily summary."""
+        if self.session_factory is None:
+            return
+
         today = datetime.now(timezone.utc).date()
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(DailySummary).where(DailySummary.date == today)
+            )
+            summary = result.scalar_one_or_none()
 
-        result = await self.db.execute(
-            select(DailySummary).where(DailySummary.date == today)
-        )
-        summary = result.scalar_one_or_none()
+            if not summary:
+                summary = DailySummary(date=today)
+                session.add(summary)
 
-        if not summary:
-            summary = DailySummary(date=today)
-            self.db.add(summary)
+            summary.total_trades += 1
+            summary.total_pnl_r += pnl_r
+            summary.total_pnl_usdt += pnl_usdt
 
-        summary.total_trades += 1
-        summary.total_pnl_r += pnl_r
-        summary.total_pnl_usdt += pnl_usdt
+            if pnl_r > 0:
+                summary.wins += 1
+                if pnl_r > summary.best_trade_r:
+                    summary.best_trade_r = pnl_r
+            elif pnl_r < 0:
+                summary.losses += 1
+                if pnl_r < summary.worst_trade_r:
+                    summary.worst_trade_r = pnl_r
+            else:
+                summary.breakeven += 1
 
-        if pnl_r > 0:
-            summary.wins += 1
-            if pnl_r > summary.best_trade_r:
-                summary.best_trade_r = pnl_r
-        elif pnl_r < 0:
-            summary.losses += 1
-            if pnl_r < summary.worst_trade_r:
-                summary.worst_trade_r = pnl_r
-        else:
-            summary.breakeven += 1
-
-        await self.db.commit()
+            await session.commit()
 
     async def check_and_reset(self):
         """Called at UTC midnight to reset the daily tracking."""

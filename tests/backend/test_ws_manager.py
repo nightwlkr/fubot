@@ -28,8 +28,7 @@ class FakeWebSocket:
 async def test_connect_broadcast_disconnect():
     ws = FakeWebSocket()
     mgr = ConnectionManager()
-    await mgr.connect(ws, user_id=1)
-    assert ws.accepted
+    await mgr.connect(ws, user_id=1)  # registration only — accept is the endpoint's job
     assert 1 in mgr.active_connections
 
     await mgr.broadcast({"type": "alert", "message": "hi"}, exclude_user=1)
@@ -67,8 +66,17 @@ def test_ws_rejects_invalid_token():
     assert exc.value.code == 4003
 
 
-# NOTE: no valid-token handshake test here on purpose. The endpoint's keep-alive
-# loop (`while True: sleep(1)`) never observes the client disconnect, so the
-# TestClient teardown deadlocks. Registration after successful auth is covered
-# by test_connect_broadcast_disconnect; fix the receive loop, then add the
-# full-handshake happy path.
+def test_ws_accepts_valid_token_and_replies_auth_ok():
+    from types import SimpleNamespace
+    token = auth_service.create_access_token(
+        SimpleNamespace(id=43, username="u", role="admin"))
+    client = TestClient(_ws_app())
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "auth", "data": {"token": token}})
+        reply = ws.receive_json()
+        assert reply["type"] == "auth_ok"
+        assert 43 in ws_manager.active_connections
+        # the receive-loop fix means the server observes the client's close —
+        # exiting the context manager below returns cleanly
+    ws_manager.active_connections.pop(43, None)
+    assert 43 not in ws_manager.active_connections

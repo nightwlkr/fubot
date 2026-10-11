@@ -1,16 +1,17 @@
-"""Position manager — track open positions, BE trailing, TP/SL monitoring."""
+"""Position manager — track open positions, BE trailing, TP/SL monitoring.
+
+DB access: session factory + short-lived sessions. Positions are snapshotted
+per monitoring pass; every mutation re-fetches the row in its own session so a
+cancelled pass can never leave the shared state dirty.
+"""
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional
-
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Callable, Optional
 
 from backend.models.position import Position
 from backend.models.trade import Trade
 from backend.models.signal import Signal
-from backend.services.order_service import OrderService
 from backend.services.binance_service import BinanceService
 from backend.indicators.structural import analyze_structure
 from backend.indicators.atr import calculate_atr
@@ -25,14 +26,14 @@ class PositionManager:
 
     def __init__(
         self,
-        db: AsyncSession,
         binance: BinanceService,
-        order_service: OrderService,
+        order_service,
         daily_reset: DailyResetService,
         alert_service: AlertService,
         settings: dict,
+        session_factory: Optional[Callable] = None,
     ):
-        self.db = db
+        self.session_factory = session_factory
         self.binance = binance
         self.orders = order_service
         self.daily_reset = daily_reset
@@ -65,17 +66,40 @@ class PositionManager:
                 logger.error(f"PositionManager error: {e}", exc_info=True)
             await asyncio.sleep(30)
 
+    async def _get_open_positions(self) -> list[dict]:
+        """Snapshot all open positions as plain dicts."""
+        if self.session_factory is None:
+            return []
+        async with self.session_factory() as session:
+            result = await session.execute(Position.__table__.select().where(Position.status == "OPEN"))
+            rows = result.mappings().all()
+            return [
+                {
+                    "id": r["id"],
+                    "symbol": r["symbol"],
+                    "side": r["side"],
+                    "entry_price": float(r["entry_price"]),
+                    "quantity": float(r["quantity"]),
+                    "stop_loss": float(r["stop_loss"]) if r["stop_loss"] is not None else None,
+                    "take_profit": float(r["take_profit"]) if r["take_profit"] is not None else None,
+                    "signal_id": r["signal_id"],
+                }
+                for r in rows
+            ]
+
     async def _check_all_positions(self):
         """Check all open positions: price, BE trailing, TP/SL hits."""
-        open_positions = await self._get_open_positions_from_db()
+        open_positions = await self._get_open_positions()
 
         for position in open_positions:
-            symbol = position.symbol
+            symbol = position["symbol"]
             try:
-                current_price = await self.binance.get_ticker(symbol)
-                ticker = current_price.get("price", 0) if isinstance(current_price, dict) else 0
-                current_price = float(ticker) if ticker else 0.0
+                ticker = await self.binance.get_ticker(symbol)
+                raw_price = ticker.get("price", 0) if isinstance(ticker, dict) else 0
+                current_price = float(raw_price) if raw_price else 0.0
             except Exception:
+                continue
+            if current_price <= 0:
                 continue
 
             # Check BE trailing
@@ -88,131 +112,132 @@ class PositionManager:
             elif sl_hit:
                 await self._close_position(position, "SL_HIT", current_price)
 
-    async def _get_open_positions_from_db(self) -> list[Position]:
-        """Get all open positions from DB."""
-        result = await self.db.execute(
-            select(Position).where(Position.status == "OPEN")
-        )
-        return list(result.scalars().all())
-
-    async def _check_be_trailing(self, position: Position, current_price: float):
+    async def _check_be_trailing(self, position: dict, current_price: float):
         """
         If price has moved in favor enough to create a new BOS, move SL to BE.
 
         Rules:
-        - Only move SL to BE once (entry price)
+        - Only move SL to BE once (to entry price, one-way)
         - Trigger: new BOS in trade's favor on 5m timeframe
         """
-        if position.side == "LONG":
-            be_price = position.entry_price
+        be_price = position["entry_price"]
+
+        if position["side"] == "LONG":
             if current_price <= be_price:
                 return  # Not yet in profit
-
-            try:
-                candles = await self.binance.get_klines(position.symbol, "5m", 100)
-                if not candles:
-                    return
-                struct = analyze_structure(candles, position.symbol, "5m", calculate_atr(candles))
-
-                if struct.last_bos and struct.last_bos.direction == "BULLISH":
-                    if position.stop_loss is not None and float(position.stop_loss) < be_price:
-                        await self._trail_stop_to_be(position, be_price)
-            except Exception as e:
-                logger.debug(f"BE trailing check failed for {position.symbol}: {e}")
-
-        elif position.side == "SHORT":
-            be_price = position.entry_price
+            if position["stop_loss"] is not None and position["stop_loss"] >= be_price:
+                return  # Already at/beyond BE
+            wanted_bos = "BULLISH"
+        else:  # SHORT
             if current_price >= be_price:
                 return
+            if position["stop_loss"] is not None and position["stop_loss"] <= be_price:
+                return
+            wanted_bos = "BEARISH"
 
-            try:
-                candles = await self.binance.get_klines(position.symbol, "5m", 100)
-                if not candles:
-                    return
-                struct = analyze_structure(candles, position.symbol, "5m", calculate_atr(candles))
+        try:
+            candles = await self.binance.get_klines(position["symbol"], "5m", 100)
+            if not candles:
+                return
+            struct = analyze_structure(candles, position["symbol"], "5m", calculate_atr(candles))
 
-                if struct.last_bos and struct.last_bos.direction == "BEARISH":
-                    if position.stop_loss is not None and float(position.stop_loss) > be_price:
-                        await self._trail_stop_to_be(position, be_price)
-            except Exception as e:
-                logger.debug(f"BE trailing check failed for {position.symbol}: {e}")
+            if struct.last_bos and struct.last_bos.direction == wanted_bos:
+                await self._trail_stop_to_be(position["id"], be_price)
+        except Exception as e:
+            logger.debug(f"BE trailing check failed for {position['symbol']}: {e}")
 
-    async def _trail_stop_to_be(self, position: Position, new_stop: float):
-        """Move stop loss to break-even (entry price)."""
-        logger.info(f"[{position.symbol}] Trailing stop to BE: {position.stop_loss} → {new_stop}")
-        position.stop_loss = new_stop
-        await self.db.commit()
+    async def _trail_stop_to_be(self, position_id: int, new_stop: float):
+        """Move stop loss to break-even (entry price). One-way, idempotent."""
+        if self.session_factory is None:
+            return
+        symbol = None
+        async with self.session_factory() as session:
+            position = await session.get(Position, position_id)
+            if not position or position.status != "OPEN":
+                return
+            if position.side == "LONG" and position.stop_loss is not None and float(position.stop_loss) >= new_stop:
+                return  # already at/beyond BE
+            if position.side == "SHORT" and position.stop_loss is not None and float(position.stop_loss) <= new_stop:
+                return
+            old_stop = position.stop_loss
+            position.stop_loss = new_stop
+            symbol = position.symbol
+            await session.commit()
 
+        logger.info(f"[{symbol}] Trailing stop to BE: {old_stop} → {new_stop}")
         if self.alerts:
-            await self.alerts.be_trailing(position.symbol)
+            await self.alerts.be_trailing(symbol)
 
-    def _check_tp_sl_hit(self, position: Position, current_price: float) -> tuple[bool, bool]:
+    def _check_tp_sl_hit(self, position: dict, current_price: float) -> tuple[bool, bool]:
         """Check if TP or SL was hit."""
-        if position.side == "LONG":
-            tp_hit = current_price >= float(position.take_profit) if position.take_profit else False
-            sl_hit = current_price <= float(position.stop_loss) if position.stop_loss else False
+        if position["side"] == "LONG":
+            tp_hit = current_price >= position["take_profit"] if position["take_profit"] else False
+            sl_hit = current_price <= position["stop_loss"] if position["stop_loss"] else False
         else:  # SHORT
-            tp_hit = current_price <= float(position.take_profit) if position.take_profit else False
-            sl_hit = current_price >= float(position.stop_loss) if position.stop_loss else False
+            tp_hit = current_price <= position["take_profit"] if position["take_profit"] else False
+            sl_hit = current_price >= position["stop_loss"] if position["stop_loss"] else False
 
         return tp_hit, sl_hit
 
-    async def _close_position(self, position: Position, reason: str, exit_price: float):
+    async def _close_position(self, position: dict, reason: str, exit_price: float):
         """Close position: record trade, update DB, log P&L."""
-        entry = float(position.entry_price)
-        qty = float(position.quantity)
-        side = position.side
+        if self.session_factory is None:
+            return
 
-        # Calculate realized P&L
-        if side == "LONG":
-            pnl_usdt = (exit_price - entry) * qty
-        else:
-            pnl_usdt = (entry - exit_price) * qty
+        async with self.session_factory() as session:
+            row = await session.get(Position, position["id"])
+            if not row or row.status != "OPEN":
+                return  # already closed elsewhere
 
-        # Calculate P&L in R units
-        risk_distance = abs(entry - float(position.stop_loss)) if position.stop_loss else 0.01
-        risk_amount = risk_distance * qty
-        pnl_r = pnl_usdt / risk_amount if risk_amount > 0 else 0.0
+            entry = float(row.entry_price)
+            qty = float(row.quantity)
+            side = row.side
 
-        # Get strategy type from signal
-        strategy_type = "UNKNOWN"
-        if position.signal_id:
-            sig_result = await self.db.execute(
-                select(Signal).where(Signal.id == position.signal_id)
+            # Calculate realized P&L
+            if side == "LONG":
+                pnl_usdt = (exit_price - entry) * qty
+            else:
+                pnl_usdt = (entry - exit_price) * qty
+
+            # Calculate P&L in R units
+            risk_distance = abs(entry - float(row.stop_loss)) if row.stop_loss else 0.01
+            risk_amount = risk_distance * qty
+            pnl_r = pnl_usdt / risk_amount if risk_amount > 0 else 0.0
+
+            # Get strategy type from signal
+            strategy_type = "UNKNOWN"
+            if row.signal_id:
+                sig = await session.get(Signal, row.signal_id)
+                if sig:
+                    strategy_type = sig.strategy_type
+
+            trade = Trade(
+                position_id=row.id,
+                symbol=row.symbol,
+                side=side,
+                entry_price=entry,
+                exit_price=exit_price,
+                quantity=qty,
+                pnl_usdt=pnl_usdt,
+                pnl_r=pnl_r,
+                exit_reason=reason,
+                strategy_type=strategy_type,
+                closed_at=datetime.now(timezone.utc),
             )
-            sig = sig_result.scalar_one_or_none()
-            if sig:
-                strategy_type = sig.strategy_type
+            session.add(trade)
 
-        # Create Trade record
-        trade = Trade(
-            position_id=position.id,
-            symbol=position.symbol,
-            side=side,
-            entry_price=entry,
-            exit_price=exit_price,
-            quantity=qty,
-            pnl_usdt=pnl_usdt,
-            pnl_r=pnl_r,
-            exit_reason=reason,
-            strategy_type=strategy_type,
-            closed_at=datetime.now(timezone.utc),
-        )
-        self.db.add(trade)
+            row.status = "CLOSED"
+            row.closed_at = datetime.now(timezone.utc)
+            await session.commit()
+            symbol = row.symbol
 
-        # Update position
-        position.status = "CLOSED"
-        position.closed_at = datetime.now(timezone.utc)
-        await self.db.commit()
-
-        # Update daily summary
+        # Update daily summary + alert outside the session
         await self.daily_reset.update_daily_summary(pnl_r, pnl_usdt)
 
-        # Alert
         if self.alerts:
             if reason == "TP_HIT":
-                await self.alerts.tp_hit(position.symbol, pnl_r, pnl_usdt)
+                await self.alerts.tp_hit(symbol, pnl_r, pnl_usdt)
             elif reason == "SL_HIT":
-                await self.alerts.sl_hit(position.symbol, pnl_r, pnl_usdt)
+                await self.alerts.sl_hit(symbol, pnl_r, pnl_usdt)
 
-        logger.info(f"[{position.symbol}] Position closed: {reason}, PnL: {pnl_usdt:.2f} USDT ({pnl_r:.2f}R)")
+        logger.info(f"[{symbol}] Position closed: {reason}, PnL: {pnl_usdt:.2f} USDT ({pnl_r:.2f}R)")
