@@ -8,7 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
-Status: 113 passing, 0 xfail (2026-10-11 third pass — PHASE6 validation suite added)
+Status: 117 passing, 0 xfail (2026-10-12 — payload-contract regressions added)
 
 ## Local Contracts
 
@@ -22,6 +22,7 @@ Status: 113 passing, 0 xfail (2026-10-11 third pass — PHASE6 validation suite 
   - `test_e2e_trade_flow.py` — PHASE6_STEP1: signal → decision → paper execution → TP hit → trade + daily summary
   - `test_daily_reset.py` — PHASE6_STEP2: -3R hard stop, 80% warning, wins-don't-count, midnight reset
   - `test_security_audit.py` — PHASE6_STEP3: cookie flags, encrypted-at-rest keys, no secrets in logs, injection resistance
+  - payload-contract regressions: overview bot_status/today PnLCard fields, position mark_price/unrealized_pnl, strategies R-buckets
 - Run: `PYTHONPATH=. pytest tests/backend/ -q` using the system Python 3.13 pytest (`/Library/Frameworks/Python.framework/Versions/3.13/bin/pytest`)
 - `conftest.py` puts the repo root on `sys.path` and provides a `db_session` fixture (rolled-back async session via `AsyncSessionLocal`). No custom `event_loop` fixture — pytest-asyncio 0.24 deprecates it, and a session-scoped loop coupled every async test to one loop.
 - `test_api_smoke.py` uses a FUNCTION-scoped client (fresh app lifespan per test) so the engine's DB session never spans TestClient portal lifecycles; its `_run` helper restores the thread's current event loop after `asyncio.run` (asyncio.run leaves `set_event_loop(None)`, which breaks the next async test under pytest-randomly)
@@ -36,7 +37,7 @@ Status: 113 passing, 0 xfail (2026-10-11 third pass — PHASE6 validation suite 
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 113 passed
+- `PYTHONPATH=. pytest tests/backend/ -q` — 117 passed
 - A failing test blocks completion of the change that broke it
 
 ## Child DOX Index
