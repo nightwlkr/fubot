@@ -8,7 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
-Status: 102 passing, 0 xfail (2026-10-11 second pass — previously pinned defects fixed)
+Status: 113 passing, 0 xfail (2026-10-11 third pass — PHASE6 validation suite added)
 
 ## Local Contracts
 
@@ -19,6 +19,9 @@ Status: 102 passing, 0 xfail (2026-10-11 second pass — previously pinned defec
   - `test_binance_paths.py` — REST path building via `httpx.MockTransport` (no network)
   - `test_signal_service.py` — full scan pipeline with mocked Binance + real DB persistence
   - `test_api_smoke.py` — real app + real DB: login flow, auth guard, route-prefix regression, bot engine wiring, empty states
+  - `test_e2e_trade_flow.py` — PHASE6_STEP1: signal → decision → paper execution → TP hit → trade + daily summary
+  - `test_daily_reset.py` — PHASE6_STEP2: -3R hard stop, 80% warning, wins-don't-count, midnight reset
+  - `test_security_audit.py` — PHASE6_STEP3: cookie flags, encrypted-at-rest keys, no secrets in logs, injection resistance
 - Run: `PYTHONPATH=. pytest tests/backend/ -q` using the system Python 3.13 pytest (`/Library/Frameworks/Python.framework/Versions/3.13/bin/pytest`)
 - `conftest.py` puts the repo root on `sys.path` and provides a `db_session` fixture (rolled-back async session via `AsyncSessionLocal`). No custom `event_loop` fixture — pytest-asyncio 0.24 deprecates it, and a session-scoped loop coupled every async test to one loop.
 - `test_api_smoke.py` uses a FUNCTION-scoped client (fresh app lifespan per test) so the engine's DB session never spans TestClient portal lifecycles; its `_run` helper restores the thread's current event loop after `asyncio.run` (asyncio.run leaves `set_event_loop(None)`, which breaks the next async test under pytest-randomly)
@@ -29,11 +32,11 @@ Status: 102 passing, 0 xfail (2026-10-11 second pass — previously pinned defec
 - Import backend modules inside test functions or after the `sys.path` fix in `conftest.py`
 - Expected values come from the definitions (SMA mean over the window, Wilder RSI/ATR, position-size math) — never snapshot the implementation's own output
 - Keep pure-unit tests DB-free; `test_signal_service.py` and `test_api_smoke.py` own the DB-touching cases (dedicated engines / fresh lifespans, self-cleaning)
-- Uncovered today: `bot_engine` scan loop end-to-end, `position_manager` BE-trailing (needs live 5m BOS), `binance_ws`, routers' filter paths with data. Add per-module files as those get exercised (see backend/AGENTS.md Open Gaps)
+- Uncovered today: `position_manager` BE-trailing (needs live 5m BOS), `binance_ws`, routers' filter paths with data. Add per-module files as those get exercised (see backend/AGENTS.md Open Gaps)
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 102 passed, 0 xfailed
+- `PYTHONPATH=. pytest tests/backend/ -q` — 113 passed
 - A failing test blocks completion of the change that broke it
 
 ## Child DOX Index

@@ -70,7 +70,7 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 102 passing (indicators, encryption, auth, services, signal pipeline against the real DB, Binance paths via httpx MockTransport, WS manager, API smoke with a real app lifespan)
+- `PYTHONPATH=. pytest tests/backend/ -q` — 113 passing (also e2e trade flow, -3R hard stop, security audit)
 - `PYTHONPATH=. python -c "import backend.main"` — app imports without errors
 - `python -m uvicorn backend.main:app --reload` — boots and serves; local dev currently on port 8001 (a stale process holds 8000)
 - No hardcoded credentials — everything from env vars

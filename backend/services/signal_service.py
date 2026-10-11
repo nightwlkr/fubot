@@ -13,7 +13,7 @@ Wired by: BotEngine (scan loop) and the /signals API route.
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -40,7 +40,7 @@ class Signal:
     take_profit: Decimal
     rr_ratio: Decimal
     volume_confirmed: bool
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     skip_reason: Optional[str] = None
     status: str = "PENDING"
     db_id: Optional[int] = None  # signals.id when persisted

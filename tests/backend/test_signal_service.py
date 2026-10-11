@@ -70,6 +70,10 @@ async def _scan_and_fetch(kind, rr_min=3.0):
     engine = create_async_engine(settings.DATABASE_URL)
     Session = async_sessionmaker(engine, expire_on_commit=False)
     try:
+        # clean slate — leftover rows (e.g. from a crashed run) would break counts
+        async with Session() as db:
+            await db.execute(delete(SignalModel).where(SignalModel.symbol == SYMBOL))
+            await db.commit()
         svc = SignalService(session_factory=Session, binance=FakeBinance(make_klines(kind)),
                             settings={"rr_min": rr_min})
         signals = await svc.scan_symbol(SYMBOL)

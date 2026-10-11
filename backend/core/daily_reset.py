@@ -65,7 +65,9 @@ class DailyResetService:
         limit_r = self.get_limit_r()
 
         if summary:
-            used_r = abs(float(summary.total_pnl_r))
+            # Only LOSSES count toward the daily loss limit — a winning day
+            # must never trip the -3R stop (abs() would count wins as used).
+            used_r = max(0.0, -float(summary.total_pnl_r))
             return {
                 "date": today.isoformat(),
                 "total_trades": summary.total_trades,
@@ -94,8 +96,8 @@ class DailyResetService:
             await self._trigger_daily_stop()
             return False
 
-        # Warning at 80% of limit
-        if used >= limit * 0.8 and used < limit:
+        # Warning at 80% of limit (epsilon: 3.0 * 0.8 == 2.4000000000000004)
+        if used >= limit * 0.8 - 1e-9 and used < limit:
             if self.alerts:
                 await self.alerts.daily_limit_warning(used, limit)
 
@@ -136,23 +138,30 @@ class DailyResetService:
             summary = result.scalar_one_or_none()
 
             if not summary:
-                summary = DailySummary(date=today)
+                # NOTE: column defaults fire at INSERT, not construction —
+                # a fresh object's counters are None until flushed, so pass
+                # explicit initial values (mirrors the migration's server defaults)
+                summary = DailySummary(date=today, total_trades=0, wins=0, losses=0,
+                                       breakeven=0, total_pnl_r=0.0, total_pnl_usdt=0.0,
+                                       worst_trade_r=0.0, best_trade_r=0.0,
+                                       daily_loss_limit_hit=False)
                 session.add(summary)
 
-            summary.total_trades += 1
-            summary.total_pnl_r += pnl_r
-            summary.total_pnl_usdt += pnl_usdt
+            # Numeric columns come back as Decimal — coerce to float before math
+            summary.total_trades = int(summary.total_trades or 0) + 1
+            summary.total_pnl_r = float(summary.total_pnl_r or 0) + pnl_r
+            summary.total_pnl_usdt = float(summary.total_pnl_usdt or 0) + pnl_usdt
 
             if pnl_r > 0:
-                summary.wins += 1
-                if pnl_r > summary.best_trade_r:
+                summary.wins = int(summary.wins or 0) + 1
+                if pnl_r > float(summary.best_trade_r or 0):
                     summary.best_trade_r = pnl_r
             elif pnl_r < 0:
-                summary.losses += 1
-                if pnl_r < summary.worst_trade_r:
+                summary.losses = int(summary.losses or 0) + 1
+                if pnl_r < float(summary.worst_trade_r or 0):
                     summary.worst_trade_r = pnl_r
             else:
-                summary.breakeven += 1
+                summary.breakeven = int(summary.breakeven or 0) + 1
 
             await session.commit()
 

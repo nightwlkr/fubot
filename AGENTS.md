@@ -89,7 +89,7 @@ Default section order:
 - **nginx/** — Production reverse-proxy and SSL config — see `nginx/AGENTS.md`
 - **FUBOT_STEPS/** — 42-step build guide (PHASE1–PHASE6); each step is a markdown file — see `FUBOT_STEPS/AGENTS.md`
 - **tests/** — pytest suite for backend units — see `tests/AGENTS.md`
-- **scripts/** — Automation scripts (create_admin.py, init_db.py, setup_ssl.sh, fubotctl.sh); owned by this doc
+- **scripts/** — Automation scripts (create_admin.py, init_db.py, setup_ssl.sh, fubotctl.sh, clear_test_data.py, paper_test_report.py, ws_load_test.py); owned by this doc
 - **fubot.service** — systemd unit for the backend; owned by this doc
 
 ## Project Overview
@@ -102,43 +102,37 @@ Default section order:
 
 ## Current Status
 
-PHASE1–5 implemented and integration-tested; the 2026-10-11 audit's integration gaps are **closed** (engine wired, WebSocket live, signal pipeline real, Binance paths fixed, R:R math corrected). PHASE6 (validation + deployment) not started.
+**Deployed to production** at https://fubot.bedikian.cc (VPS `contabo01`, 2026-10-11) and the **72h paper run is live** (started 23:55 local, ends 2026-10-14 ~23:55 — automated daily checks + final sign-off are scheduled). PHASE6 STEP1/2/3/4 validated, STEP5 deployed, STEP6 README done.
 
 - **Backend (PHASE1–4)**: config, database, encryption, 10 models, 9 routers with 28 endpoints, 8 services, 11 indicator modules, 4 core components. ~4,900 lines of Python.
-- **Engine stack wired** (`main.py` `init_bot`): BotEngine + PositionManager + DailyReset + services all share the `AsyncSessionLocal` FACTORY and open short-lived sessions per operation (AsyncSession is not task-safe — the scan loop runs concurrently with request handlers).
-- **Signal pipeline live**: `SignalService.scan_symbol` fetches 1h/5m/15m candles in parallel, runs trend bias → FVG/3-candle (5m) / CHoCH (15m) → trend/volume/R:R filters, and persists PENDING/SKIPPED signals (deduped per symbol+strategy+direction). Verified against Binance testnet: 11 signals persisted in one scan with correct filter reasons.
-- **WebSocket live**: `/ws` mounted with auth handshake (`auth` message → `auth_ok`, close codes 4001/4002/4003, receive-loop disconnect handling). AlertService methods are async and await `ws_manager.broadcast`.
-- **Trading flow**: `StrategyService.evaluate_signal` gates (position/max-positions/age/price-deviation/R:R) then executes — paper mode creates simulated-fill orders + OPEN Position records + signal TRIGGERED (deliberate deviation from PHASE3_STEP3's "no records in paper": PHASE3_STEP7's 72h paper run and the dashboard need them); live mode places MARKET entry + reduce-only STOP_MARKET SL + TAKE_PROFIT_MARKET TP via Binance and logs every order to the `orders` table.
-- **Database**: Alembic applied locally (`002_seed_data` head), role `fubot` provisioned, 10 tables + seeds verified.
-- **Frontend (PHASE5)**: complete and building; all 25 endpoints match the backend OpenAPI contract.
-- **Tests**: 102 passing across indicators, encryption, auth, services, signal pipeline (real DB), Binance paths (httpx MockTransport), WS manager, and API smoke (real DB + real app lifespan).
+- **Engine stack wired** (`main.py` `init_bot`): every component shares the `AsyncSessionLocal` FACTORY and opens short-lived sessions per operation (AsyncSession is not task-safe — the scan loop runs concurrently with request handlers).
+- **Signal pipeline live**: parallel 1h/5m/15m candle fetch → trend bias → FVG/3-candle (5m) / CHoCH (15m) → trend/volume/R:R filters → PENDING/SKIPPED signals (deduped per symbol+strategy+direction).
+- **Trading flow**: `StrategyService.evaluate_signal` gates then executes — paper mode creates simulated fills + Position rows + TRIGGERED signals (deliberate deviation from PHASE3_STEP3, required by PHASE3_STEP7 and the dashboard); live mode places MARKET entry + reduce-only SL/TP and logs orders.
+- **PHASE6 validation results (2026-10-11)**:
+  - STEP1 E2E trade flow ✅ — `tests/backend/test_e2e_trade_flow.py` drives signal → decision → paper execution → TP hit → trade + daily summary. Caught 3 production bugs (fixed): naive/aware datetime crash in the signal-age check, wins counted toward the -3R stop (`used_r = abs(pnl_r)` → a winning day halted trading; now losses only), and daily-summary None/Decimal arithmetic crash on a day's first trade.
+  - STEP2 -3R hard stop ✅ — `tests/backend/test_daily_reset.py`: 3.9R blocks trading, stops the engine, CRITICAL alert, latched until the UTC-midnight reset; warning fires at ≥80% (epsilon fix: 3.0×0.8 float boundary); wins don't count.
+  - STEP3 security audit ✅ — `tests/backend/test_security_audit.py`: JWT cookie flags, API keys encrypted-at-rest (never plaintext, decryptable), no secrets in logs, injection payloads rejected, unauthenticated access blocked. HSTS added to nginx.
+  - STEP4 WebSocket load ✅ — `scripts/ws_load_test.py`: 50/50 distinct-user clients received both broadcasts; worst latency 5ms; handshake max 21ms. (ConnectionManager is one socket per user by design — the test fans out across N users.)
+- **Deployment (STEP5)**: `/opt/fubot` on `contabo01` (system user `fubot`, venv, read-only GitHub deploy key), Postgres 16 role/db with FRESH secrets (the leaked ones are dead), `fubot.service` enabled, nginx site + Let's Encrypt cert (HSTS on, WS upgrade on `/api/`). Deploy = `git pull` + `npm run build` + `systemctl restart fubot`.
+- **Frontend (PHASE5)**: built and served; Vite dev proxy upgrades WS (`ws: true`).
+- **Tests**: 113 passing.
+- **README.md** (STEP6) covers setup, configuration, operation, troubleshooting.
 
-### Audit follow-up (2026-10-11, second pass)
+### Open items
 
-Fixed in this pass:
-- `binance_service.py`: all REST paths now carry the `/fapi` prefix; `get_order_book` uses `/fapi/v1/depth`; SL/TP orders send `reduceOnly=true`.
-- Inverted R:R math fixed in `fvg.evaluate_fvg_entry`, `choch.detect_choch`, `three_candle.evaluate_three_candle_entry` (reward/risk, was risk/reward); `fvg.check_fvg_filled` + zone bounds corrected (numeric `zone_min < zone_max`; bullish fills when price returns DOWN into the gap). Step specs PHASE2_STEP2/STEP3 corrected to match.
-- BotEngine/PositionManager/DailyReset wired in `main.py` lifespan; `/ws` route mounted; `WebSocketRouter` double-accept removed (accept happens once in the endpoint); keep-alive sleep loop replaced with a receive loop.
-- `AlertService` rewritten async with the engine-facing API (`bot_started`, `trade_executed`, `tp_hit`, `sl_hit`, `be_trailing`, `daily_limit_warning/hit`, `error`, `new_signal`).
-- `bot_engine.get_status` now awaits `daily_reset.get_daily_stats()` (was an un-awaited coroutine).
-- OrderService gained `get_current_position` + `orders`-table logging for live orders.
-
-Still open:
-- **Live order path is untested against real exchange fills** — unit-tested with mocks only; PHASE3_STEP7's 72h paper run and PHASE4_STEP4's go-live checklist are the validation gates.
-- BE-trailing (`PositionManager._check_be_trailing`) has no automated test; it depends on live 5m BOS detection.
-- 11 Pydantic models still use `class Config` — convert to `ConfigDict`.
-- `routers/*` each re-implement cookie auth — extract one shared `get_current_user` dependency.
-- Login rate limiter locks the whole source IP (blocks valid logins too); `settings.value` is `JSON` not the spec'd `JSONB`; seed ships 10 symbols vs the 7 in PHASE1_STEP2.
-- Backend cookie is `secure=True` — over plain-http dev the backend's own cookie is dropped; the frontend's JS cookie (from the response token) is what makes dev work. Consider `secure` only when `FUBOT_ENV == "production"`.
-- No root `README.md` (PHASE6_STEP6). Dev server runs on port 8001 (a stale process holds 8000).
+- **Binance API keys on the VPS are empty placeholders** — public klines work (signals flow), but equity snapshots and exchange-side position checks need fresh TESTNET keys in `/opt/fubot/.env` + `systemctl restart fubot`.
+- The 72h paper run must pass PHASE3_STEP7's criteria before any go-live discussion. **Going live with real money requires explicit user confirmation.**
+- Live order path is mock-tested only until real fills are observed.
+- BE-trailing has no automated test (needs live 5m BOS); 11 `class Config` → `ConfigDict`; per-router duplicated cookie auth → shared dependency; login rate limiter locks the whole source IP; old dev DB (`fubot` on localhost) still holds pre-audit data — the production DB is the VPS.
+- Old Binance/DB/JWT credentials leaked in the old public repo history must stay rotated — never reuse the values from the pre-2026-10-12 `.env`.
 
 ### Next
 
-PHASE6 in order: 72h paper run (PHASE3_STEP7) with the dashboard live, -3R daily-limit validation (PHASE6_STEP2), end-to-end trade-flow test (PHASE6_STEP1), security audit (PHASE6_STEP3, add HSTS), WebSocket load test (PHASE6_STEP4), deploy (PHASE6_STEP5), `README.md` (PHASE6_STEP6).
+Monitor the 72h paper run (scheduled checks). On pass: go-live decision (user), then PHASE4_STEP4's go-live checklist. Backlog: ConfigDict migration, shared auth dependency, smarter login rate limiting.
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 102 passing (0 xfail — pinned defects were fixed)
+- `PYTHONPATH=. pytest tests/backend/ -q` — 113 passing (e2e trade flow, -3R stop, security audit included)
 - `PYTHONPATH=. python -c "import backend.main"` — backend imports cleanly
 - `cd frontend && npm run build` — dashboard builds to `frontend/dist/`
 - `cd frontend && npm run lint` — oxlint; warnings tolerated, errors block

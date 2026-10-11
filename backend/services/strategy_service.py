@@ -98,9 +98,11 @@ class StrategyService:
         if signal.status != "PENDING":
             return TradeDecision("SKIP", skip_reason=f"Signal is {signal.status}")
 
-        # 1. Open position on this symbol?
+        # 1. Open position on this symbol? (exchange AND paper positions in DB)
         existing = await self.order_svc.get_current_position(symbol)
         if existing and existing.get("quantity", 0) > 0:
+            return TradeDecision("SKIP", skip_reason=f"Position already open on {symbol}")
+        if self.session_factory is not None and await self._has_open_db_position(symbol):
             return TradeDecision("SKIP", skip_reason=f"Position already open on {symbol}")
 
         # 2. Max simultaneous positions
@@ -111,9 +113,12 @@ class StrategyService:
                 return TradeDecision(
                     "SKIP", skip_reason=f"Max positions ({max_positions}) already open")
 
-        # 3. Signal age
+        # 3. Signal age (normalize naive timestamps defensively)
         max_age_min = float(self.settings.get("signal_max_age_minutes", 60))
-        age_min = (datetime.now(timezone.utc) - signal.created_at).total_seconds() / 60
+        created_at = signal.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age_min = (datetime.now(timezone.utc) - created_at).total_seconds() / 60
         if age_min > max_age_min:
             signal.status = "EXPIRED"
             await self._mark_signal(signal.db_id, "EXPIRED")
@@ -207,6 +212,16 @@ class StrategyService:
         return TradeDecision("EXECUTE", plan=plan, position_id=position_id, paper=paper_mode)
 
     # ---- helpers ---------------------------------------------------------
+
+    async def _has_open_db_position(self, symbol: str) -> bool:
+        """Paper positions live only in the DB — guard against re-entry."""
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(PositionModel.id).where(
+                    PositionModel.symbol == symbol, PositionModel.status == "OPEN"
+                )
+            )
+            return result.first() is not None
 
     async def _count_open_positions(self) -> int:
         if self.session_factory is None:

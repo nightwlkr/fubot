@@ -144,7 +144,8 @@ async def today_stats(
     elif setting and isinstance(setting.value, (int, float)):
         limit_r = abs(float(setting.value))
 
-    used_r = abs(float(daily.total_pnl_r)) if daily else 0.0
+    # Only losses count toward the limit (a winning day must not trip -3R)
+    used_r = max(0.0, -float(daily.total_pnl_r)) if daily else 0.0
 
     return TodayStats(
         realized_pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
