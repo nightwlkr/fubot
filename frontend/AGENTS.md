@@ -17,7 +17,7 @@ Status: **PHASE5 complete** — builds clean; bot-control and live-data flows wi
 - Routing: react-router-dom v7
 - Charts: lightweight-charts v5 (TradingView) for equity/performance charts
 - API: Axios client, base `VITE_API_URL` (default `/api`), Bearer header via `getToken()`, 401 interceptor → `clearToken()` → `/login`; Vite dev proxy `/api` → `http://localhost:8000`
-- Auth token: `api/token.ts` owns token storage — **localStorage only** (key `fubot_token`). The backend's `fubot_token` cookie is httpOnly (invisible to JS); the frontend keeps its own durable copy in localStorage for the Bearer header, the WS auth message, and `checkAuth`. There is deliberately NO js-cookie duplicate (a same-name JS cookie went stale vs localStorage; `clearToken` couldn't remove the httpOnly one). `checkAuth` runs from App on load (isRestoring gate) and always attempts `/me` — even without a stored token, because the httpOnly cookie rides along; `/me` echoes the token so a cookie-only session re-seeds localStorage. The axios 401 interceptor hard-redirects to `/login` only for protected endpoints (not `/auth/login`/`/auth/me` — those are handled by the caller).
+- Auth token: `api/token.ts` owns token storage — **localStorage only** (key `fubot_token`). The backend's `fubot_token` cookie is httpOnly (invisible to JS); the frontend keeps its own durable copy in localStorage for the Bearer header, the WS auth message, and `checkAuth`. There is deliberately NO js-cookie duplicate (a same-name JS cookie went stale vs localStorage; `clearToken` couldn't remove the httpOnly one). `checkAuth` runs from App on load (isRestoring gate) and always attempts `/me` — even without a stored token, because the httpOnly cookie rides along; `/me` echoes the token so a cookie-only session re-seeds localStorage. **`/me` returns a FLAT user (`{id, username, role, token}`), NOT nested under `user` like the login response — `checkAuth` reads `res.data` directly (reading `res.data.user` was `undefined` and signed every refresh out).** The axios 401 interceptor hard-redirects to `/login` only for protected endpoints (not `/auth/login`/`/auth/me` — those are handled by the caller). `App.tsx` keeps `<BrowserRouter>` **always mounted**; the restore gate (`RequireAuth`/`LoginRoute`) renders "Restoring session…" while `isRestoring` instead of redirecting (a conditional mount raced the store).
 - Real-time: `wsManager` dials `API_BASE + /ws` (= `/api/ws`) with an `auth` message and auto-reconnect; backend serves both `/ws` and `/api/ws`, and the Vite dev proxy upgrades WebSocket (`ws: true`)
 - Lint: oxlint via `npm run lint` (`.oxlintrc.json`)
 
@@ -43,7 +43,7 @@ Status: **PHASE5 complete** — builds clean; bot-control and live-data flows wi
 
 ### Known Gaps
 - Backend WebSocket + bot engine now wired (2026-10-11): `/ws` serves the auth handshake and `/api/bot/*` works in paper mode
-- 16 oxlint warnings (exhaustive-deps class); single ~537 kB JS chunk — code-split when convenient
+- 13 oxlint warnings (exhaustive-deps class); single ~537 kB JS chunk — code-split when convenient
 - All 25 REST endpoints in `endpoints.ts` verified to match the backend's OpenAPI paths (2026-10-11); backend `win_rate` is already percent-scaled — do not multiply again (fixed in TradeLog/Performance)
 
 ## Verification
