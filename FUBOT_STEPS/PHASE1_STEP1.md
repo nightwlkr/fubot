@@ -119,11 +119,11 @@ Every environment variable documented with a comment explaining its purpose and 
 ```bash
 # FUBOT Core
 FUBOT_ENV=development
-FUBOT_SECRET_KEY=<fubot_secret_key-removed>
-FUBOT_ENCRYPTION_KEY=<fubot_encryption_key-removed>
+FUBOT_SECRET_KEY=<your-32-char-secret-key>
+FUBOT_ENCRYPTION_KEY=<your-32-char-encryption-key>
 
 # Database
-DATABASE_URL=<database_url-removed>
+DATABASE_URL=postgresql+asyncpg://fubot:<password>@localhost:5432/fubot
 
 # Binance
 BINANCE_API_KEY=your-binance-api-key-here
@@ -132,7 +132,7 @@ BINANCE_TESTNET=true
 
 # Admin User
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=<admin_password-removed>
+ADMIN_PASSWORD=<your-admin-password>
 
 # VPS / Network
 VPS_HOST=10.10.30.25

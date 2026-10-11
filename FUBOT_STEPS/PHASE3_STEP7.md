@@ -29,7 +29,7 @@ Run the complete trading system in paper trading mode (BINANCE_TESTNET=true) for
 ```bash
 # 1. Set environment
 export BINANCE_TESTNET=true
-export DATABASE_URL=<database_url-removed>
+export DATABASE_URL=postgresql+asyncpg://fubot:<password>@localhost:5432/fubot
 
 # 2. Clear any existing test data
 python scripts/clear_test_data.py
