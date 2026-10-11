@@ -10,6 +10,7 @@ from backend.services.strategy_service import StrategyService, TradeDecision
 from backend.services.order_service import OrderService
 from backend.services.signal_service import SignalService
 from backend.services.alert_service import AlertService
+from backend.core.daily_reset import DailyResetService
 
 
 class TestRiskService:
@@ -249,3 +250,51 @@ async def test_alert_engine_facing_methods():
     assert any("DAILY LOSS LIMIT HIT" in m for m in messages)
     levels = [m["level"] for m in ws.sent]
     assert "CRITICAL" in levels and "WARNING" in levels and "ERROR" in levels
+
+
+async def test_engine_lifecycle_broadcasts_ws_events():
+    """PHASE4_STEP2: start/stop push bot_status to connected clients."""
+    from backend.core.bot_engine import BotEngine
+    from backend.core.websocket_manager import ws_manager
+    from backend.services.signal_service import SignalService
+
+    class FakeWS:
+        def __init__(self):
+            self.sent = []
+        async def send_json(self, msg):
+            self.sent.append(msg)
+
+    ws = FakeWS()
+    await ws_manager.connect(ws, user_id=99)
+    try:
+        alerts = AlertService()
+        alerts.register_ws_manager(ws_manager)
+        binance = FakeBinance(price=100.5)
+        engine = BotEngine(
+            settings={"rr_min": 3.0, "check_interval_seconds": 60, "max_positions": 3,
+                      "risk_percent": 1.0, "daily_loss_limit_r": -3.0},
+            binance=binance,
+            signal_service=SignalService(),
+            strategy_service=StrategyService(RiskService(), OrderService(binance=binance),
+                                             binance=binance, session_factory=None,
+                                             settings={"rr_min": 3.0}),
+            risk_service=RiskService(),
+            order_service=OrderService(binance=binance),
+            alert_service=alerts,
+            daily_reset=DailyResetService(settings={"daily_loss_limit_r": -3.0},
+                                          alert_service=alerts),
+            session_factory=None,
+        )
+        await engine.start("paper")
+        types = [m.get("type") for m in ws.sent]
+        assert "bot_status" in types and "alert" in types
+        assert any(m.get("data", {}).get("status") == "running"
+                   for m in ws.sent if m.get("type") == "bot_status")
+
+        await engine.stop()
+        types = [m.get("type") for m in ws.sent]
+        assert types.count("bot_status") == 2  # running + stopped
+        assert any(m.get("data", {}).get("status") == "stopped"
+                   for m in ws.sent if m.get("type") == "bot_status")
+    finally:
+        await ws_manager.disconnect(99)

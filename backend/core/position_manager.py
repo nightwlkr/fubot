@@ -16,6 +16,7 @@ from backend.services.binance_service import BinanceService
 from backend.indicators.structural import analyze_structure
 from backend.indicators.atr import calculate_atr
 from backend.core.daily_reset import DailyResetService
+from backend.core.websocket_manager import ws_manager
 from backend.services.alert_service import AlertService
 
 logger = logging.getLogger(__name__)
@@ -62,9 +63,24 @@ class PositionManager:
         while self._running:
             try:
                 await self._check_all_positions()
+                await self._broadcast_pnl_update()
             except Exception as e:
                 logger.error(f"PositionManager error: {e}", exc_info=True)
             await asyncio.sleep(30)
+
+    async def _broadcast_pnl_update(self):
+        """PHASE4_STEP2: pnl_update every pass (open positions + today's PnL)."""
+        try:
+            positions = await self._get_open_positions()
+            stats = await self.daily_reset.get_daily_stats()
+            await ws_manager.broadcast({"type": "pnl_update", "data": {
+                "open_count": len(positions),
+                "total_pnl_r": stats["total_pnl_r"],
+                "total_pnl_usdt": stats["total_pnl_usdt"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }})
+        except Exception as e:
+            logger.debug(f"pnl_update broadcast failed: {e}")
 
     async def _get_open_positions(self) -> list[dict]:
         """Snapshot all open positions as plain dicts."""
@@ -233,6 +249,10 @@ class PositionManager:
 
         # Update daily summary + alert outside the session
         await self.daily_reset.update_daily_summary(pnl_r, pnl_usdt)
+        await ws_manager.broadcast({"type": "position_closed", "data": {
+            "position_id": position["id"], "symbol": position["symbol"],
+            "pnl_r": pnl_r, "exit_reason": reason,
+            "closed_at": datetime.now(timezone.utc).isoformat()}})
 
         if self.alerts:
             if reason == "TP_HIT":

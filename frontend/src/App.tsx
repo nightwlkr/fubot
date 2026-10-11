@@ -1,6 +1,11 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { useEffect } from 'react'
 import { useAuthStore } from './store/authStore'
+import { useDashboardStore } from './store/dashboardStore'
+import { useAlertStore } from './store/alertStore'
+import { wsManager } from './api/websocket'
 import ErrorBoundary from './components/ErrorBoundary'
+import ToastContainer from './components/ToastContainer'
 import Login from './pages/Login'
 import Overview from './pages/Overview'
 import TradeLog from './pages/TradeLog'
@@ -34,9 +39,6 @@ function useBotPolling(intervalMs = 10000) {
   }, [intervalMs])
 }
 
-// Import dashboard store for polling
-import { useDashboardStore } from './store/dashboardStore'
-import { useEffect } from 'react'
 
 function ProtectedLayoutWithPolling({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore()
@@ -62,6 +64,28 @@ function ProtectedLayoutWithPolling({ children }: { children: React.ReactNode })
 
 export default function App() {
   const { user } = useAuthStore()
+
+  // Wire WebSocket messages: server alerts surface as toasts; data events
+  // refresh the dashboard store (throttled so bursts don't stampede the API).
+  useEffect(() => {
+    let lastRefresh = 0
+    const off = wsManager.onMessage((msg) => {
+      if (msg.type === 'alert') {
+        const data = (msg.data ?? {}) as { level?: string; message?: string }
+        useAlertStore.getState().push(data.level ?? 'INFO', data.message ?? '')
+        return
+      }
+      if (['bot_status', 'pnl_update', 'position_update', 'position_closed',
+           'signal_update', 'equity_snapshot'].includes(msg.type)) {
+        const now = Date.now()
+        if (now - lastRefresh > 2000) {
+          lastRefresh = now
+          useDashboardStore.getState().fetchOverview()
+        }
+      }
+    })
+    return () => { off() }
+  }, [])
 
   return (
     <BrowserRouter>
@@ -93,6 +117,7 @@ export default function App() {
         />
         <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        <ToastContainer />
       </ErrorBoundary>
     </BrowserRouter>
   )

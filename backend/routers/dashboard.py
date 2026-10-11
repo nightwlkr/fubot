@@ -150,7 +150,9 @@ async def dashboard_overview(
         ),
         open_positions=[_format_position(p, prices.get(p.symbol, 0.0)) for p in positions],
         equity_curve=[
-            EquityPoint(date=r.recorded_at.isoformat(), balance_usdt=float(r.balance_usdt))
+            EquityPoint(date=r.recorded_at.isoformat(),
+                        balance=float(r.balance_usdt),
+                        balance_usdt=float(r.balance_usdt))
             for r in equity_rows
         ],
         total_trades=total,

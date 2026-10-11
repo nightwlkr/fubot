@@ -21,6 +21,7 @@ from backend.services.order_service import OrderService
 from backend.services.alert_service import AlertService
 from backend.services.binance_service import BinanceService
 from backend.core.daily_reset import DailyResetService
+from backend.core.websocket_manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,8 @@ class BotEngine:
         self._started_at = datetime.now(timezone.utc)
         self._task = asyncio.create_task(self._main_loop())
         await self.alerts.bot_started(mode)
+        await ws_manager.broadcast({"type": "bot_status",
+                                    "data": {"status": "running", "mode": mode}})
         logger.info(f"BotEngine: started in {mode} mode")
 
     async def stop(self):
@@ -88,6 +91,8 @@ class BotEngine:
             except asyncio.CancelledError:
                 pass
         await self.alerts.bot_stopped()
+        await ws_manager.broadcast({"type": "bot_status",
+                                    "data": {"status": "stopped", "mode": self._mode}})
         logger.info("BotEngine: stopped")
 
     async def _main_loop(self):
@@ -104,6 +109,8 @@ class BotEngine:
                 # Equity snapshot every 5 scans
                 if self._scan_count % 5 == 0:
                     await self._maybe_snapshot_equity()
+                    await ws_manager.broadcast({"type": "equity_snapshot", "data": {
+                        "scan_count": self._scan_count}})
 
                 elapsed = (datetime.now(timezone.utc) - start).total_seconds()
                 self._last_scan = datetime.now(timezone.utc)
@@ -145,9 +152,17 @@ class BotEngine:
                 signals = await self.signals.scan_symbol(symbol)
 
                 for signal in signals:
+                    if signal.status == "PENDING":
+                        await ws_manager.broadcast({"type": "signal_update", "data": {
+                            "symbol": signal.symbol,
+                            "strategy_type": signal.strategy_type,
+                            "direction": signal.direction}})
                     decision = await self.strategy.evaluate_signal(signal, paper_mode=(self._mode == "paper"))
 
                     if decision.decision == "EXECUTE":
+                        await ws_manager.broadcast({"type": "position_update", "data": {
+                            "symbol": signal.symbol, "side": signal.direction,
+                            "mode": self._mode}})
                         await self.alerts.trade_executed(
                             symbol=signal.symbol,
                             direction=signal.direction,

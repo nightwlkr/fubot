@@ -75,7 +75,8 @@ class PositionItem(BaseModel):
 
 class EquityPoint(BaseModel):
     date: str
-    balance_usdt: float
+    balance: float          # frontend Overview equity chart reads `balance`
+    balance_usdt: float     # kept for backward compatibility
 
 
 class DashboardOverview(BaseModel):
