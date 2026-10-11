@@ -16,7 +16,7 @@ Status: **PHASE5 complete** — builds clean; bot-control and live-data flows wi
 - State: Zustand (authStore, dashboardStore); TanStack Query 5, react-hook-form + zod also installed
 - Routing: react-router-dom v7
 - Charts: lightweight-charts v5 (TradingView) for equity/performance charts
-- API: Axios client, base `VITE_API_URL` (default `/api`), Bearer header from the `fubot_token` JS cookie, 401 interceptor → clear cookie → `/login`; Vite dev proxy `/api` → `http://localhost:8000`
+- API: Axios client, base `VITE_API_URL` (default `/api`), Bearer header via `getToken()`, 401 interceptor → `clearToken()` → `/login`; Vite dev proxy `/api` → `http://localhost:8000`
 - Auth token: `api/token.ts` owns token storage. The backend's `fubot_token` cookie is httpOnly — invisible to JS, and browsers silently REJECT a same-name JS cookie write, so a plain JS cookie never survives in production. Login stores the response token in localStorage (best-effort cookie kept); `getToken` feeds the Bearer header, the WS auth message, and `checkAuth`; `clearToken` wipes both stores on logout/401. `checkAuth` runs from App on load (isRestoring gate) — refreshes stay logged in
 - Real-time: `wsManager` dials `API_BASE + /ws` (= `/api/ws`) with an `auth` message and auto-reconnect; backend serves both `/ws` and `/api/ws`, and the Vite dev proxy upgrades WebSocket (`ws: true`)
 - Lint: oxlint via `npm run lint` (`.oxlintrc.json`)
