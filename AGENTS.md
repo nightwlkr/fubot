@@ -96,6 +96,7 @@ Default section order:
 
 **FUBOT** — Binance Futures automated trading bot with React dashboard.
 **URL:** https://fubot.bedikian.cc
+**Repo:** https://github.com/nightwlkr/fubot (private; `origin`, branch `main`)
 **Stack:** FastAPI (Python) · PostgreSQL · React + Vite + TypeScript + Tailwind CSS + Zustand · Binance Futures USDS-M · Nginx
 **Strategy:** Crypto Banter 6-pillars (50 SMA filter, FVG entries, structural stops, 3:1+ R:R, -3R daily loss limit)
 
@@ -130,7 +131,7 @@ Still open (in priority order):
 - Inverted reward/risk math makes every FVG / 3-Candle / CHoCH entry invalid (`rr = risk/reward = 1/rr_min`, compared against `rr_min=3`), and `check_fvg_filled` reports bullish FVGs filled at formation. Pinned by strict-xfail tests.
 - Login rate limiter locks the whole source IP (blocks valid logins too) and `settings.value` uses `JSON` not the spec'd `JSONB`; seed ships 10 symbols vs the 7 in PHASE1_STEP2.
 - Dev auth caveat: the backend cookie is `secure=True`, so over plain http the backend's own cookie is dropped — the frontend's JS cookie (from the response token) is what makes dev work. Consider setting `secure` only when `FUBOT_ENV == "production"`.
-- No root `README.md` (PHASE6_STEP6). `backend/services/` rewrite still uncommitted — now also carries the audit fixes; commit after review.
+- No root `README.md` (PHASE6_STEP6). All work through the 2026-10-11 audit is committed and pushed to `origin/main` (history purged of secrets; repo private).
 - A stale Python process (PID 898) holds port 8000 serving dead routes; local dev server currently runs on 8001.
 
 ### Next
