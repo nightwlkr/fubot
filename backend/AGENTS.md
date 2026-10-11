@@ -47,16 +47,19 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 
 ### Open Gaps (block PHASE6 validation)
 
-- `main.py` never builds a `BotEngine` and never calls `routers/bot.set_bot_engine()`; `/api/bot/start|stop|status` return 503 or a stub status.
-- No WebSocket route is registered in `main.py`. `WebSocketRouter.websocket_endpoint` is unused, so nothing serves `/ws` or `/api/ws`. `AlertService.signal()` also calls the async `ws_manager.broadcast()` without `await` — real broadcasts are never delivered.
-- `services/signal_service.py` `scan_symbol` is a stub returning `None` — the candle-fetch → trend-bias → FVG/3-candle/CHoCH → volume/R:R filter pipeline from FUBOT_STEPS PHASE2_STEP7 is not implemented.
-- `services/order_service.py` never calls Binance — `place_order(simulate=False)` still only records a dict; the entry/SL/TP flow from PHASE3_STEP1 does not exist.
-- `services/binance_service.py` REST paths miss the `/fapi` prefix (e.g. `{base}/v1/klines` instead of `{base}/fapi/v1/klines`) and `get_order_book` targets the nonexistent `deepBook` endpoint — every REST call 404s.
-- Inverted reward/risk math in `fvg.evaluate_fvg_entry`, `choch.detect_choch`, and `three_candle.evaluate_three_candle_entry` makes every entry invalid (`rr = risk/reward = 1/rr_min`); `fvg.check_fvg_filled` reports bullish FVGs filled at formation — root cause is the step spec itself (PHASE2_STEP3 says "bullish filled when high ≥ zone_min" while storing `zone_min` as the gap *top*), so fix spec and code together. All pinned by strict-xfail tests in `tests/backend/test_indicators_more.py`.
-- `routers/bot.py` (and each router) re-implements cookie auth instead of using a shared FastAPI dependency — extract one `get_current_user` dependency.
+- **Live order path untested against real exchange fills** — `StrategyService.evaluate_signal` live mode (MARKET entry + reduce-only STOP_MARKET SL + TAKE_PROFIT_MARKET TP + `orders`-table logging) is unit-tested with mocks only; PHASE3_STEP7's 72h paper run and PHASE4_STEP4's go-live checklist are the gates.
+- BE-trailing (`PositionManager._check_be_trailing`) has no automated test; it needs live 5m BOS detection.
+- `routers/bot.py` (and each router) re-implements cookie auth instead of a shared FastAPI dependency — extract one `get_current_user` dependency.
 - 11 models still use `class Config` (`config.py`, `schemas/auth.py`, `signal.py`, `trade.py`, `order.py`, `position.py`, `dashboard.py` ×6) — convert to `ConfigDict`.
-- `WebSocketRouter` keeps a `while True: sleep(1)` keep-alive that never observes `WebSocketDisconnect`; disconnect handling must come from the receive loop.
-- Audit fixes landed 2026-10-11 (route double-prefix, `auth_service.UserResponse`, dashboard `/today`, encryption nonce, apikey masking, `daily_reset` logger, RSI flat series) — covered by `tests/backend/` (see root AGENTS.md Audit results).
+- Login rate limiter locks the whole source IP (blocks valid logins from that IP too).
+- Dev auth caveat: the cookie is `secure=True`, so over plain http the backend's own cookie is dropped — the frontend's JS cookie (from the response token) is what makes dev work. Consider `secure` only when `FUBOT_ENV == "production"`.
+
+### Architecture notes
+
+- **Session factory, not sessions**: `main.py init_bot` hands every component (`BotEngine`, `PositionManager`, `DailyResetService`, `StrategyService`, `SignalService`, `OrderService`) the `AsyncSessionLocal` FACTORY. AsyncSession is not task-safe — the scan loop runs concurrently with request handlers on the same loop, so each operation opens a short-lived session. Never reintroduce a long-lived shared session.
+- **Paper mode records everything**: simulated fills + OPEN Position rows + signal TRIGGERED. This deliberately deviates from PHASE3_STEP3's "no records in paper" because PHASE3_STEP7's 72h paper run and the dashboard need the data.
+- `AlertService` methods are async (they broadcast via `ws_manager`); the engine-side callers await them.
+- 2026-10-11 second-pass fixes: `/fapi` paths + depth endpoint + reduce-only closing orders, inverted R:R math in FVG/CHoCH/3-candle evaluators, FVG fill semantics + zone bounds, BotEngine/PositionManager wiring, `/ws` route + double-accept + receive-loop disconnects, async AlertService, `get_status` un-awaited coroutine. All covered by `tests/backend/`.
 
 ### Coding Rules
 - Use async/await for all I/O operations
@@ -67,7 +70,7 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 78 passing + 4 strict-xfail (indicators, encryption, auth, services, WS manager, API smoke against the real DB)
+- `PYTHONPATH=. pytest tests/backend/ -q` — 102 passing (indicators, encryption, auth, services, signal pipeline against the real DB, Binance paths via httpx MockTransport, WS manager, API smoke with a real app lifespan)
 - `PYTHONPATH=. python -c "import backend.main"` — app imports without errors
 - `python -m uvicorn backend.main:app --reload` — boots and serves; local dev currently on port 8001 (a stale process holds 8000)
 - No hardcoded credentials — everything from env vars

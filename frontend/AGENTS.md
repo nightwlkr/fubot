@@ -8,7 +8,7 @@ Real-time trading dashboard for the FUBOT bot. Displays positions, P&L, equity c
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/frontend/`
-Status: **PHASE5 complete** — builds clean; live-data and bot-control flows blocked on backend integration gaps (see root AGENTS.md Current Status)
+Status: **PHASE5 complete** — builds clean; bot-control and live-data flows wired to the backend (2026-10-11)
 
 ## Local Contracts
 
@@ -18,7 +18,7 @@ Status: **PHASE5 complete** — builds clean; live-data and bot-control flows bl
 - Charts: lightweight-charts v5 (TradingView) for equity/performance charts
 - API: Axios client, base `VITE_API_URL` (default `/api`), Bearer header from the `fubot_token` JS cookie, 401 interceptor → clear cookie → `/login`; Vite dev proxy `/api` → `http://localhost:8000`
 - Auth cookie: the backend cookie is httpOnly (unreadable from JS), so login re-writes `fubot_token` as a normal JS cookie from the response body — that JS cookie is what the Bearer header and WS auth read
-- Real-time: `wsManager` dials `API_BASE + /ws` (= `/api/ws`) with an `auth` message and auto-reconnect — no backend route serves this yet
+- Real-time: `wsManager` dials `API_BASE + /ws` (= `/api/ws`) with an `auth` message and auto-reconnect; backend serves both `/ws` and `/api/ws`, and the Vite dev proxy upgrades WebSocket (`ws: true`)
 - Lint: oxlint via `npm run lint` (`.oxlintrc.json`)
 
 ## Work Guidance
@@ -42,8 +42,7 @@ Status: **PHASE5 complete** — builds clean; live-data and bot-control flows bl
 - WebSocket: `wsManager` singleton in `src/api/websocket.ts` with message routing to stores
 
 ### Known Gaps
-- `/api/ws` has no backend handler — every live-data path is dead until `main.py` registers the WebSocket route
-- Bot start/stop on Overview calls `/api/bot/*`, which 503s until the engine is wired in `main.py`
+- Backend WebSocket + bot engine now wired (2026-10-11): `/ws` serves the auth handshake and `/api/bot/*` works in paper mode
 - 16 oxlint warnings (exhaustive-deps class); single ~537 kB JS chunk — code-split when convenient
 - All 25 REST endpoints in `endpoints.ts` verified to match the backend's OpenAPI paths (2026-10-11); backend `win_rate` is already percent-scaled — do not multiply again (fixed in TradeLog/Performance)
 
