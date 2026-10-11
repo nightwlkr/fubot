@@ -1,39 +1,49 @@
 """
 Order Service — placement, tracking, and lifecycle management.
 
-Wired by: StrategyService (route signals into orders), BotEngine (monitor fills).
+Turns a validated signal into a working Binance order (or a simulated fill in
+paper mode). Live orders are logged to the `orders` table; simulated fills stay
+in memory so the paper trail never looks like real execution history.
 """
 import logging
-from decimal import Decimal
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 class OrderService:
-    """
-    Responsible for turning a validated signal into a working Binance order
-    (or a mocked order when MODE=paper).
-    """
-
-    def __init__(self) -> None:
+    def __init__(self, binance=None, session_factory=None) -> None:
+        self.binance = binance
+        self.session_factory = session_factory
         self.pending: dict[int, dict] = {}  # id -> order dict
+
+    async def get_current_position(self, symbol: str) -> Optional[dict]:
+        """Open position on `symbol` from Binance, or None when flat/unknown."""
+        if self.binance is None:
+            return None
+        try:
+            pos = await self.binance.get_position(symbol)
+        except Exception as exc:
+            logger.debug("get_current_position(%s) failed: %s", symbol, exc)
+            return None
+        return pos or None
 
     async def place_order(
         self,
         symbol: str,
         side: str,
         order_type: str,
-        quantity: Decimal,
-        price: Optional[Decimal] = None,
-        stop_loss: Optional[Decimal] = None,
-        take_profit: Optional[Decimal] = None,
+        quantity,
+        price=None,
+        stop_loss=None,
+        take_profit=None,
         *,
         simulate: bool = False,
+        binance_order_id: Optional[int] = None,
     ) -> dict:
         """
-        Create an order record.  In simulation mode the order is immediately
-        marked as NEW and lives in self.pending so fill callbacks can resolve it.
+        Create an order record. In simulation mode the order is immediately
+        marked FILLED. Live orders are additionally logged to the `orders` table.
         """
         order = {
             "symbol": symbol,
@@ -44,16 +54,39 @@ class OrderService:
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "status": "NEW",
-            "filled_quantity": Decimal("0"),
+            "filled_quantity": 0 if not simulate else quantity,
             "simulate": simulate,
+            "binance_order_id": binance_order_id,
         }
         if simulate:
             order["status"] = "FILLED"
-            order["filled_quantity"] = quantity
         self.pending[id(order)] = order
-        logger.info("Order placed: %s %s %s %.8f @ %s simulate=%s",
+        logger.info("Order placed: %s %s %s %s @ %s simulate=%s",
                     symbol, side, order_type, quantity, price, simulate)
+        if not simulate:
+            await self._log_order(order)
         return order
+
+    async def _log_order(self, order: dict) -> None:
+        """Persist a live order to the `orders` table."""
+        if self.session_factory is None:
+            return
+        try:
+            from backend.models.order import Order as OrderModel
+            async with self.session_factory() as session:
+                session.add(OrderModel(
+                    binance_order_id=order.get("binance_order_id"),
+                    symbol=order["symbol"],
+                    side=order["side"],
+                    order_type=order["type"],
+                    price=order["price"],
+                    quantity=float(order["quantity"]),
+                    filled_qty=float(order["filled_quantity"]),
+                    status=order["status"],
+                ))
+                await session.commit()
+        except Exception:
+            logger.exception("Failed to log order for %s", order["symbol"])
 
     async def get_order(self, order_id: int) -> Optional[dict]:
         """Return a tracked order by its id, or None if not found."""
@@ -64,6 +97,7 @@ _order_service: Optional[OrderService] = None
 
 
 def get_order_service() -> OrderService:
+    """Bare service — the wired instance (binance + session_factory) comes from main.py."""
     global _order_service
     if _order_service is None:
         _order_service = OrderService()
