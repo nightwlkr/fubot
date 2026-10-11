@@ -60,4 +60,7 @@ async def get_me(
         user = await auth_service.get_current_user_from_token(token, db)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    return UserResponse(id=user.id, username=user.username, role=user.role)
+    # Echo the token back so a cookie-only session (localStorage cleared) can
+    # re-seed the frontend's durable copy — the httpOnly cookie is unreadable
+    # from JS, so this is the only way the client can recover its own token.
+    return {"id": user.id, "username": user.username, "role": user.role, "token": token}

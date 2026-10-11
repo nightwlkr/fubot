@@ -51,7 +51,29 @@ def test_me_with_cookie(client, test_user):
     _login(client, test_user)
     res = client.get("/api/auth/me")
     assert res.status_code == 200
+    body = res.json()
+    assert body["username"] == test_user.username
+    # /me echoes the token so a cookie-only session can re-seed localStorage
+    assert "token" in body
+    assert body["token"]
+
+
+def test_me_and_endpoints_accept_bearer_only(client, test_user):
+    """Regression: endpoints used to read ONLY the httpOnly cookie, so a valid
+    localStorage token (sent as Bearer) still got 401 → checkAuth cleared the
+    session and the user was signed out on refresh. All endpoints must accept
+    the Bearer header with NO cookie present."""
+    _login(client, test_user)
+    token = client.get("/api/auth/me").json()["token"]
+    client.cookies.clear()  # cookie gone — only the Bearer header remains
+
+    res = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200
     assert res.json()["username"] == test_user.username
+
+    # A protected data endpoint must also accept Bearer-only auth
+    res = client.get("/api/dashboard/overview", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 200
 
 
 def test_wrong_password_401(client, test_user):

@@ -62,17 +62,31 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   checkAuth: async () => {
     const token = getToken()
-    if (!token) {
-      set({ user: null, token: null, isRestoring: false })
-      return
-    }
+    // Always attempt /me even without a stored token: the httpOnly cookie set
+    // at login rides along automatically (withCredentials: true) and is enough
+    // to authenticate. This covers browsers that hold the cookie but whose
+    // localStorage was cleared or predates the durable-token fix.
     try {
-      const res = await api.get<{ user: User }>(ENDPOINTS.me)
-      set({ user: res.data.user, token, isRestoring: false })
+      const res = await api.get<{ user: User; token?: string }>(ENDPOINTS.me)
+      // /me echoes the token it authenticated with. If we came in with only
+      // the httpOnly cookie (localStorage cleared / pre-durable-token
+      // browser), seed localStorage so the Bearer header and WS auth message
+      // have a token from here on.
+      const { user, token: serverToken } = res.data
+      const effective = token ?? serverToken ?? null
+      if (effective) setToken(effective)
+      set({ user, token: effective, isRestoring: false })
       wsManager.connect()
-    } catch {
-      clearToken()
-      set({ user: null, token: null, isRestoring: false })
+    } catch (err: any) {
+      // Only clear the stored token on a genuine 401 (expired/invalid). A
+      // transient network error should NOT wipe the session — keep the token
+      // so the next checkAuth/refresh can restore it.
+      if (err.response?.status === 401) {
+        clearToken()
+        set({ user: null, token: null, isRestoring: false })
+      } else {
+        set({ user: null, token: null, isRestoring: false })
+      }
     }
   },
 }))

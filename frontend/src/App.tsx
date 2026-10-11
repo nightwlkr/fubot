@@ -44,11 +44,15 @@ function ProtectedLayoutWithPolling({ children }: { children: React.ReactNode })
   const { user, isRestoring } = useAuthStore()
   const fetchOverview = useDashboardStore(state => state.fetchOverview)
 
+  // Poll only AFTER the session is restored and the user is known — firing
+  // fetchOverview while isRestoring is true hits the API before auth is
+  // confirmed, which can trigger a spurious 401 → hard redirect to /login.
   useEffect(() => {
+    if (isRestoring || !user) return
     fetchOverview()
     const id = setInterval(fetchOverview, 10000)
     return () => clearInterval(id)
-  }, [fetchOverview])
+  }, [fetchOverview, isRestoring, user])
 
   if (isRestoring) {
     return (
@@ -116,7 +120,17 @@ export default function App() {
         <Routes>
         <Route
           path="/login"
-          element={user ? <Navigate to="/" replace /> : <Login />}
+          element={
+            isRestoring ? (
+              <div className="min-h-screen bg-background flex items-center justify-center text-muted">
+                Restoring session…
+              </div>
+            ) : user ? (
+              <Navigate to="/" replace />
+            ) : (
+              <Login />
+            )
+          }
         />
         <Route
           path="/"

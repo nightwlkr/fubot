@@ -1,25 +1,28 @@
-import Cookies from 'js-cookie'
-
 const KEY = 'fubot_token'
 
 /**
  * Token storage helper.
  *
- * The backend sets its own httpOnly fubot_token cookie on login — browsers
- * silently REJECT a JS write with the same name, so a JS-cookie copy never
- * survives on production. localStorage is the durable JS-readable copy:
- * needed by the Bearer header and the WebSocket auth message.
+ * The backend sets its own httpOnly `fubot_token` cookie on login — that copy
+ * is invisible to JS and is what the backend reads. The frontend keeps its own
+ * durable, JS-readable copy in localStorage (the httpOnly cookie can't be read
+ * from JS, so the app needs its own store to send the Bearer header and the
+ * WebSocket auth message).
+ *
+ * There is deliberately NO js-cookie duplicate here: a same-name JS cookie
+ * goes stale relative to localStorage (clearToken can't remove the httpOnly
+ * one, so a later Cookies.get could return an old token while localStorage
+ * holds the new one). localStorage is the single source of truth for the
+ * frontend; the httpOnly cookie is the backend's.
  */
 export function getToken(): string | null {
-  return Cookies.get(KEY) || localStorage.getItem(KEY)
+  return localStorage.getItem(KEY)
 }
 
 export function setToken(token: string): void {
-  Cookies.set(KEY, token, { expires: 7 })
   localStorage.setItem(KEY, token)
 }
 
 export function clearToken(): void {
-  Cookies.remove(KEY)
   localStorage.removeItem(KEY)
 }

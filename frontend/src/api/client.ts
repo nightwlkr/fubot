@@ -17,14 +17,21 @@ apiClient.interceptors.request.use((config) => {
   return config
 })
 
-// Handle 401 → clear cookie and redirect to login
+// Handle 401 → clear token and redirect to login
 apiClient.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const status = err.response?.status
+    // Only treat a 401 on a PROTECTED endpoint as "session ended". A 401 from
+    // /auth/login or /auth/me itself is a normal signal handled by the caller
+    // (login failure / checkAuth) — a hard redirect here would bounce a
+    // successful restore straight back to /login.
+    const url: string = err.config?.url ?? ''
+    const isAuthEndpoint = url.includes('/auth/login') || url.includes('/auth/me')
+    if (status === 401 && !isAuthEndpoint) {
       clearToken()
       window.location.href = '/login'
-    } else if (err.response?.status === 429) {
+    } else if (status === 429) {
       console.warn('Rate limited')
     } else if (!err.response) {
       console.error('Network error')
