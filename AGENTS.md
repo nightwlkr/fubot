@@ -120,6 +120,7 @@ Default section order:
 
 ### Open items
 
+- FIXED 2026-10-12: dashboard crashed right after login — /api/dashboard/overview read nonexistent app.state.bot_* attributes so bot_status lacked scan_count/last_scan (Header called .toLocaleString() on undefined), and TodayStats silently dropped the PnLCard fields (wins/losses/pnl_r/pnl_usdt/trades_count/daily_limit_status). Overview now reads the real engine via app.state.bot_engine.get_status(); schemas match the frontend contract; regression test added. Paper run restarted after the deploy.
 - **Binance API keys on the VPS are empty placeholders** — public klines work (signals flow), but equity snapshots and exchange-side position checks need fresh TESTNET keys in `/opt/fubot/.env` + `systemctl restart fubot`.
 - The 72h paper run must pass PHASE3_STEP7's criteria before any go-live discussion. **Going live with real money requires explicit user confirmation.**
 - Live order path is mock-tested only until real fills are observed.
