@@ -41,7 +41,7 @@ function useBotPolling(intervalMs = 10000) {
 
 
 function ProtectedLayoutWithPolling({ children }: { children: React.ReactNode }) {
-  const { user } = useAuthStore()
+  const { user, isRestoring } = useAuthStore()
   const fetchOverview = useDashboardStore(state => state.fetchOverview)
 
   useEffect(() => {
@@ -50,6 +50,13 @@ function ProtectedLayoutWithPolling({ children }: { children: React.ReactNode })
     return () => clearInterval(id)
   }, [fetchOverview])
 
+  if (isRestoring) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center text-muted">
+        Restoring session…
+      </div>
+    )
+  }
   if (!user) return <Navigate to="/login" replace />
   return (
     <div className="flex h-screen bg-background overflow-hidden">
@@ -63,7 +70,21 @@ function ProtectedLayoutWithPolling({ children }: { children: React.ReactNode })
 }
 
 export default function App() {
-  const { user } = useAuthStore()
+  const { user, isRestoring, checkAuth } = useAuthStore()
+
+  // Restore the session from the fubot_token cookie on page load — without
+  // this every refresh bounced to /login.
+  useEffect(() => {
+    checkAuth()
+  }, [checkAuth])
+
+  if (isRestoring) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center text-muted">
+        Restoring session…
+      </div>
+    )
+  }
 
   // Wire WebSocket messages: server alerts surface as toasts; data events
   // refresh the dashboard store (throttled so bursts don't stampede the API).

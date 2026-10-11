@@ -14,6 +14,7 @@ interface AuthState {
   user: User | null
   token: string | null
   isLoading: boolean
+  isRestoring: boolean  // true until the session restore on page load finishes
   error: string | null
 
   login: (username: string, password: string) => Promise<void>
@@ -25,6 +26,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   user: null,
   token: Cookies.get('fubot_token') || null,
   isLoading: false,
+  isRestoring: true,  // checked in checkAuth() on app load
   error: null,
 
   login: async (username, password) => {
@@ -60,14 +62,17 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   checkAuth: async () => {
     const token = Cookies.get('fubot_token')
-    if (!token) return
+    if (!token) {
+      set({ user: null, token: null, isRestoring: false })
+      return
+    }
     try {
       const res = await api.get<{ user: User }>(ENDPOINTS.me)
-      set({ user: res.data.user, token })
+      set({ user: res.data.user, token, isRestoring: false })
       wsManager.connect()
     } catch {
       Cookies.remove('fubot_token')
-      set({ user: null, token: null })
+      set({ user: null, token: null, isRestoring: false })
     }
   },
 }))
