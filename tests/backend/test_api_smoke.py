@@ -235,3 +235,19 @@ def test_position_payload_has_live_mark_price(client, test_user):
         assert overview_positions and "mark_price" in overview_positions[0]
     finally:
         run_async(_remove(pos_id))
+
+
+def test_strategies_endpoint_returns_r_buckets(client, test_user):
+    """Performance page RDistributionChart reads {bucket, count} pairs — the old
+    payload was per-strategy stats, so b.bucket.startsWith crashed the page and
+    (with no error boundary) killed the whole app."""
+    _login(client, test_user)
+    res = client.get("/api/performance/strategies")
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert data, "bucket list must not be empty"
+    for item in data:
+        assert set(item) == {"bucket", "count"}
+        assert item["count"] >= 0
+    labels = [item["bucket"] for item in data]
+    assert "3R+" in labels and "0 to 0.5R" in labels  # spec bucket labels

@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './store/authStore'
+import ErrorBoundary from './components/ErrorBoundary'
 import Login from './pages/Login'
 import Overview from './pages/Overview'
 import TradeLog from './pages/TradeLog'
@@ -64,7 +65,8 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <Routes>
+      <ErrorBoundary>
+        <Routes>
         <Route
           path="/login"
           element={user ? <Navigate to="/" replace /> : <Login />}
@@ -90,7 +92,8 @@ export default function App() {
           element={<ProtectedLayoutWithPolling><Settings /></ProtectedLayoutWithPolling>}
         />
         <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+        </Routes>
+      </ErrorBoundary>
     </BrowserRouter>
   )
 }

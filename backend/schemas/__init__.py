@@ -28,7 +28,7 @@ from backend.schemas.settings import (
     APIKeyStatusResponse,
     APIKeySaveRequest,
 )
-from backend.schemas.performance import EquityPoint as PerfEquityPoint, EquityResponse, MonthlyReturn as PerfMonthlyReturn, MonthlyResponse, StrategyPerformance, StrategyResponse
+from backend.schemas.performance import EquityPoint as PerfEquityPoint, EquityResponse, MonthlyReturn as PerfMonthlyReturn, MonthlyResponse, RBucket, StrategyResponse
 from backend.schemas.bot import BotStatusResponse, BotStartRequest
 
 __all__ = [
@@ -71,7 +71,7 @@ __all__ = [
     "EquityResponse",
     "PerfMonthlyReturn",
     "MonthlyResponse",
-    "StrategyPerformance",
+    "RBucket",
     "StrategyResponse",
     "BotStatusResponse",
     "BotStartRequest",

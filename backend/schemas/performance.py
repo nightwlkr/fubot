@@ -22,12 +22,17 @@ class MonthlyResponse(BaseModel):
     data: list[MonthlyReturn]
 
 
-class StrategyPerformance(BaseModel):
-    strategy: str
-    trades: int
-    win_rate: float
-    avg_r: float
+class RBucket(BaseModel):
+    """R-distribution bucket for the Performance page histogram.
+
+    The frontend colors a bucket red when its label starts with '0' or '-'.
+    """
+
+    bucket: str
+    count: int
 
 
 class StrategyResponse(BaseModel):
-    data: list[StrategyPerformance]
+    # despite the name, this endpoint feeds the R:R distribution chart —
+    # the frontend reads {bucket, count} pairs (PHASE5_STEP8)
+    data: list[RBucket]

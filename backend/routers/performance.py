@@ -15,7 +15,7 @@ from backend.schemas.performance import (
     EquityResponse,
     MonthlyReturn,
     MonthlyResponse,
-    StrategyPerformance,
+    RBucket,
     StrategyResponse,
 )
 
@@ -111,29 +111,26 @@ async def strategy_performance(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """R:R distribution of closed trades — feeds the Performance histogram.
+
+    Buckets match the frontend labels (PHASE5_STEP8); ordered from worst to best.
+    """
     user = await get_current_user_from_cookie(request, db)
 
     result = await db.execute(select(Trade))
-    trades = result.scalars().all()
+    trades = [float(t.pnl_r) for t in result.scalars().all()]
 
-    by_strategy: dict[str, list[Trade]] = {}
-    for t in trades:
-        strat = t.strategy_type
-        if strat not in by_strategy:
-            by_strategy[strat] = []
-        by_strategy[strat].append(t)
-
-    data = []
-    for strat, strat_trades in sorted(by_strategy.items()):
-        total = len(strat_trades)
-        wins = sum(1 for t in strat_trades if t.pnl_r > 0)
-        win_rate = (wins / total * 100) if total > 0 else 0.0
-        avg_r = sum(t.pnl_r for t in strat_trades) / total if total > 0 else 0.0
-        data.append(StrategyPerformance(
-            strategy=strat,
-            trades=total,
-            win_rate=win_rate,
-            avg_r=avg_r,
-        ))
-
+    edges = [
+        ("-3R or worse", lambda r: r <= -3.0),
+        ("-3 to -2R", lambda r: -3.0 < r <= -2.0),
+        ("-2 to -1R", lambda r: -2.0 < r <= -1.0),
+        ("-1 to 0R", lambda r: -1.0 < r < 0.0),
+        ("0 to 0.5R", lambda r: 0.0 <= r < 0.5),
+        ("0.5 to 1R", lambda r: 0.5 <= r < 1.0),
+        ("1 to 2R", lambda r: 1.0 <= r < 2.0),
+        ("2 to 3R", lambda r: 2.0 <= r < 3.0),
+        ("3R+", lambda r: r >= 3.0),
+    ]
+    data = [RBucket(bucket=label, count=sum(1 for r in trades if match(r)))
+            for label, match in edges]
     return StrategyResponse(data=data)
