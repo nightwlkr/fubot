@@ -50,9 +50,9 @@ Bullish FVG (FVG forms after bullish impulse):
      candle[i-1].low > candle[i-2].high  ← GAP UP (no overlap)
   3. candle[i].close > candle[i-1].high  ← price confirmed upward
 
-  FVG Zone:
-    zone_min = candle[i-1].low   ← bottom of the bullish candle
-    zone_max = candle[i-2].high   ← top of the bearish candle
+  FVG Zone (numeric bounds — zone_min < zone_max always):
+    zone_min = candle[i-2].high  ← gap bottom (top of the bearish candle)
+    zone_max = candle[i-1].low   ← gap top (bottom of the bullish candle)
 
 Bearish FVG (FVG forms after bearish impulse):
   1. candle[i-2] is bullish (close > open)
@@ -60,9 +60,9 @@ Bearish FVG (FVG forms after bearish impulse):
      candle[i-1].high < candle[i-2].low  ← GAP DOWN (no overlap)
   3. candle[i].close < candle[i-1].low  ← price confirmed downward
 
-  FVG Zone:
-    zone_min = candle[i-2].low   ← bottom of the bullish candle
-    zone_max = candle[i-1].high   ← top of the bearish candle
+  FVG Zone (numeric bounds — zone_min < zone_max always):
+    zone_min = candle[i-1].high  ← gap top (bottom of the bearish candle)
+    zone_max = candle[i-2].low   ← gap bottom (low of the bullish candle)
 ```
 
 ### Important Details
@@ -98,8 +98,8 @@ async def detect_fvg(candles: list[dict]) -> list[FVG]:
             fvg = FVG(
                 symbol=symbol,
                 direction='BULLISH',
-                zone_min=c2['low'],
-                zone_max=c1['high'],
+                zone_min=c1['high'],   # gap bottom
+                zone_max=c2['low'],    # gap top
                 midpoint=(c2['low'] + c1['high']) / 2,
                 impulse_candle_high=c2['high'],
                 impulse_candle_low=c2['low'],
@@ -117,8 +117,8 @@ async def detect_fvg(candles: list[dict]) -> list[FVG]:
             fvg = FVG(
                 symbol=symbol,
                 direction='BEARISH',
-                zone_min=c1['low'],
-                zone_max=c2['high'],
+                zone_min=c2['high'],   # gap top
+                zone_max=c1['low'],    # gap bottom
                 midpoint=(c1['low'] + c2['high']) / 2,
                 impulse_candle_high=c2['high'],
                 impulse_candle_low=c2['low'],
@@ -132,13 +132,15 @@ async def detect_fvg(candles: list[dict]) -> list[FVG]:
 
 def check_fvg_filled(fvg: FVG, current_price: float, high: float, low: float) -> bool:
     """
-    Check if price has entered and filled an FVG zone.
-    FVG is filled when price (high for bullish, low for bearish) enters the zone.
+    Check if price has traded back into the FVG zone (mitigated it).
+    A bullish FVG sits below price — filled when price returns DOWN into the
+    gap (low <= zone_max). A bearish FVG sits above price — filled when price
+    returns UP into the gap (high >= zone_min).
     """
     if fvg.direction == 'BULLISH':
-        return high >= fvg.zone_min  # price wick touched zone_min
+        return low <= fvg.zone_max  # price returned into the gap from above
     else:
-        return low <= fvg.zone_max  # price wick touched zone_max
+        return high >= fvg.zone_min  # price returned into the gap from below
 
 
 def filter_valid_fvgs(fvgs: list[FVG], max_age_bars: int = 20) -> list[FVG]:
@@ -180,7 +182,7 @@ def evaluate_fvg_entry(fvg: FVG, atr: float, rr_min: float = 3.0) -> FVGEntry:
         risk_distance = stop_loss - entry_price
         take_profit = entry_price - (risk_distance * rr_min)
 
-    rr_ratio = risk_distance / (take_profit - entry_price) if (take_profit - entry_price) > 0 else 0
+    rr_ratio = abs(take_profit - entry_price) / risk_distance if risk_distance > 0 else 0  # reward / risk
 
     return FVGEntry(
         fvg=fvg,
@@ -217,15 +219,16 @@ Export `FVG`, `FVGEntry`, `detect_fvg`, `evaluate_fvg_entry`
 # Create a known bullish FVG pattern
 candles = [
     {'open': 100, 'high': 105, 'low': 99, 'close': 100, 'volume': 1000, 'close_time': 1},
-    {'open': 101, 'high': 103, 'low': 100.5, 'close': 102.5, 'volume': 1200, 'close_time': 2},  # impulse (gap up from c1 high=105)
-    {'open': 102.5, 'high': 106, 'low': 102, 'close': 105, 'volume': 1500, 'close_time': 3},  # confirmation
+    {'open': 106, 'high': 108, 'low': 106, 'close': 107.5, 'volume': 1200, 'close_time': 2},  # impulse (gap up: c2.low=106 > c1.high=105)
+    {'open': 107.5, 'high': 110, 'low': 107, 'close': 109, 'volume': 1500, 'close_time': 3},  # confirmation (close 109 > c2.high=108)
 ]
-# Note: c1.high=105, c2.low=100.5 → c2.low > c1.high → BULLISH FVG zone between 100.5 and 105
+# Gap zone spans [c1.high=105, c2.low=106] → numeric bounds zone_min=105, zone_max=106
 fvgs = asyncio.run(detect_fvg(candles, "BTCUSDT"))
 assert len(fvgs) == 1
 assert fvgs[0].direction == 'BULLISH'
-assert fvgs[0].zone_min == 100.5
-assert fvgs[0].zone_max == 105
+assert fvgs[0].zone_min == 105
+assert fvgs[0].zone_max == 106
+assert fvgs[0].midpoint == 105.5
 ```
 
 ---

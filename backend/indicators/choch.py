@@ -77,7 +77,8 @@ def detect_choch(
             stop = h_prev.price
             risk = abs(l_recent.price - h_prev.price)
             tp = l_recent.price + (risk * rr_min)
-            rr = risk / abs(tp - l_recent.price) if (tp - l_recent.price) != 0 else 0.0
+            # R:R = reward / risk
+            rr = abs(tp - l_recent.price) / risk if risk > 0 else 0.0
 
             patterns.append(CHoCH(
                 symbol=symbol or "",
@@ -108,7 +109,8 @@ def detect_choch(
             stop = l_prev.price
             risk = abs(l_prev.price - h_recent.price)
             tp = h_recent.price - (risk * rr_min)
-            rr = risk / abs(h_recent.price - tp) if (h_recent.price - tp) != 0 else 0.0
+            # R:R = reward / risk
+            rr = abs(h_recent.price - tp) / risk if risk > 0 else 0.0
 
             patterns.append(CHoCH(
                 symbol=symbol or "",

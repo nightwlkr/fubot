@@ -1,10 +1,9 @@
 """Extended indicator tests — ATR, FVG, BOS, CHoCH, pivots, structural, volume, 3-candle, trend.
 
 Expected values come from the indicator definitions, never from implementation output.
-Known implementation defects are pinned with strict xfail so they cannot regress silently.
 """
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from backend.indicators.atr import calculate_atr
 from backend.indicators.pivots import find_pivot_highs_lows
@@ -105,7 +104,7 @@ class TestFVG:
     def bullish_fvg_candles(self):
         # c1 bearish, c2 bullish gapping above c1.high, c3 confirms above c2.high
         return [
-            candle(105, 106, 100, 101),   # c1 bearish
+            candle(105, 106, 100, 101),   # c1 bearish (high 106)
             candle(107, 112, 107, 111),   # c2 bullish, low 107 > c1.high 106
             candle(111, 115, 110, 114),   # c3 close 114 > c2.high 112
         ]
@@ -115,10 +114,10 @@ class TestFVG:
         assert len(fvgs) == 1
         f = fvgs[0]
         assert f.direction == "BULLISH"
-        # NOTE: current code stores zone_min=c2.low (107) and zone_max=c1.high (106)
-        # — numerically inverted bounds (min > max). Midpoint is still correct.
-        assert f.zone_min == 107.0
-        assert f.zone_max == 106.0
+        # numeric bounds: min = gap bottom (c1.high), max = gap top (c2.low)
+        assert f.zone_min == 106.0
+        assert f.zone_max == 107.0
+        assert f.zone_min < f.zone_max
         assert f.midpoint == pytest.approx(106.5)
         assert f.impulse_low == 107.0
 
@@ -126,52 +125,80 @@ class TestFVG:
         flat = [candle(100, 101, 99, 100, i) for i in range(5)]
         assert detect_fvg(flat, "X") == []
 
-    @pytest.mark.xfail(strict=True, reason="fill check inverted: bullish branch tests high >= zone_min "
-                                           "(true at formation), so bullish FVGs are reported filled immediately. "
-                                           "Correct semantics: fill when price trades back DOWN into the zone "
-                                           "(low <= zone_max)")
     def test_bullish_fill_semantics(self):
         """A bullish FVG is FILLED when price trades back DOWN into the zone."""
         f = detect_fvg(self.bullish_fvg_candles(), "BTCUSDT")[0]
-        # price dips back to zone_max → filled
+        # price dips back into the gap (low <= zone_max=107) → filled
         assert check_fvg_filled(f, current_price=106.5, high=106.5, low=105.0) is True
-        # price stays above the zone → not filled
+        # price stays above the gap (low 110 > 107) → not filled
         assert check_fvg_filled(f, current_price=113.0, high=115.0, low=110.0) is False
 
-    @pytest.mark.xfail(strict=True, reason="rr formula inverted (risk/reward = 1/rr_min ≈ 0.33), "
-                                           "so every FVG entry is reported invalid. "
-                                           "TP is built as entry ± risk*rr_min → reward/risk == rr_min")
     def test_fvg_entry_rr_by_construction(self):
+        """TP is built as entry ± risk*rr_min, so reward/risk must equal rr_min and validate."""
         f = detect_fvg(self.bullish_fvg_candles(), "BTCUSDT")[0]
         res = evaluate_fvg_entry(f, atr=1.0, rr_min=3.0)
         assert res["is_valid"] is True
         assert res["rr_ratio"] == pytest.approx(3.0)
+        # stop sits 1 ATR below the gap bottom
+        assert res["stop_loss"] == pytest.approx(105.0)
+
+    def test_fvg_stop_is_beyond_zone(self):
+        f = detect_fvg(self.bullish_fvg_candles(), "BTCUSDT")[0]
+        res = evaluate_fvg_entry(f, atr=1.0, rr_min=3.0)
+        assert res["stop_loss"] < f.zone_min  # beyond the gap bottom
 
 
 class TestCHoCH:
-    @pytest.mark.xfail(strict=True, reason="same inverted rr formula as FVG: is_valid can never be True "
-                                           "when TP is built from risk*rr_min")
-    def test_bullish_choch_validity(self):
-        # craft: lower-highs structure where a recent LOW pierces above the older HIGH
-        candles = []
-        # old pivot high 110 at index 7
-        for i in range(40):
-            if i == 7:
-                c = candle(105, 110, 104, 109)
+    def choch_series(self):
+        """Bearish structure (lower highs 90 → 85) then a recent low (95) ABOVE
+        the older high (90) → bullish CHoCH. Pivots with left/right=5:
+        highs at 9 (90) and 15 (85); lows at 5 (76), 12 (78), 27 (95)."""
+        out = []
+        for i in range(33):
+            if i == 5:
+                c = candle(79, 80, 76, 79)          # L1 valley
+            elif i == 9:
+                c = candle(85, 90, 84, 89)          # H1 = 90
+            elif i == 10:
+                c = candle(85, 84.5, 82, 83)
+            elif i == 11:
+                c = candle(83, 84, 80, 81)
+            elif i == 12:
+                c = candle(81, 82, 78, 79)          # L2 valley = 78
             elif i == 13:
-                c = candle(101, 102, 95, 101)     # old low
-            elif i == 19:
-                c = candle(104, 106, 100, 104)    # lower high (106 > 110? no — use 105)
+                c = candle(81, 84, 79.5, 82)
+            elif i == 14:
+                c = candle(82, 84.5, 81, 84)
+            elif i == 15:
+                c = candle(84, 85, 83, 84.5)        # H2 = 85 (lower high)
+            elif 16 <= i <= 20:
+                base = 84 - (i - 15) * 0.5
+                c = candle(base, base + 0.5, base - 1, base)
+            elif 21 <= i <= 26:
+                c = candle(98, 100, 96, 99)         # plateau above the old high
+            elif i == 27:
+                c = candle(97, 98, 95, 97)          # L3 = 95 → breaks above H1
+            elif 28 <= i <= 32:
+                c = candle(97, 99, 96, 98)
             else:
-                base = 100 + i * 0.3
-                c = candle(base, base + 2, base - 2, base)
+                base = 80 + i * 0.5
+                c = candle(base, base + 2, base - 1, base)
             c["close_time"] = datetime(2026, 1, 1, 0, i)
-            candles.append(c)
-        patterns = detect_choch(candles, "BTCUSDT", "5m", atr=1.0, rr_min=3.0)
-        assert patterns, "expected a bullish CHoCH when the recent low breaks the older high"
+            out.append(c)
+        return out
+
+    def test_bullish_choch_detected_and_valid(self):
+        patterns = detect_choch(self.choch_series(), "BTCUSDT", "5m", atr=1.0, rr_min=3.0)
+        assert patterns, "recent low (95) above older high (90) is a bullish CHoCH"
         p = patterns[0]
         assert p.direction == "BULLISH"
-        assert p.is_valid is True  # TP built from risk*rr_min → reward/risk == rr_min
+        assert p.trigger_price == 95.0
+        assert p.pivot_price == 90.0
+        # TP built from risk*rr_min → reward/risk == rr_min → valid
+        assert p.is_valid is True
+        assert p.rr_ratio == pytest.approx(3.0)
+        assert p.stop_loss == 90.0
+        assert p.take_profit == 110.0
 
 
 class TestThreeCandle:
@@ -190,13 +217,12 @@ class TestThreeCandle:
         assert p.entry_price == 105.0      # c1.high
         assert p.stop_loss == 99.0         # c2 sweep low
 
-    @pytest.mark.xfail(strict=True, reason="inverted rr formula: rr = risk/(risk*rr_min) = 1/rr_min, "
-                                           "is_valid always False")
     def test_entry_rr_by_construction(self):
         p = detect_three_candles(self.sweep_candles(), "BTCUSDT", "5m")[0]
         res = evaluate_three_candle_entry(p, atr=0.5, rr_min=3.0)
         assert res["is_valid"] is True
         assert res["rr_ratio"] == pytest.approx(3.0)
+        assert res["take_profit"] == pytest.approx(105 + 6 * 3)
 
 
 class TestVolumeProfile:

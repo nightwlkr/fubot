@@ -49,9 +49,10 @@ def detect_fvg(candles: list[dict], symbol: str = "") -> list[FVG]:
             fvg = FVG(
                 symbol=symbol or "",
                 direction="BULLISH",
-                zone_min=c2["low"],
-                zone_max=c1["high"],
-                midpoint=(c2["low"] + c1["high"]) / 2,
+                # zone bounds are numeric: min = gap bottom, max = gap top
+                zone_min=c1["high"],
+                zone_max=c2["low"],
+                midpoint=(c1["high"] + c2["low"]) / 2,
                 impulse_high=c2["high"],
                 impulse_low=c2["low"],
                 formed_at=candles[i - 1].get("close_time", datetime.now()),
@@ -69,8 +70,9 @@ def detect_fvg(candles: list[dict], symbol: str = "") -> list[FVG]:
             fvg = FVG(
                 symbol=symbol or "",
                 direction="BEARISH",
-                zone_min=c1["low"],
-                zone_max=c2["high"],
+                # zone bounds are numeric: min = gap top, max = gap bottom
+                zone_min=c2["high"],
+                zone_max=c1["low"],
                 midpoint=(c1["low"] + c2["high"]) / 2,
                 impulse_high=c2["high"],
                 impulse_low=c2["low"],
@@ -83,10 +85,15 @@ def detect_fvg(candles: list[dict], symbol: str = "") -> list[FVG]:
 
 
 def check_fvg_filled(fvg: FVG, current_price: float, high: float, low: float) -> bool:
-    """Check if price has filled the FVG zone."""
+    """Check if price has traded back into the FVG zone (mitigated it).
+
+    A bullish FVG sits below price — it is filled when price returns DOWN into
+    the gap (low <= zone_max). A bearish FVG sits above price — filled when
+    price returns UP into the gap (high >= zone_min).
+    """
     if fvg.direction == "BULLISH":
-        return high >= fvg.zone_min
-    return low <= fvg.zone_max
+        return low <= fvg.zone_max
+    return high >= fvg.zone_min
 
 
 def evaluate_fvg_entry(fvg: FVG, atr: float, rr_min: float = 3.0, current_price: float = 0.0) -> dict:
@@ -109,7 +116,8 @@ def evaluate_fvg_entry(fvg: FVG, atr: float, rr_min: float = 3.0, current_price:
         return {"entry_price": entry_price, "stop_loss": stop_loss, "take_profit": take_profit,
                 "rr_ratio": 0.0, "is_valid": False}
 
-    rr_ratio = risk_distance / abs(take_profit - entry_price)
+    # R:R = reward / risk (TP is built from risk * rr_min, so this equals rr_min)
+    rr_ratio = abs(take_profit - entry_price) / risk_distance
 
     return {
         "entry_price": entry_price,

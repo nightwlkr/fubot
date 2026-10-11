@@ -122,7 +122,7 @@ def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float 
         risk = sl - entry
         tp = entry - (risk * rr_min)
 
-    rr = risk / abs(tp - entry) if (tp - entry) != 0 else 0.0
+    rr = abs(tp - entry) / risk if risk > 0 else 0.0  # R:R = reward / risk
 
     return {
         "entry_price": entry,
