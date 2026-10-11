@@ -26,16 +26,33 @@ class LoginResponse(BaseModel):
 
 # --- Dashboard ---
 class BotStatus(BaseModel):
-    is_running: bool
-    mode: str  # "paper" or "live"
-    uptime_seconds: Optional[float] = None
+    # matches frontend BotStatus (store/dashboardStore.ts): status/scan_count/last_scan
+    status: str = "stopped"  # "running" | "stopped"
+    is_running: bool = False  # kept for backward compatibility
+    mode: str = "paper"  # "paper" or "live"
+    uptime_seconds: float = 0.0
+    scan_count: int = 0
+    last_scan: Optional[str] = None
+
+
+class DailyLimitStatus(BaseModel):
+    used_r: float
+    limit_r: float
+    remaining_r: float
 
 
 class TodayStats(BaseModel):
+    # matches frontend PnLCard: pnl_r/pnl_usdt/wins/losses/trades_count/daily_limit_status
     realized_pnl_usdt: float = 0.0
     unrealized_pnl_usdt: float = 0.0
     win_rate: float = 0.0
     trades_today: int = 0
+    pnl_r: float = 0.0
+    pnl_usdt: float = 0.0
+    wins: int = 0
+    losses: int = 0
+    trades_count: int = 0
+    daily_limit_status: Optional[DailyLimitStatus] = None
 
 
 class PositionItem(BaseModel):

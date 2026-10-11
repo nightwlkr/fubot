@@ -40,7 +40,7 @@ export default function Header() {
 
         {botStatus && (
           <span className="text-xs text-muted font-mono hidden sm:block">
-            SCAN #{botStatus.scan_count.toLocaleString()}
+            SCAN #{botStatus?.scan_count?.toLocaleString() ?? 0}
           </span>
         )}
       </div>

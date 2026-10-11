@@ -14,6 +14,7 @@ from backend.models.trade import Trade
 from backend.models.equity_log import EquityLog
 from backend.schemas.dashboard import (
     BotStatus,
+    DailyLimitStatus,
     TodayStats,
     PositionItem,
     EquityPoint,
@@ -65,12 +66,14 @@ async def dashboard_overview(
 ):
     user = await get_current_user_from_cookie(request, db)
 
-    # Bot status (from app state or default)
+    # Bot status — from the real engine (app.state.bot_engine, wired in main.init_bot)
     from backend.main import app
-    bot_running = getattr(app.state, "bot_running", False)
-    bot_mode = getattr(app.state, "bot_mode", "paper")
-    bot_scan_count = getattr(app.state, "bot_scan_count", 0)
-    bot_last_scan = getattr(app.state, "bot_last_scan", None)
+    engine = getattr(app.state, "bot_engine", None)
+    if engine is not None:
+        engine_status = await engine.get_status()
+    else:
+        engine_status = {"status": "stopped", "mode": "paper", "uptime_seconds": 0.0,
+                         "scan_count": 0, "last_scan": None}
 
     # Open positions
     result = await db.execute(select(Position).where(Position.status == "OPEN"))
@@ -102,15 +105,24 @@ async def dashboard_overview(
 
     return DashboardOverview(
         bot_status=BotStatus(
-            is_running=bot_running,
-            mode=bot_mode,
-            uptime_seconds=getattr(app.state, "bot_uptime_seconds", 0.0),
+            status=engine_status["status"],
+            is_running=engine_status["status"] == "running",
+            mode=engine_status["mode"],
+            uptime_seconds=engine_status["uptime_seconds"],
+            scan_count=engine_status["scan_count"],
+            last_scan=(engine_status["last_scan"].isoformat()
+                       if engine_status.get("last_scan") else None),
         ),
         today_stats=TodayStats(
             realized_pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
             unrealized_pnl_usdt=0.0,
             win_rate=win_rate,
             trades_today=daily.total_trades if daily else 0,
+            pnl_r=float(daily.total_pnl_r) if daily else 0.0,
+            pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
+            wins=daily.wins if daily else 0,
+            losses=daily.losses if daily else 0,
+            trades_count=daily.total_trades if daily else 0,
         ),
         open_positions=[_format_position(p) for p in positions],
         equity_curve=[
@@ -152,11 +164,14 @@ async def today_stats(
         unrealized_pnl_usdt=0.0,
         win_rate=0.0,
         trades_today=daily.total_trades if daily else 0,
+        pnl_r=float(daily.total_pnl_r) if daily else 0.0,
+        pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
         wins=daily.wins if daily else 0,
         losses=daily.losses if daily else 0,
-        daily_limit_status={
-            "used_r": used_r,
-            "limit_r": limit_r,
-            "remaining_r": max(0.0, limit_r - used_r),
-        },
+        trades_count=daily.total_trades if daily else 0,
+        daily_limit_status=DailyLimitStatus(
+            used_r=used_r,
+            limit_r=limit_r,
+            remaining_r=max(0.0, limit_r - used_r),
+        ),
     )

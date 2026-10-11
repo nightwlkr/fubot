@@ -134,3 +134,20 @@ def test_missing_resources_404(client, test_user):
     _login(client, test_user)
     assert client.get("/api/trades/999999").status_code == 404
     assert client.get("/api/positions/999999").status_code == 404
+
+
+def test_overview_payload_matches_frontend_contract(client, test_user):
+    """Regression: overview bot_status must carry scan_count/last_scan (Header renders
+    them) and today must carry the PnLCard fields (pnl_r/wins/losses/daily_limit_status).
+    The old bot_status read nonexistent app.state attrs — scan_count was missing and
+    the dashboard crashed after login."""
+    _login(client, test_user)
+    body = client.get("/api/dashboard/overview").json()
+    bot = body["bot_status"]
+    assert {"status", "mode", "scan_count", "last_scan"} <= set(bot)
+    assert bot["status"] in ("running", "stopped")
+    assert bot["scan_count"] >= 0
+
+    today = client.get("/api/dashboard/today").json()
+    assert {"pnl_r", "pnl_usdt", "wins", "losses", "trades_count", "daily_limit_status"} <= set(today)
+    assert today["daily_limit_status"]["limit_r"] == 3.0
