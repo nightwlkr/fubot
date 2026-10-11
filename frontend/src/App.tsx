@@ -15,8 +15,23 @@ import Settings from './pages/Settings'
 import Sidebar from './components/layout/Sidebar'
 import Header from './components/layout/Header'
 
-function ProtectedLayout({ children }: { children: React.ReactNode }) {
-  const { user } = useAuthStore()
+function RestoreScreen() {
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center text-muted">
+      Restoring session…
+    </div>
+  )
+}
+
+/**
+ * Gate for authenticated pages. While the session is still being restored
+ * (isRestoring) it shows the restore screen INSTEAD of redirecting — the old
+ * bug redirected to /login before checkAuth resolved, bouncing a valid session
+ * to the login page on every refresh.
+ */
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { user, isRestoring } = useAuthStore()
+  if (isRestoring) return <RestoreScreen />
   if (!user) return <Navigate to="/login" replace />
   return (
     <div className="flex h-screen bg-background overflow-hidden">
@@ -29,63 +44,43 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
   )
 }
 
-// Simple polling hook for bot status
-function useBotPolling(intervalMs = 10000) {
-  const { fetchOverview } = useDashboardStore()
-  useEffect(() => {
-    fetchOverview()
-    const id = setInterval(fetchOverview, intervalMs)
-    return () => clearInterval(id)
-  }, [intervalMs])
-}
-
-
-function ProtectedLayoutWithPolling({ children }: { children: React.ReactNode }) {
-  const { user, isRestoring } = useAuthStore()
+/**
+ * Polling for the dashboard. Lives inside RequireAuth so it only runs once
+ * the user is confirmed — never before auth resolves.
+ */
+function DashboardLayout({ children }: { children: React.ReactNode }) {
+  const { user } = useAuthStore()
   const fetchOverview = useDashboardStore(state => state.fetchOverview)
 
-  // Poll only AFTER the session is restored and the user is known — firing
-  // fetchOverview while isRestoring is true hits the API before auth is
-  // confirmed, which can trigger a spurious 401 → hard redirect to /login.
   useEffect(() => {
-    if (isRestoring || !user) return
+    if (!user) return
     fetchOverview()
     const id = setInterval(fetchOverview, 10000)
     return () => clearInterval(id)
-  }, [fetchOverview, isRestoring, user])
+  }, [fetchOverview, user])
 
-  if (isRestoring) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center text-muted">
-        Restoring session…
-      </div>
-    )
-  }
-  if (!user) return <Navigate to="/login" replace />
-  return (
-    <div className="flex h-screen bg-background overflow-hidden">
-      <Sidebar />
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <Header />
-        <main className="flex-1 overflow-y-auto p-6">{children}</main>
-      </div>
-    </div>
-  )
+  return <>{children}</>
+}
+
+/** Login route: while restoring show the gate; if already authed go home. */
+function LoginRoute() {
+  const { user, isRestoring } = useAuthStore()
+  if (isRestoring) return <RestoreScreen />
+  if (user) return <Navigate to="/" replace />
+  return <Login />
 }
 
 export default function App() {
-  const { user, isRestoring, checkAuth } = useAuthStore()
+  const { checkAuth } = useAuthStore()
 
-  // Restore the session from the fubot_token cookie on page load — without
-  // this every refresh bounced to /login.
+  // Restore the session from localStorage / the httpOnly cookie on page load.
+  // Runs once; the gate above keeps the UI in "Restoring" until it resolves.
   useEffect(() => {
     checkAuth()
   }, [checkAuth])
 
   // Wire WebSocket messages: server alerts surface as toasts; data events
   // refresh the dashboard store (throttled so bursts don't stampede the API).
-  // NOTE: both effects must stay ABOVE any conditional return — a hook after
-  // an early return changes the hook count between renders (React #310).
   useEffect(() => {
     let lastRefresh = 0
     const off = wsManager.onMessage((msg) => {
@@ -106,53 +101,20 @@ export default function App() {
     return () => { off() }
   }, [])
 
-  if (isRestoring) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center text-muted">
-        Restoring session…
-      </div>
-    )
-  }
-
+  // BrowserRouter is ALWAYS mounted — never conditionally. Mounting it only
+  // after the restore finished made the router read window.location at a
+  // moment that raced the store, which is what bounced refreshes to /login.
   return (
     <BrowserRouter>
       <ErrorBoundary>
         <Routes>
-        <Route
-          path="/login"
-          element={
-            isRestoring ? (
-              <div className="min-h-screen bg-background flex items-center justify-center text-muted">
-                Restoring session…
-              </div>
-            ) : user ? (
-              <Navigate to="/" replace />
-            ) : (
-              <Login />
-            )
-          }
-        />
-        <Route
-          path="/"
-          element={<ProtectedLayoutWithPolling><Overview /></ProtectedLayoutWithPolling>}
-        />
-        <Route
-          path="/trades"
-          element={<ProtectedLayoutWithPolling><TradeLog /></ProtectedLayoutWithPolling>}
-        />
-        <Route
-          path="/scanner"
-          element={<ProtectedLayoutWithPolling><Scanner /></ProtectedLayoutWithPolling>}
-        />
-        <Route
-          path="/performance"
-          element={<ProtectedLayoutWithPolling><Performance /></ProtectedLayoutWithPolling>}
-        />
-        <Route
-          path="/settings"
-          element={<ProtectedLayoutWithPolling><Settings /></ProtectedLayoutWithPolling>}
-        />
-        <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="/login" element={<LoginRoute />} />
+          <Route path="/" element={<RequireAuth><DashboardLayout><Overview /></DashboardLayout></RequireAuth>} />
+          <Route path="/trades" element={<RequireAuth><TradeLog /></RequireAuth>} />
+          <Route path="/scanner" element={<RequireAuth><Scanner /></RequireAuth>} />
+          <Route path="/performance" element={<RequireAuth><Performance /></RequireAuth>} />
+          <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
         <ToastContainer />
       </ErrorBoundary>
