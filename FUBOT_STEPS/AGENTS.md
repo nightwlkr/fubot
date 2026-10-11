@@ -15,6 +15,7 @@ Location: `/Users/vick/Documents/Projects/fubot/FUBOT_STEPS/`
 - Steps must be executed in order — later steps depend on earlier ones
 - Each step file is self-contained: it states the goal, provides exact commands/file contents, and ends with a verification check
 - The `FUBOT_PRODUCT_PLAN.md` in the repo root is the source of truth — step files implement it
+- Step files are the plan, not a status log — completion status lives in the root `AGENTS.md` Current Status
 
 ## Work Guidance
 
@@ -45,11 +46,11 @@ Location: `/Users/vick/Documents/Projects/fubot/FUBOT_STEPS/`
 ```
 
 ### Key Constraints
-- Steps use `uv` for Python package management
-- Backend runs on port 8000, frontend on port 5173 (dev) / 80 (prod)
-- Nginx proxies frontend to `/` and backend API to `/api/v1`
+- Python dependencies install into system Python 3.13 — no `uv`, no virtualenv (see root AGENTS.md Verification)
+- Backend runs on port 8000, frontend on port 5173 (dev); production serves the built frontend on 443
+- Nginx proxies the backend API at `/api/` (no version segment) and WebSocket at `/ws`
 - Database migrations via `alembic upgrade head`
-- Bot runs as a systemd service `fubot-bot.service`
+- Bot runs as the systemd unit `fubot.service`, controlled by `scripts/fubotctl.sh`
 
 ## Verification
 

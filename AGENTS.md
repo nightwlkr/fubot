@@ -83,14 +83,14 @@ Default section order:
 
 ## Child DOX Index
 
-- **backend/** — FastAPI trading bot backend (models, routers, services, core logic)
-- **backend/** — FastAPI trading bot backend (models, routers, services, core logic)
+- **backend/** — FastAPI trading bot backend (models, routers, schemas, services, indicators, core engine) — see `backend/AGENTS.md`
 - **frontend/** — React + Vite + TypeScript trading dashboard — see `frontend/AGENTS.md`
-- **alembic/** — SQLAlchemy database migrations (not yet configured)
+- **alembic/** — SQLAlchemy async migrations, configured with 2 revisions — see `alembic/AGENTS.md`
 - **nginx/** — Production reverse-proxy and SSL config — see `nginx/AGENTS.md`
-- **FUBOT_STEPS/** — 42-step build guide (PHASE1–PHASE6); each step is a markdown file
-- **scripts/** — Automation scripts (create_admin.py, init_db.py, setup_ssl.sh, fubotctl.sh)
-- **tests/** — Test suite (not yet scaffolded)
+- **FUBOT_STEPS/** — 42-step build guide (PHASE1–PHASE6); each step is a markdown file — see `FUBOT_STEPS/AGENTS.md`
+- **tests/** — pytest suite for backend units — see `tests/AGENTS.md`
+- **scripts/** — Automation scripts (create_admin.py, init_db.py, setup_ssl.sh, fubotctl.sh); owned by this doc
+- **fubot.service** — systemd unit for the backend; owned by this doc
 
 ## Project Overview
 
@@ -101,10 +101,50 @@ Default section order:
 
 ## Current Status
 
-- **Backend**: Phase 1 scaffold complete (config, database, encryption, models, auth service, Binance service, auth router). Routers for bot/dashboard/positions/trades/signals/settings/orders/performance exist as stubs.
-- **Frontend**: Phase 5 complete (all 10 steps). React + Vite + TypeScript + Tailwind v4 + Zustand. All 6 pages built (Login, Overview, TradeLog, Scanner, Performance, Settings). Builds successfully.
-- **Infrastructure**: Nginx config written, systemd service file created, SSL setup script ready, admin creation script ready.
-- **Next**: Phase 2 (indicators, signal detection) or backend router implementation.
+PHASE1–PHASE5 implemented and integration-tested (2026-10-11 full audit). PHASE6 (validation + deployment) not started.
+
+- **Backend (PHASE1–4)**: config, database, encryption, 10 models, 9 routers with 28 endpoints, 9 schema modules, 8 services, 11 indicator modules, 4 core components (bot engine, position manager, daily reset, WebSocket manager). ~4,700 lines of Python.
+- **Database**: Alembic applied locally (`alembic current` = `002_seed_data`), role `fubot` provisioned, 10 tables + seeds verified. `002_seed_data` was fixed to `json.dumps` values before asyncpg's JSON codec (raw floats broke the migration).
+- **Frontend (PHASE5)**: complete and building. React 19 + Vite 8 + TS 6 + Tailwind v4 + Zustand 5 + TanStack Query. 6 pages, `frontend/dist/` output.
+- **Infrastructure**: `nginx/fubot.conf`, `fubot.service`, `scripts/` written. Not deployed; certbot not run.
+- **Tests**: 78 passing + 4 strict-xfail (pinned defects) across indicators, encryption, auth, services, WS manager, and API smoke (real DB).
+
+### Audit results (2026-10-11)
+
+Fixed during the audit:
+- Double-prefixed routes (`/api/auth/auth/login`) in `main.py` — the frontend could not reach any endpoint. Now `/api/<router>`.
+- `routers/auth.py` referenced nonexistent `auth_service.UserResponse` → login always 500'd. Now imports the schema.
+- `routers/dashboard.py` `/today` used a nonexistent `db.bind.params` API → 500. Now reads the Setting row.
+- `encryption.py` called the nonexistent `AESGCM.generate_nonce` → saving API keys always 500'd. Now `os.urandom(12)`.
+- `GET /api/settings/apikey` masked the literal string "placeholder" — now decrypts and masks the stored key.
+- `daily_reset.py` used an undefined `logger` (NameError on midnight reset).
+- `indicators/rsi.py` returned 100 for flat price series (undefined 0/0 RS); now 50 per convention. NOTE: this deviates from the PHASE2 step-file text, which says "avg_loss == 0 → 100.0" — kept 50 because RSI 100 on a flat market flips trend bias to BEARISH; revert is one line if the spec is preferred.
+- Frontend displayed win_rate ×100 twice (backend already sends percent) — TradeLog and Performance fixed.
+
+Still open (in priority order):
+- `BotEngine` is never instantiated — `main.py` lifespan must build it (with all services), store on `app.state`, and call `routers/bot.set_bot_engine()`; `/api/bot/*` currently 503.
+- No WebSocket route mounted — `WebSocketRouter.websocket_endpoint` is unused; frontend dials `/api/ws`, nginx proxies `/ws`, backend serves neither. Also `AlertService.signal()` calls the async `ws_manager.broadcast()` without await, so no alert ever reaches a client.
+- `SignalService.scan_symbol` is a stub returning `None` — the PHASE4 orchestration (fetch candles → trend bias → FVG/3-candle/CHoCH → volume + R:R filters) is spec'd in FUBOT_STEPS PHASE2_STEP7 but not implemented.
+- `OrderService` never talks to Binance — even `simulate=False` only records a dict; PHASE3_STEP1's entry/SL/TP order flow does not exist.
+- `binance_service.py` REST paths miss the `/fapi` prefix (calls `https://fapi.binance.com/v1/klines`), and `get_order_book` uses the nonexistent `deepBook` endpoint — every REST call 404s.
+- Inverted reward/risk math makes every FVG / 3-Candle / CHoCH entry invalid (`rr = risk/reward = 1/rr_min`, compared against `rr_min=3`), and `check_fvg_filled` reports bullish FVGs filled at formation. Pinned by strict-xfail tests.
+- Login rate limiter locks the whole source IP (blocks valid logins too) and `settings.value` uses `JSON` not the spec'd `JSONB`; seed ships 10 symbols vs the 7 in PHASE1_STEP2.
+- Dev auth caveat: the backend cookie is `secure=True`, so over plain http the backend's own cookie is dropped — the frontend's JS cookie (from the response token) is what makes dev work. Consider setting `secure` only when `FUBOT_ENV == "production"`.
+- No root `README.md` (PHASE6_STEP6). `backend/services/` rewrite still uncommitted — now also carries the audit fixes; commit after review.
+- A stale Python process (PID 898) holds port 8000 serving dead routes; local dev server currently runs on 8001.
+
+### Next
+
+PHASE6_STEP1–6 in order: wire BotEngine + WS route, implement `scan_symbol` and the real order flow (fixing the `/fapi` paths and inverted R:R first), end-to-end paper run, -3R limit validation, security audit, deploy, then `README.md`.
+
+## Verification
+
+- `PYTHONPATH=. pytest tests/backend/ -q` — 78 passing + 4 strict-xfail (pinned defects)
+- `PYTHONPATH=. python -c "import backend.main"` — backend imports cleanly
+- `cd frontend && npm run build` — dashboard builds to `frontend/dist/`
+- `cd frontend && npm run lint` — oxlint; warnings tolerated, errors block
+- `alembic history` / `alembic current` — migration chain and applied head
+- Python dependencies are installed in system Python 3.13 (`/Library/Frameworks/Python.framework/Versions/3.13/bin`); there is no project virtualenv
 
 ## Key Project Files
 
