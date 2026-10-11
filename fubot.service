@@ -5,15 +5,15 @@ Wants=postgresql.service
 
 [Service]
 Type=simple
-User=vick
-Group=staff
-WorkingDirectory=/Users/vick/Documents/Projects/fubot
+User=fubot
+Group=fubot
+WorkingDirectory=/opt/fubot
 
 # Environment
-EnvironmentFile=/Users/vick/Documents/Projects/fubot/.env
+EnvironmentFile=/opt/fubot/.env
 
 # Start command
-ExecStart=/usr/bin/python3 -m uvicorn backend.main:app \
+ExecStart=/opt/fubot/.venv/bin/python -m uvicorn backend.main:app \
     --host 127.0.0.1 \
     --port 8000 \
     --workers 1
@@ -29,10 +29,8 @@ SyslogIdentifier=fubot
 
 # Security hardening
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/Users/vick/Documents/Projects/fubot /var/log/fubot
 PrivateTmp=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target

@@ -4,97 +4,10 @@ Covers the router-prefix fix (PHASE1), auth guard, and empty-state responses
 for every resource endpoint. Requires the local PostgreSQL `fubot` database
 (see alembic/AGENTS.md provisioning).
 """
-import asyncio
-import secrets
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from backend.config import settings
-from backend.database import AsyncSessionLocal
-from backend.main import app
-from backend.models.user import User
-from backend.services import auth_service
-
-TEST_PASSWORD = "test-pass-1234"
-
-
-def _run(coro):
-    """Run an async DB operation on its own engine so the pool never crosses
-    event loops with the TestClient portal (which owns backend.database.engine).
-
-    asyncio.run() leaves set_event_loop(None) behind, which breaks the next
-    pytest-asyncio test depending on collection order — restore it instead.
-    """
-    policy = asyncio.get_event_loop_policy()
-    try:
-        prev = policy.get_event_loop()
-    except RuntimeError:
-        prev = None
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    finally:
-        asyncio.set_event_loop(prev)
-        loop.close()
-
-
-async def _create_user():
-    engine = create_async_engine(settings.DATABASE_URL)
-    Session = async_sessionmaker(engine, expire_on_commit=False)
-    try:
-        async with Session() as db:
-            username = f"api_test_{secrets.token_hex(4)}"
-            db.add(User(username=username,
-                        password_hash=auth_service.hash_password(TEST_PASSWORD),
-                        role="admin"))
-            await db.commit()
-            result = await db.execute(select(User).where(User.username == username))
-            return result.scalar_one()
-    finally:
-        await engine.dispose()
-
-
-async def _delete_user(user_id):
-    engine = create_async_engine(settings.DATABASE_URL)
-    Session = async_sessionmaker(engine, expire_on_commit=False)
-    try:
-        async with Session() as db:
-            result = await db.execute(select(User).where(User.id == user_id))
-            u = result.scalar_one_or_none()
-            if u:
-                await db.delete(u)
-                await db.commit()
-    finally:
-        await engine.dispose()
-
-
-@pytest.fixture()
-def client():
-    """Fresh app lifespan per test.
-
-    Function scope keeps the bot engine's long-lived DB session from spanning
-    tests: with module scope, pytest-randomly can interleave other modules'
-    tests between smoke tests, and a session held across multiple TestClient
-    portal lifecycles ends up with invalidated pooled connections
-    (PendingRollbackError). Each test boots its own lifespan instead.
-    """
-    from backend.database import engine as shared_engine
-    _run(shared_engine.dispose())  # drop pooled connections from other loops
-    with TestClient(app) as c:
-        yield c
-    _run(shared_engine.dispose())
-
-
-@pytest.fixture(scope="module")
-def test_user():
-    user = _run(_create_user())
-    yield user
-    _run(_delete_user(user.id))
-
+from tests.backend.conftest import TEST_PASSWORD  # shared constant
 
 def _login(client, user):
     res = client.post("/api/auth/login", json={"username": user.username, "password": TEST_PASSWORD})
