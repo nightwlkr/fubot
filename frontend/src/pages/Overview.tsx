@@ -7,7 +7,7 @@ import { useDashboardStore } from '../store/dashboardStore'
 import type { Position } from '../store/dashboardStore'
 import { clsx } from 'clsx'
 import { Play, Square, Loader2, ExternalLink } from 'lucide-react'
-import { createChart, LineSeries, type IChartApi, type Time } from 'lightweight-charts'
+import { createChart, LineSeries, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
 
 function formatPrice(p: number) {
   return p >= 1000 ? p.toFixed(2) : p >= 1 ? p.toFixed(4) : p.toFixed(6)
@@ -17,6 +17,9 @@ export default function Overview() {
   const { botStatus, positions, equityCurve, todayStats, isLoading, fetchOverview, fetchToday, startBot, stopBot } = useDashboardStore()
   const [chart, setChart] = useState<IChartApi | null>(null)
   const [chartContainer, setChartContainer] = useState<HTMLDivElement | null>(null)
+  // createChart()'s object has no getSeries() at runtime — hold the series
+  // returned by addSeries() instead of calling chart.getSeries().
+  const [series, setSeries] = useState<ISeriesApi<'Line'> | null>(null)
 
   useEffect(() => {
     fetchOverview()
@@ -33,8 +36,9 @@ export default function Overview() {
       timeScale: { borderColor: '#2A2F3A', timeVisible: true },
       rightPriceScale: { borderColor: '#2A2F3A' },
     })
-    const series = c.addSeries(LineSeries, { color: '#3B82F6', lineWidth: 2 })
+    const s = c.addSeries(LineSeries, { color: '#3B82F6', lineWidth: 2 })
     setChart(c)
+    setSeries(s)
     const handleResize = () => {
       if (chartContainer) c.applyOptions({ width: chartContainer.clientWidth })
     }
@@ -43,15 +47,13 @@ export default function Overview() {
   }, [chartContainer])
 
   useEffect(() => {
-    if (!chart || equityCurve.length === 0) return
-    const series = chart.getSeries()?.[0] ?? null
-    if (!series) return
+    if (!chart || !series || equityCurve.length === 0) return
     series.setData(equityCurve.map(p => ({
       time: (new Date(p.date).getTime() / 1000) as Time,
       value: p.balance,
     })))
     chart.timeScale().fitContent()
-  }, [equityCurve, chart])
+  }, [equityCurve, chart, series])
 
   const isRunning = botStatus?.status === 'running'
   const mode = botStatus?.mode || 'paper'

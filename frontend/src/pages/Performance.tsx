@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { createChart, LineSeries, HistogramSeries, type IChartApi, type Time } from 'lightweight-charts'
+import { createChart, LineSeries, HistogramSeries, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
 import { api } from '../api/client'
 import { ENDPOINTS } from '../api/endpoints'
 import { Card, CardHeader, CardTitle } from '../components/ui/Card'
@@ -37,6 +37,10 @@ const RANGE_DAYS: Record<Range, number> = { '7d': 7, '30d': 30, '90d': 90, '365d
 function EquityChart() {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
+  // Hold the series returned by addSeries() — createChart's chart object has
+  // NO getSeries() method at runtime (that's on a pane API), so calling
+  // chart.getSeries() threw "not a function" and crashed the page.
+  const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const [range, setRange] = useState<Range>('30d')
 
   useEffect(() => {
@@ -50,7 +54,7 @@ function EquityChart() {
       rightPriceScale: { borderColor: '#2A2F3A' },
       crosshair: { vertLine: { color: '#3B82F6', labelBackgroundColor: '#3B82F6' }, horzLine: { color: '#3B82F6', labelBackgroundColor: '#3B82F6' } },
     })
-    c.addSeries(LineSeries, { color: '#3B82F6', lineWidth: 2 })
+    seriesRef.current = c.addSeries(LineSeries, { color: '#3B82F6', lineWidth: 2 })
     chartRef.current = c
     const handleResize = () => {
       if (containerRef.current) c.applyOptions({ width: containerRef.current.clientWidth })
@@ -62,9 +66,8 @@ function EquityChart() {
   useEffect(() => {
     api.get<{ data: EquityData[] }>(ENDPOINTS.performanceEquity, { params: { days: RANGE_DAYS[range] } })
       .then(res => {
-        if (!chartRef.current) return
-        const series = chartRef.current?.getSeries()?.[0] ?? null
-        if (!series) return
+        const series = seriesRef.current
+        if (!series || !chartRef.current) return
         series.setData(res.data.data.map(p => ({ time: (new Date(p.date).getTime() / 1000) as Time, value: p.balance })))
         chartRef.current.timeScale().fitContent()
       })
@@ -97,6 +100,7 @@ function EquityChart() {
 function MonthlyReturnsChart() {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
+  const seriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -108,7 +112,7 @@ function MonthlyReturnsChart() {
       timeScale: { borderColor: '#2A2F3A' },
       rightPriceScale: { borderColor: '#2A2F3A' },
     })
-    c.addSeries(HistogramSeries, { priceFormat: { type: 'price', precision: 2 } })
+    seriesRef.current = c.addSeries(HistogramSeries, { priceFormat: { type: 'price', precision: 2 } })
     chartRef.current = c
     const handleResize = () => {
       if (containerRef.current) c.applyOptions({ width: containerRef.current.clientWidth })
@@ -120,9 +124,8 @@ function MonthlyReturnsChart() {
   useEffect(() => {
     api.get<{ data: MonthlyData[] }>(ENDPOINTS.performanceMonthly)
       .then(res => {
-        if (!chartRef.current) return
-        const series = chartRef.current?.getSeries()?.[0] ?? null
-        if (!series) return
+        const series = seriesRef.current
+        if (!series || !chartRef.current) return
         series.setData(res.data.data.map(p => ({
           time: (new Date(p.month + '-01').getTime() / 1000) as Time,
           value: p.pnl_r,
@@ -139,6 +142,7 @@ function MonthlyReturnsChart() {
 function RDistributionChart() {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
+  const seriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const [data, setData] = useState<RDatum[]>([])
 
   useEffect(() => {
@@ -151,7 +155,7 @@ function RDistributionChart() {
       timeScale: { visible: false },
       rightPriceScale: { visible: false },
     })
-    c.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
+    seriesRef.current = c.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
     chartRef.current = c
     const handleResize = () => {
       if (containerRef.current) c.applyOptions({ width: containerRef.current.clientWidth })
@@ -164,8 +168,7 @@ function RDistributionChart() {
     api.get<{ data: RDatum[] }>(ENDPOINTS.performanceStrategies)
       .then(res => {
         setData(res.data.data)
-        if (!chartRef.current) return
-        const series = chartRef.current?.getSeries()?.[0] ?? null
+        const series = seriesRef.current
         if (!series) return
         series.setData(res.data.data.map((b, i) => ({
           time: (i + 1) as Time,
