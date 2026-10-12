@@ -8,7 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
-Status: 117 passing, 0 xfail (2026-10-12 — payload-contract regressions added)
+Status: 133 passing, 0 xfail (2026-10-12 — payload-contract + WS-tick regressions added)
 
 ## Local Contracts
 
