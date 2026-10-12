@@ -215,8 +215,14 @@ class PositionManager:
             else:
                 pnl_usdt = (entry - exit_price) * qty
 
-            # Calculate P&L in R units
-            risk_distance = abs(entry - float(row.stop_loss)) if row.stop_loss else 0.01
+            # Calculate P&L in R units — against the FROZEN initial risk
+            # (entry-to-original-SL), NOT the live stop_loss. BE-trailing moves
+            # stop_loss toward entry; using it would shrink the denominator and
+            # inflate |R| (a breakeven stop-out would read as a huge R move).
+            if row.initial_risk_distance is not None and float(row.initial_risk_distance) > 0:
+                risk_distance = float(row.initial_risk_distance)
+            else:
+                risk_distance = abs(entry - float(row.stop_loss)) if row.stop_loss else 0.01
             risk_amount = risk_distance * qty
             pnl_r = pnl_usdt / risk_amount if risk_amount > 0 else 0.0
 

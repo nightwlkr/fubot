@@ -16,6 +16,10 @@ class Position(Base):
     leverage: Mapped[int] = mapped_column(Integer, default=10)
     stop_loss: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     take_profit: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Frozen entry-to-SL distance at open. pnl_r MUST use this, not the live
+    # stop_loss — BE-trailing moves stop_loss toward entry, which would shrink
+    # the denominator and inflate |R| on a later close.
+    initial_risk_distance: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

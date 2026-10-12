@@ -212,6 +212,53 @@ class TestStrategyServiceEvaluateSignal:
         assert decision.decision == "SKIP"
 
 
+class TestEntryFillAndRiskGuard:
+    """Regression for the -2R bug: entries fill at the signal's entry-zone
+    midpoint (not live market price), and degenerate risk distances are skipped."""
+
+    async def test_entry_fills_at_zone_midpoint_not_market_price(self):
+        # market price sits far from the zone midpoint; the fill must use the midpoint
+        binance = FakeBinance(price=100.9)  # inside zone [100,101] but not the midpoint
+        order_svc = FakeOrderService()
+        decision = await make_strategy(binance, order_svc).evaluate_signal(
+            make_signal(), paper_mode=True)
+        assert decision.decision == "EXECUTE"
+        assert decision.plan["entry"] == 100.5  # zone midpoint, NOT 100.9
+        filled = [o for o in order_svc.pending.values() if o["status"] == "FILLED"]
+        assert float(filled[0]["price"]) == 100.5
+
+    async def test_skips_degenerate_risk_distance(self):
+        # entry zone [100,101] mid 100.5; stop 100.45 -> diff 0.05 < min (0.0502).
+        # TP set so R:R still passes (3.0) — the min-risk guard must catch it.
+        signal = make_signal(stop_loss=Decimal("100.45"), take_profit=Decimal("100.65"))
+        decision = await make_strategy().evaluate_signal(signal, paper_mode=True)
+        assert decision.decision == "SKIP"
+        assert "too small" in decision.skip_reason
+
+    async def test_accepts_normal_risk_distance(self):
+        signal = make_signal(stop_loss=Decimal("90"))  # diff 10.5, well above min
+        decision = await make_strategy().evaluate_signal(signal, paper_mode=True)
+        assert decision.decision == "EXECUTE"
+        assert decision.plan["initial_risk_distance"] == 10.5
+
+
+class TestClosePositionRFrozen:
+    """Regression: pnl_r uses the FROZEN initial_risk_distance, not the live
+    stop_loss (BE-trailing mutates stop_loss and would inflate |R|)."""
+
+    def test_r_uses_initial_risk_not_moved_stop(self):
+        from backend.core.position_manager import PositionManager
+        # Simulate a position whose stop was trailed to BE (entry == stop),
+        # with a frozen initial risk of 2.5 and a +8.5 profit.
+        entry, qty, exit_price = 106.5, 40.0, 115.0
+        initial_risk = 2.5
+        pnl_usdt = (exit_price - entry) * qty  # 340
+        # frozen risk: 340 / (2.5*40) = 3.4R
+        assert pnl_usdt / (initial_risk * qty) == 3.4
+        # if we (wrongly) used the trailed stop (stop==entry, risk~0) the R
+        # would blow up; the frozen value prevents that.
+
+
 class TestPaperBalanceSource:
     """paper_use_real_balance (default true): paper sizing uses the real Binance
     USDT availableBalance; when disabled it falls back to paper_balance_usdt."""

@@ -124,21 +124,27 @@ class StrategyService:
             await self._mark_signal(signal.db_id, "EXPIRED")
             return TradeDecision("SKIP", skip_reason=f"Signal older than {max_age_min:.0f} min")
 
-        # 4. Price deviation from the entry zone
-        entry = (signal.entry_zone_min + signal.entry_zone_max) / 2
-        price = await self._current_price(symbol)
-        if price is None:
+        # 4. Price deviation from the entry zone (market price only gates whether
+        #    the setup is still reachable — the FILL uses the zone midpoint).
+        market_price = await self._current_price(symbol)
+        if market_price is None:
             return TradeDecision("SKIP", skip_reason="Could not fetch current price")
         if signal.direction == "LONG":
-            if price > float(signal.entry_zone_max) * 1.01:
+            if market_price > float(signal.entry_zone_max) * 1.01:
                 return TradeDecision("SKIP", skip_reason="Price moved too far above zone")
-            if price < float(signal.entry_zone_min) * 0.99:
+            if market_price < float(signal.entry_zone_min) * 0.99:
                 return TradeDecision("SKIP", skip_reason="Price already below zone")
         else:
-            if price < float(signal.entry_zone_min) * 0.99:
+            if market_price < float(signal.entry_zone_min) * 0.99:
                 return TradeDecision("SKIP", skip_reason="Price moved too far below zone")
-            if price > float(signal.entry_zone_max) * 1.01:
+            if market_price > float(signal.entry_zone_max) * 1.01:
                 return TradeDecision("SKIP", skip_reason="Price already above zone")
+
+        # Fill at the signal's entry-zone midpoint, NOT the live market price.
+        # Filling at market could put entry ~at the stop, shrinking the realized
+        # risk to near zero and turning any noise into -2R. The zone midpoint
+        # makes entry-to-SL a deterministic, intended distance.
+        entry = (signal.entry_zone_min + signal.entry_zone_max) / 2
 
         # 5. Risk validation + sizing
         min_rr = Decimal(str(self.settings.get("rr_min", 3.0)))
@@ -149,33 +155,50 @@ class StrategyService:
             await self._mark_signal(signal.db_id, "SKIPPED", "R:R below minimum")
             return TradeDecision("SKIP", skip_reason="R:R below minimum")
 
+        # Min-risk guard: a degenerate entry-to-stop distance makes any normal
+        # adverse move a huge |R| (this caused -2R paper losses when entry
+        # filled ~at the stop). Require the risk to be at least 0.05% of the
+        # entry price (relative, so it scales across symbols) — override with
+        # the min_risk_pct setting.
+        risk_distance = abs(float(entry) - float(signal.stop_loss))
+        min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
+        min_risk_price = float(entry) * min_risk_pct
+        if risk_distance <= 0 or risk_distance < min_risk_price:
+            signal.status = "SKIPPED"
+            await self._mark_signal(
+                signal.db_id, "SKIPPED",
+                f"Risk distance {risk_distance:.6f} below min {min_risk_price:.6f}")
+            return TradeDecision(
+                "SKIP", skip_reason=f"Risk distance {risk_distance:.6f} too small")
+
         balance = await self._account_balance(paper_mode)
         if balance is None:
             return TradeDecision("SKIP", skip_reason="Could not fetch account balance")
         risk_percent = Decimal(str(self.settings.get("risk_percent", 1.0)))
         size = self.risk_svc.calc_position_size(
-            balance, risk_percent, Decimal(str(price)), signal.stop_loss
+            balance, risk_percent, Decimal(str(entry)), signal.stop_loss
         )
         # Safety backstop: never let a single position exceed a fraction of the
         # account, regardless of how it was sized.
-        size = self.risk_svc.cap_position_notional(size, Decimal(str(price)), balance)
+        size = self.risk_svc.cap_position_notional(size, Decimal(str(entry)), balance)
         if size == Decimal("0"):
             return TradeDecision("SKIP", skip_reason="Position size too small")
 
         plan = {
             "symbol": symbol,
             "direction": signal.direction,
-            "entry": price,
+            "entry": entry,
             "stop_loss": float(signal.stop_loss),
             "take_profit": float(signal.take_profit),
             "size": float(size),
             "rr_ratio": float(signal.rr_ratio),
+            "initial_risk_distance": risk_distance,
         }
 
         # 6. Execute — simulated fills in paper, real Binance orders in live
         if paper_mode:
             await self.order_svc.place_order(
-                symbol, side, "MARKET", size, price=Decimal(str(price)),
+                symbol, side, "MARKET", size, price=Decimal(str(entry)),
                 stop_loss=signal.stop_loss, take_profit=signal.take_profit,
                 simulate=True,
             )
@@ -183,7 +206,7 @@ class StrategyService:
             try:
                 entry_res = await self.binance.place_market_order(symbol, side, float(size))
                 await self.order_svc.place_order(
-                    symbol, side, "MARKET", size, price=Decimal(str(price)),
+                    symbol, side, "MARKET", size, price=Decimal(str(entry)),
                     simulate=False, binance_order_id=entry_res.get("orderId"),
                 )
                 sl_res = await self.binance.modify_position_stop(
@@ -205,7 +228,8 @@ class StrategyService:
                 return TradeDecision("SKIP", skip_reason=f"Order placement failed: {exc}")
 
         # 7. Record the position and mark the signal TRIGGERED
-        position_id = await self._create_position(signal, price, size, paper_mode)
+        position_id = await self._create_position(
+            signal, entry, size, paper_mode, initial_risk_distance=risk_distance)
         signal.status = "TRIGGERED"
         signal.triggered_at = datetime.now(timezone.utc)
         await self._mark_signal(signal.db_id, "TRIGGERED")
@@ -269,7 +293,8 @@ class StrategyService:
             logger.debug("get_account_balance failed: %s", exc)
         return None
 
-    async def _create_position(self, signal, price: float, size: Decimal, paper_mode: bool) -> Optional[int]:
+    async def _create_position(self, signal, price: float, size: Decimal, paper_mode: bool,
+                               initial_risk_distance: float | None = None) -> Optional[int]:
         if self.session_factory is None:
             return None
         leverage_key = "leverage_btc" if signal.symbol.upper().startswith("BTC") else "leverage_alts"
@@ -283,6 +308,7 @@ class StrategyService:
                 leverage=int(self.settings.get(leverage_key, 10)),
                 stop_loss=float(signal.stop_loss),
                 take_profit=float(signal.take_profit),
+                initial_risk_distance=initial_risk_distance,
                 status="OPEN",
             )
             session.add(position)

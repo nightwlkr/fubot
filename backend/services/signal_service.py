@@ -158,7 +158,10 @@ class SignalService:
     async def _persist_signals(self, symbol: str, to_persist: list[tuple[Signal, bool]]) -> None:
         """Insert new PENDING/SKIPPED signal rows, deduped per (symbol, strategy, direction).
 
-        to_persist: list of (signal, volume_confirmed) pairs that passed the dedup check.
+        A duplicate (same strategy+direction already PENDING/SKIPPED) is NOT
+        inserted and its in-memory Signal gets db_id=None. It is also marked
+        SKIPPED here so the scan loop never evaluates/executes a signal with no
+        DB row — that produced orphaned positions with signal_id=None.
         """
         if self.session_factory is None or not to_persist:
             return
@@ -174,6 +177,10 @@ class SignalService:
                 for signal, volume_confirmed in to_persist:
                     key = (signal.strategy_type, signal.direction)
                     if key in seen:
+                        # Duplicate of an existing pending/skipped signal — do
+                        # not execute it (no db row), just record as deduped.
+                        signal.status = "SKIPPED"
+                        signal.skip_reason = "Duplicate of existing signal"
                         continue
                     model = SignalModel(
                         symbol=symbol,
