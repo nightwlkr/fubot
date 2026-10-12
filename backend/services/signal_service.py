@@ -108,13 +108,32 @@ class SignalService:
             return []
 
         # 4/5. Apply filters and persist (deduped, one fresh session per scan)
+        # Trend-strength gate settings
+        trade_neutral = bool(self.settings.get("trade_neutral_markets", False))
+        min_strength = str(self.settings.get("trade_min_trend_strength", "MODERATE")).upper()
+        _strength_rank = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
+        min_rank = _strength_rank.get(min_strength, 2)
+
         signals: list[Signal] = []
         to_persist: list[tuple[Signal, bool]] = []
         for strategy_type, direction, zone_min, zone_max, sl, tp, rr in candidates:
             status, skip_reason, volume_confirmed = "PENDING", None, False
 
+            # Filter 0 — trend-strength gate. Applied only to ALIGNED entries
+            # (BULLISH+LONG / BEARISH+SHORT): skip weak aligned trends and
+            # (by default) neutral markets, where sweeps fail in chop. The
+            # counter-trend + RSI checks below remain the authority for
+            # mis-aligned directions.
+            aligned = ((bias.direction == "BULLISH" and direction == "LONG") or
+                       (bias.direction == "BEARISH" and direction == "SHORT"))
+            if bias.direction == "NEUTRAL" and not trade_neutral:
+                status, skip_reason = "SKIPPED", "Trend filter: neutral market"
+            elif aligned and _strength_rank.get(bias.strength, 2) < min_rank:
+                status, skip_reason = (
+                    "SKIPPED",
+                    f"Trend filter: {bias.strength} trend below {min_strength}")
             # Filter 1 — trend bias
-            if bias.direction == "BEARISH" and direction == "LONG":
+            elif bias.direction == "BEARISH" and direction == "LONG":
                 status, skip_reason = "SKIPPED", "Trend filter: BEARISH"
             elif bias.direction == "BULLISH" and direction == "SHORT":
                 status, skip_reason = "SKIPPED", "Trend filter: BULLISH"

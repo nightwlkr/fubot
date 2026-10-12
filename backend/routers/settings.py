@@ -67,6 +67,8 @@ async def get_trading_settings(
         "check_interval_seconds", "leverage_btc", "leverage_alts",
         "strategy_fvg_enabled", "strategy_3candle_enabled", "strategy_choch_enabled",
         "paper_use_real_balance", "paper_balance_usdt",
+        "trade_neutral_markets", "trade_min_trend_strength",
+        "symbol_cooldown_minutes", "max_daily_trades",
     ]
     defaults = {
         "risk_percent": 1.0,
@@ -81,12 +83,16 @@ async def get_trading_settings(
         "strategy_choch_enabled": True,
         "paper_use_real_balance": True,
         "paper_balance_usdt": 10000.0,
+        "trade_neutral_markets": False,
+        "trade_min_trend_strength": "MODERATE",
+        "symbol_cooldown_minutes": 240,
+        "max_daily_trades": 12,
     }
 
     settings = {}
     for key in keys:
         s = await _get_setting(db, key)
-        if s and isinstance(s.value, (int, float, bool)):
+        if s and isinstance(s.value, (int, float, bool, str)):
             settings[key] = s.value
         else:
             settings[key] = defaults.get(key)
@@ -104,6 +110,10 @@ async def get_trading_settings(
         strategy_choch_enabled=bool(settings.get("strategy_choch_enabled", True)),
         paper_use_real_balance=bool(settings.get("paper_use_real_balance", True)),
         paper_balance_usdt=float(settings.get("paper_balance_usdt", 10000.0)),
+        trade_neutral_markets=bool(settings.get("trade_neutral_markets", False)),
+        trade_min_trend_strength=str(settings.get("trade_min_trend_strength", "MODERATE")),
+        symbol_cooldown_minutes=int(settings.get("symbol_cooldown_minutes", 240)),
+        max_daily_trades=int(settings.get("max_daily_trades", 12)),
     )
 
 

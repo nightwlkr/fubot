@@ -15,6 +15,10 @@ class TradingSettingsResponse(BaseModel):
     strategy_choch_enabled: bool = True
     paper_use_real_balance: bool = True
     paper_balance_usdt: float = 10000.0
+    trade_neutral_markets: bool = False
+    trade_min_trend_strength: str = "MODERATE"
+    symbol_cooldown_minutes: int = 240
+    max_daily_trades: int = 12
 
 
 class TradingSettingsUpdate(BaseModel):
@@ -25,6 +29,10 @@ class TradingSettingsUpdate(BaseModel):
     check_interval_seconds: int | None = None
     paper_use_real_balance: bool | None = None
     paper_balance_usdt: float | None = None
+    trade_neutral_markets: bool | None = None
+    trade_min_trend_strength: str | None = None
+    symbol_cooldown_minutes: int | None = None
+    max_daily_trades: int | None = None
 
 
 class SymbolConfigResponse(BaseModel):

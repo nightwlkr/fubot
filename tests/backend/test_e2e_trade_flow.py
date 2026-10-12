@@ -84,7 +84,11 @@ async def _scenario():
     risk_service = RiskService()
     order_service = OrderService(binance=binance, session_factory=Session)
     signal_service = SignalService(session_factory=Session, binance=binance,
-                                   settings={"rr_min": 3.0, "risk_percent": 1.0})
+                                   # trade_neutral_markets: the e2e fixture's 1h
+                                   # candles are flat → NEUTRAL; this test validates
+                                   # the trade flow, not the trend gate.
+                                   settings={"rr_min": 3.0, "risk_percent": 1.0,
+                                             "trade_neutral_markets": True})
     strategy_service = StrategyService(risk_service, order_service, binance=binance,
                                        session_factory=Session,
                                        settings={"rr_min": 3.0, "max_positions": 50,

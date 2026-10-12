@@ -62,7 +62,7 @@ class FakeBinance:
         return self.data[interval][:limit]
 
 
-async def _scan_and_fetch(kind, rr_min=3.0):
+async def _scan_and_fetch(kind, rr_min=3.0, svc_settings=None):
     """Run one scan on a dedicated engine, fetch persisted rows, dispose.
 
     Returns (in_memory_signals, persisted_rows_as_dicts).
@@ -75,7 +75,7 @@ async def _scan_and_fetch(kind, rr_min=3.0):
             await db.execute(delete(SignalModel).where(SignalModel.symbol == SYMBOL))
             await db.commit()
         svc = SignalService(session_factory=Session, binance=FakeBinance(make_klines(kind)),
-                            settings={"rr_min": rr_min})
+                            settings=svc_settings or {"rr_min": rr_min})
         signals = await svc.scan_symbol(SYMBOL)
         async with Session() as db:
             rows = (await db.execute(
@@ -126,7 +126,10 @@ def _run(coro):
 
 def test_scan_persists_pending_fvg_signal():
     async def scenario():
-        signals, persisted = await _scan_and_fetch("flat")
+        # flat 1h → NEUTRAL bias; allow neutral so the signal persists (the
+        # default gate — see test_scan_skips_neutral_market — rejects it)
+        signals, persisted = await _scan_and_fetch(
+            "flat", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True})
         try:
             fvg = [s for s in signals if s.strategy_type == "FVG"]
             assert fvg, "the trailing FVG pattern must yield a candidate"
@@ -146,7 +149,8 @@ def test_scan_persists_pending_fvg_signal():
 
 def test_scan_skips_on_bearish_trend():
     async def scenario():
-        signals, persisted = await _scan_and_fetch("bearish_1h")
+        signals, persisted = await _scan_and_fetch(
+            "bearish_1h", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True})
         try:
             assert signals, "candidate is still generated, but filtered"
             assert signals[0].status == "SKIPPED"
@@ -161,7 +165,8 @@ def test_scan_skips_on_bearish_trend():
 
 def test_scan_skips_when_volume_not_confirmed():
     async def scenario():
-        signals, persisted = await _scan_and_fetch("doji_volume")
+        signals, persisted = await _scan_and_fetch(
+            "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True})
         try:
             assert signals[0].status == "SKIPPED"
             assert signals[0].skip_reason == "Volume filter: no dominant side confirmation"
@@ -174,12 +179,27 @@ def test_scan_skips_when_volume_not_confirmed():
 
 def test_scan_dedups_repeated_scans():
     async def scenario():
-        signals1, persisted1 = await _scan_and_fetch("flat")
-        signals2, persisted2 = await _scan_and_fetch("flat")
+        svc_settings = {"rr_min": 3.0, "trade_neutral_markets": True}
+        signals1, persisted1 = await _scan_and_fetch("flat", svc_settings=svc_settings)
+        signals2, persisted2 = await _scan_and_fetch("flat", svc_settings=svc_settings)
         try:
             assert len(signals1) == len(signals2)
             assert len(persisted1) == 1, "first scan persists one row"
             assert len(persisted2) == 1, "second scan must dedup, not flood the table"
+        finally:
+            await _cleanup()
+    _run(scenario())
+
+
+def test_scan_skips_neutral_market():
+    """Default gate: a NEUTRAL trend bias skips the signal (don't trade chop)."""
+    async def scenario():
+        signals, persisted = await _scan_and_fetch("flat")  # default settings
+        try:
+            assert signals, "candidate generated but gated"
+            assert signals[0].status == "SKIPPED"
+            assert signals[0].skip_reason == "Trend filter: neutral market"
+            assert persisted[0]["status"] == "SKIPPED"
         finally:
             await _cleanup()
     _run(scenario())
