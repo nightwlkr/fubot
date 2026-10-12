@@ -43,3 +43,4 @@ logs/
 # Build artifacts
 frontend/dist/
 frontend/*.tsbuildinfo
+backup_history*.json

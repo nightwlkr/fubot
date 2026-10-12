@@ -24,17 +24,46 @@ class RiskService:
         stop_loss_price: Decimal,
     ) -> Decimal:
         """
-        Size a position so that the $ loss at SL equals `risk_percent` of balance.
+        Size a position so the $ loss at SL equals `risk_percent` of balance.
 
-        position_value = (balance * risk%) / (entry - SL) * entry
+        qty = risk_usd / price_diff
+
+        Realized loss at SL = qty * price_diff = risk_usd exactly. The previous
+        formula multiplied by entry_price, which made the realized loss
+        risk_usd * entry_price — silently oversizing low-priced coins by many
+        times (e.g. LINKUSDT at ~13 → ~13x, producing -16.5R single losses).
         """
         risk_usd = balance_usdt * risk_percent / Decimal("100")
         price_diff = abs(entry_price - stop_loss_price)
         if price_diff == Decimal("0"):
             logger.warning("stop_loss equals entry; using minimum size")
             return Decimal("0")
-        qty = risk_usd / price_diff * entry_price
+        qty = risk_usd / price_diff
         return qty.quantize(Decimal("0.000001"))
+
+    def cap_position_notional(
+        self,
+        qty: Decimal,
+        entry_price: Decimal,
+        balance_usdt: Decimal,
+        max_notional_fraction: Decimal = Decimal("0.5"),
+    ) -> Decimal:
+        """Cap position notional at a fraction of balance (safety backstop).
+
+        Prevents any single position — however it was sized — from exceeding
+        `max_notional_fraction` of the account. Notional = qty * entry.
+        """
+        if entry_price <= 0:
+            return qty
+        max_notional = balance_usdt * max_notional_fraction
+        max_qty = (max_notional / entry_price).quantize(Decimal("0.000001"))
+        if qty > max_qty:
+            logger.warning(
+                f"position notional capped: qty {qty} -> {max_qty} "
+                f"(notional {qty * entry_price} > {max_notional})"
+            )
+            return max_qty
+        return qty
 
     def validate_rr_ratio(
         self,

@@ -156,6 +156,9 @@ class StrategyService:
         size = self.risk_svc.calc_position_size(
             balance, risk_percent, Decimal(str(price)), signal.stop_loss
         )
+        # Safety backstop: never let a single position exceed a fraction of the
+        # account, regardless of how it was sized.
+        size = self.risk_svc.cap_position_notional(size, Decimal(str(price)), balance)
         if size == Decimal("0"):
             return TradeDecision("SKIP", skip_reason="Position size too small")
 

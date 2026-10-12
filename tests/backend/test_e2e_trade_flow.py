@@ -156,8 +156,8 @@ async def _scenario():
     side, p_status, entry, qty, p_sl, p_tp = result["positions"][0]
     assert side == "LONG" and p_status == "OPEN"
     assert entry == 106.5 and p_sl == 104.0 and p_tp == 114.0
-    # risk $100 (1% of 10k) / diff 2.5 * 106.5
-    assert qty == 4260.0
+    # risk $100 (1% of 10k) / diff 2.5 = 40 qty (loss at SL = 40*2.5 = $100)
+    assert qty == 40.0
     assert result["orders"] == [("FILLED", True)], "paper order fills immediately"
 
     # signal persisted as TRIGGERED with a triggered_at stamp
@@ -181,8 +181,8 @@ async def _scenario():
         trade = trades[0]
         assert trade.exit_reason == "TP_HIT"
         assert trade.strategy_type == "FVG"
-        assert float(trade.pnl_usdt) == (115.0 - 106.5) * 4260.0
-        # pnl_r = pnl / (|entry - SL| * qty) = 36210 / (2.5 * 4260)
+        assert float(trade.pnl_usdt) == (115.0 - 106.5) * 40.0
+        # pnl_r = pnl / (|entry - SL| * qty) = 340 / (2.5 * 40)
         assert float(trade.pnl_r) == 3.4
         result["trade"] = {"pnl_usdt": float(trade.pnl_usdt), "pnl_r": float(trade.pnl_r),
                            "reason": trade.exit_reason}

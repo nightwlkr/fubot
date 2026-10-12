@@ -15,14 +15,44 @@ from backend.core.daily_reset import DailyResetService
 
 class TestRiskService:
     def test_position_size_math(self):
-        """risk$ = balance*1% ; qty = risk$/(entry-SL)*entry."""
+        """risk$ = balance*1% ; qty = risk$/(entry-SL)."""
         svc = RiskService()
         qty = svc.calc_position_size(
             balance_usdt=Decimal("10000"), risk_percent=Decimal("1"),
             entry_price=Decimal("100"), stop_loss_price=Decimal("90"),
         )
-        # 100 USD risk / 10 diff * 100 = 1000
-        assert qty == Decimal("1000.000000")
+        # 100 USD risk / 10 diff = 10 qty (loss at SL = 10*10 = 100 = risk$)
+        assert qty == Decimal("10.000000")
+
+    def test_position_size_no_entry_price_inflation(self):
+        """Regression: qty must NOT scale with entry_price. A low-priced coin
+        must not be oversized — realized SL loss = risk$ regardless of price."""
+        svc = RiskService()
+        # Same 1% risk, same 10% stop distance, but a low-priced coin (~13)
+        risk = Decimal("100")  # 1% of 10000
+        entry = Decimal("13.34")
+        sl = Decimal("12.00")  # stop distance 1.34
+        qty = svc.calc_position_size(Decimal("10000"), Decimal("1"), entry, sl)
+        loss_at_sl = qty * abs(entry - sl)
+        # exactly risk$ (allow tiny quantization from 6-decimal rounding)
+        assert abs(loss_at_sl - risk) < Decimal("0.01")
+
+    def test_notional_cap_limits_position(self):
+        svc = RiskService()
+        # absurd size -> capped to 50% of balance notional
+        capped = svc.cap_position_notional(
+            qty=Decimal("1000000"), entry_price=Decimal("10"),
+            balance_usdt=Decimal("10000"), max_notional_fraction=Decimal("0.5"),
+        )
+        assert capped * Decimal("10") <= Decimal("10000") * Decimal("0.5")
+
+    def test_notional_cap_leaves_small_positions(self):
+        svc = RiskService()
+        small = svc.cap_position_notional(
+            qty=Decimal("10"), entry_price=Decimal("10"),
+            balance_usdt=Decimal("10000"),
+        )
+        assert small == Decimal("10")
 
     def test_zero_price_diff_returns_zero(self):
         svc = RiskService()
@@ -122,7 +152,8 @@ class TestStrategyServiceEvaluate:
     def test_accepts_valid_setup_and_sizes_position(self):
         plan = make_strategy().evaluate(**valid_args())
         assert plan is not None
-        assert plan["size"] == Decimal("1000.000000")
+        # risk $100 / diff 10 = 10 qty (no entry_price inflation)
+        assert plan["size"] == Decimal("10.000000")
         assert plan["stop_loss"] == Decimal("90")
         assert plan["take_profit"] == Decimal("130")
 
