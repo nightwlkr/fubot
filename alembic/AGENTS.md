@@ -8,7 +8,7 @@ SQLAlchemy 2.0 async migrations for all FUBOT database tables. All schema change
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/alembic/`
-Status: applied — `alembic current` = `002_seed_data` on the local DB (role `fubot` provisioned); 2 revisions exist
+Status: applied — `alembic current` = `003_initial_risk` on the local DB (role `fubot` provisioned); 3 revisions exist
 
 ## Local Contracts
 
@@ -20,7 +20,7 @@ Status: applied — `alembic current` = `002_seed_data` on the local DB (role `f
 ## Work Guidance
 
 ### Current State
-- Chain: `001_initial` (`versions/001_initial_tables.py`, creates all 10 tables) → `002_seed_data` (default symbols + settings) — head, applied locally
+- Chain: `001_initial` (10 tables) → `002_seed_data` (symbols + settings) → `003_initial_risk` (positions.initial_risk_distance — frozen entry-to-SL for R-math) — head, applied locally + VPS
 - `002_seed_data` inserts into the JSON `settings.value` via raw `sa.text()` — values MUST be `json.dumps()`-ed because asyncpg's JSON codec takes pre-serialized text, not Python objects
 - Fresh environment provisioning:
 ```bash
@@ -58,8 +58,8 @@ alembic history
 
 ## Verification
 
-- `PYTHONPATH=. alembic history` — shows `001_initial -> 002_seed_data (head)` (installed alembic 1.13.1 has no `--enumerate` flag)
-- `PYTHONPATH=. alembic current` — shows `002_seed_data (head)` on the provisioned local DB
+- `PYTHONPATH=. alembic history` — shows `001_initial -> 002_seed_data -> 003_initial_risk (head)` (installed alembic 1.13.1 has no `--enumerate` flag)
+- `PYTHONPATH=. alembic current` — shows `003_initial_risk (head)` on the provisioned local DB
 - All 10 tables + seed rows verified present in PostgreSQL
 
 ## Child DOX Index
