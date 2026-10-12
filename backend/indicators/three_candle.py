@@ -2,6 +2,12 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+# Minimum stop distance as a multiple of ATR(14). The structural sweep wick is
+# often only a few pips from entry on 5m candles — too tight for price noise
+# (observed 0.07%-0.3% stops getting hit instantly). 1.0× ATR gives the stop
+# room to breathe while keeping it on the correct structural side.
+atr_stop_mult = 1.0
+
 
 @dataclass
 class ThreeCandle:
@@ -111,14 +117,32 @@ def detect_three_candles(candles: list[dict], symbol: str = "", interval: str = 
 
 
 def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float = 3.0) -> dict:
-    """Calculate entry, SL, TP, R:R for a 3-Candle pattern."""
+    """Calculate entry, SL, TP, R:R for a 3-Candle pattern.
+
+    The structural stop is the sweep wick (c2.low for bullish, c2.high for
+    bearish). But adjacent 5m candles can have a tiny range, giving a
+    razor-thin stop that price noise hits instantly (observed: 0.07%-0.3%
+    stops → immediate -1R losses). Widen the stop to at least `atr_stop_mult`
+    × ATR(14) from entry so it sits beyond normal volatility, while staying
+    on the correct structural side.
+    """
     entry = pattern.entry_price
-    sl = pattern.stop_loss
+    structural_sl = pattern.stop_loss
+    min_stop = max(atr, 0.0) * atr_stop_mult
 
     if pattern.direction == "BULLISH":
+        # stop must be BELOW entry; structural stop is c2.low. If it's closer
+        # than the ATR floor, push it down to entry - min_stop.
+        sl = structural_sl
+        if entry - sl < min_stop:
+            sl = entry - min_stop
         risk = entry - sl
         tp = entry + (risk * rr_min)
     else:
+        # stop must be ABOVE entry; structural stop is c2.high.
+        sl = structural_sl
+        if sl - entry < min_stop:
+            sl = entry + min_stop
         risk = sl - entry
         tp = entry - (risk * rr_min)
 
@@ -129,5 +153,5 @@ def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float 
         "stop_loss": sl,
         "take_profit": tp,
         "rr_ratio": rr,
-        "is_valid": rr >= rr_min,
+        "is_valid": risk > 0 and rr >= rr_min,
     }
