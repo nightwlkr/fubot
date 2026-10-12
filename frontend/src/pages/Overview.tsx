@@ -226,9 +226,10 @@ export default function Overview() {
                 <TableHeadCell>Symbol</TableHeadCell>
                 <TableHeadCell>Side</TableHeadCell>
                 <TableHeadCell className="text-right">Size</TableHeadCell>
+                <TableHeadCell className="text-right">Value (USD)</TableHeadCell>
                 <TableHeadCell className="text-right">Entry</TableHeadCell>
                 <TableHeadCell className="text-right">Mark</TableHeadCell>
-                <TableHeadCell className="text-right">PnL (R)</TableHeadCell>
+                <TableHeadCell className="text-right">PnL (USD)</TableHeadCell>
                 <TableHeadCell className="text-right">Lev</TableHeadCell>
               </TableRow>
             </TableHead>
@@ -240,11 +241,16 @@ export default function Overview() {
                     <Badge variant={pos.side === 'LONG' ? 'success' : 'danger'}>{pos.side}</Badge>
                   </TableCell>
                   <TableCell className="text-right font-mono text-sm">{pos.quantity.toFixed(4)}</TableCell>
+                  {/* position notional in USD = qty × entry (what you control) */}
+                  <TableCell className="text-right font-mono text-sm">
+                    ${(pos.quantity * pos.entry_price).toFixed(2)}
+                  </TableCell>
                   <TableCell className="text-right font-mono text-sm">{formatPrice(pos.entry_price)}</TableCell>
                   <TableCell className="text-right font-mono text-sm">{formatPrice(pos.mark_price)}</TableCell>
+                  {/* unrealized_pnl is USD on the backend ((mark-entry)×qty) */}
                   <TableCell className="text-right">
                     <span className={clsx('font-mono font-bold text-sm', pos.unrealized_pnl >= 0 ? 'text-success' : 'text-danger')}>
-                      {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toFixed(2)}R
+                      {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toFixed(2)}
                     </span>
                   </TableCell>
                   <TableCell className="text-right font-mono text-sm">{pos.leverage}x</TableCell>

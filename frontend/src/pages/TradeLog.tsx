@@ -93,8 +93,10 @@ export default function TradeLog() {
   }, [fetchTrades])
 
   const exportCSV = () => {
-    const headers = ['ID', 'Symbol', 'Side', 'Entry Price', 'Exit Price', 'Quantity', 'PnL (R)', 'PnL (USDT)', 'Exit Reason', 'Strategy', 'Closed At']
-    const rows = trades.map(t => [t.id, t.symbol, t.side, t.entry_price, t.exit_price, t.quantity, t.pnl_r, t.pnl_usdt, t.exit_reason, t.strategy_type, t.closed_at])
+    const headers = ['ID', 'Symbol', 'Side', 'Entry Price', 'Exit Price', 'Quantity', 'Value (USD)', 'PnL (R)', 'PnL (USDT)', 'Exit Reason', 'Strategy', 'Closed At']
+    const rows = trades.map(t => [t.id, t.symbol, t.side, t.entry_price, t.exit_price, t.quantity,
+                                  (t.quantity * t.entry_price).toFixed(2), t.pnl_r, t.pnl_usdt,
+                                  t.exit_reason, t.strategy_type, t.closed_at])
 
     const csv = [headers, ...rows]
       .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
@@ -244,6 +246,7 @@ export default function TradeLog() {
                 <TableHeadCell className="text-right">Entry</TableHeadCell>
                 <TableHeadCell className="text-right">Exit</TableHeadCell>
                 <TableHeadCell className="text-right">Qty</TableHeadCell>
+                <TableHeadCell className="text-right">Value (USD)</TableHeadCell>
                 <TableHeadCell className="text-right">R</TableHeadCell>
                 <TableHeadCell className="text-right">USDT</TableHeadCell>
                 <TableHeadCell>Result</TableHeadCell>
@@ -261,6 +264,10 @@ export default function TradeLog() {
                   <TableCell className="text-right font-mono text-xs">{formatPrice(trade.entry_price)}</TableCell>
                   <TableCell className="text-right font-mono text-xs">{formatPrice(trade.exit_price)}</TableCell>
                   <TableCell className="text-right font-mono text-xs">{trade.quantity.toFixed(4)}</TableCell>
+                  {/* position notional at entry = qty × entry_price */}
+                  <TableCell className="text-right font-mono text-xs">
+                    ${(trade.quantity * trade.entry_price).toFixed(2)}
+                  </TableCell>
                   <TableCell className={clsx('text-right font-mono font-bold', trade.pnl_r > 0 ? 'text-success' : trade.pnl_r < 0 ? 'text-danger' : 'text-muted')}>
                     {trade.pnl_r > 0 ? '+' : ''}{trade.pnl_r.toFixed(2)}
                   </TableCell>
