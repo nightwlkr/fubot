@@ -85,7 +85,10 @@ class SignalService:
 
         # 3. Detect patterns
         candidates: list[tuple[str, str, float, float, float, float, float]] = []
-        for f in detect_fvg(k5m, symbol):
+        # FVG runs on 1h: a true 3-candle gap (c2.low > c1.high) essentially
+        # never forms on liquid 5m crypto (ranges always overlap) — 0 detections
+        # there. On 1h, gaps do occur, making this a real second strategy.
+        for f in detect_fvg(k1h, symbol):
             e = evaluate_fvg_entry(f, atr_1h, rr_min)
             if e["is_valid"]:
                 direction = "LONG" if f.direction == "BULLISH" else "SHORT"
@@ -142,8 +145,11 @@ class SignalService:
             elif bias.rsi_zone == "OVERSOLD" and direction == "SHORT":
                 status, skip_reason = "SKIPPED", "Trend filter: RSI oversold"
             else:
-                # Filter 2 — volume confirmation (10 candles preceding formation)
-                volume_confirmed = get_volume_confirmed_filter(direction, k5m[-15:-5]).passes_filter
+                # Filter 2 — volume confirmation (10 candles preceding formation).
+                # Use the timeframe the pattern was detected on: 1h volume for
+                # the 1h FVG, 5m volume for 5m 3-candle / 15m CHoCH.
+                vol_candles = k1h[-15:-5] if strategy_type == "FVG" else k5m[-15:-5]
+                volume_confirmed = get_volume_confirmed_filter(direction, vol_candles).passes_filter
                 if not volume_confirmed:
                     status, skip_reason = "SKIPPED", "Volume filter: no dominant side confirmation"
                 # Filter 3 — minimum R:R

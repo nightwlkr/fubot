@@ -102,11 +102,12 @@ class TestStructural:
 
 class TestFVG:
     def bullish_fvg_candles(self):
-        # c1 bearish, c2 bullish gapping above c1.high, c3 confirms above c2.high
+        # classic 3-candle imbalance: gap left between c1.high and c3.low,
+        # with a bullish impulse candle (c2) between them
         return [
-            candle(105, 106, 100, 101),   # c1 bearish (high 106)
-            candle(107, 112, 107, 111),   # c2 bullish, low 107 > c1.high 106
-            candle(111, 115, 110, 114),   # c3 close 114 > c2.high 112
+            candle(105, 106, 100, 101),   # c1 (high 106)
+            candle(107, 112, 107, 111),   # c2 bullish impulse
+            candle(111, 115, 110, 114),   # c3 low 110 > c1.high 106 → gap
         ]
 
     def test_detects_bullish_fvg(self):
@@ -114,11 +115,11 @@ class TestFVG:
         assert len(fvgs) == 1
         f = fvgs[0]
         assert f.direction == "BULLISH"
-        # numeric bounds: min = gap bottom (c1.high), max = gap top (c2.low)
+        # classic zone: unfilled gap [c1.high, c3.low]
         assert f.zone_min == 106.0
-        assert f.zone_max == 107.0
+        assert f.zone_max == 110.0
         assert f.zone_min < f.zone_max
-        assert f.midpoint == pytest.approx(106.5)
+        assert f.midpoint == pytest.approx(108.0)
         assert f.impulse_low == 107.0
 
     def test_no_fvg_without_gap(self):
@@ -128,10 +129,11 @@ class TestFVG:
     def test_bullish_fill_semantics(self):
         """A bullish FVG is FILLED when price trades back DOWN into the zone."""
         f = detect_fvg(self.bullish_fvg_candles(), "BTCUSDT")[0]
-        # price dips back into the gap (low <= zone_max=107) → filled
-        assert check_fvg_filled(f, current_price=106.5, high=106.5, low=105.0) is True
-        # price stays above the gap (low 110 > 107) → not filled
-        assert check_fvg_filled(f, current_price=113.0, high=115.0, low=110.0) is False
+        # zone is now [c1.high=106, c3.low=110]
+        # price dips back into the gap (low <= zone_max=110) → filled
+        assert check_fvg_filled(f, current_price=107.0, high=107.0, low=105.0) is True
+        # price stays above the gap (low 112 > 110) → not filled
+        assert check_fvg_filled(f, current_price=114.0, high=115.0, low=112.0) is False
 
     def test_fvg_entry_rr_by_construction(self):
         """TP is built as entry ± risk*rr_min, so reward/risk must equal rr_min and validate."""
