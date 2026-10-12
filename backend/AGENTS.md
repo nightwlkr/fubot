@@ -42,6 +42,7 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 | `routers/` | 9 route modules (28 endpoints): auth, bot, dashboard, trades, signals, positions, orders, settings, performance |
 | `schemas/` | Pydantic request/response models per router |
 | `services/` | auth_service, binance_service, binance_ws, order_service, risk_service, strategy_service, signal_service, alert_service |
+| `backtest.py` | Backtest harness — replays the scan pipeline over historical klines (no lookahead); CLI in `scripts/backtest.py` |
 | `core/` | bot_engine (scan/evaluate/execute loop), position_manager, daily_reset (-3R enforcement), websocket_manager (`ConnectionManager`, `WebSocketRouter`, `ws_manager`) |
 | `indicators/` | sma, rsi, trend, fvg, three_candle, pivots, choch, bos, structural, volume_profile, atr |
 | `utils/` | Empty placeholder — no shared helpers yet |
@@ -71,7 +72,7 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 117 passing (also e2e trade flow, -3R hard stop, security audit, payload contracts)
+- `PYTHONPATH=. pytest tests/backend/ -q` — 142 passing (also e2e trade flow, -3R hard stop, security audit, payload contracts, backtest)
 - `PYTHONPATH=. python -c "import backend.main"` — app imports without errors
 - `python -m uvicorn backend.main:app --reload` — boots and serves; local dev currently on port 8001 (a stale process holds 8000)
 - No hardcoded credentials — everything from env vars
