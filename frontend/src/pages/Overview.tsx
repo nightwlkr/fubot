@@ -48,7 +48,13 @@ export default function Overview() {
 
   useEffect(() => {
     if (!chart || !series || equityCurve.length === 0) return
-    series.setData(equityCurve.map(p => ({
+    // The API returns equity_curve DESCENDING (newest first); lightweight-charts
+    // requires ASCENDING time order for setData — feeding it descending throws
+    // "Value is null" (out-of-order time) and renders an empty chart.
+    const ascending = [...equityCurve].sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    )
+    series.setData(ascending.map(p => ({
       time: (new Date(p.date).getTime() / 1000) as Time,
       value: p.balance,
     })))
