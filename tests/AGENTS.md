@@ -37,7 +37,7 @@ Status: 133 passing, 0 xfail (2026-10-12 — payload-contract + WS-tick regressi
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 117 passed
+- `PYTHONPATH=. pytest tests/backend/ -q` — 133 passed
 - A failing test blocks completion of the change that broke it
 
 ## Child DOX Index
