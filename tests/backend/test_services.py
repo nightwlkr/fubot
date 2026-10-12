@@ -424,3 +424,95 @@ async def test_engine_lifecycle_broadcasts_ws_events():
                    for m in ws.sent if m.get("type") == "bot_status")
     finally:
         await ws_manager.disconnect(99)
+
+
+class TestPositionManagerWebSocket:
+    """Regression: bookTicker ticks close positions on TP/SL in real time,
+    without waiting for the 30s REST poll. Uses the real DB with a dedicated
+    test symbol and cleans up its own rows."""
+
+    SYM = "WSTESTUSDT"
+
+    class FakeWSManager:
+        def __init__(self):
+            self.handlers = {}
+            self.subscribed = set()
+
+        async def watch_book_ticker(self, symbol, callback):
+            self.handlers[symbol] = callback
+            self.subscribed.add(symbol)
+
+        async def unsubscribe(self, stream):
+            self.subscribed.discard(stream.split("@")[0].upper())
+
+    class NoopBinance:
+        async def get_ticker(self, symbol):
+            return {"symbol": symbol, "price": 0.0}
+        async def get_klines(self, symbol, interval, limit=100):
+            return []
+
+    async def _run(self, bid, ask, entry=100.0, sl=90.0, tp=130.0):
+        """Seed an OPEN position, register WS handler, fire a tick, return
+        (status, exit_reason) after cleanup."""
+        from sqlalchemy import select, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        from backend.models.trade import Trade
+
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == self.SYM))
+                await s.execute(delete(Position).where(Position.symbol == self.SYM))
+                s.add(Position(symbol=self.SYM, side="LONG", entry_price=entry,
+                               quantity=1.0, stop_loss=sl, take_profit=tp,
+                               status="OPEN", initial_risk_distance=abs(entry - sl)))
+                await s.commit()
+
+            ws = self.FakeWSManager()
+
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(tp_hit=_noop, sl_hit=_noop, be_trailing=_noop)
+            daily_reset = SimpleNamespace(update_daily_summary=_noop,
+                                          get_daily_stats=_noop)
+
+            pm = PositionManager(binance=self.NoopBinance(), order_service=None,
+                                 daily_reset=daily_reset, alert_service=alerts,
+                                 settings={}, session_factory=Session,
+                                 market_data_ws=ws)
+            pm._running = True
+            await pm._sync_ws_subscriptions(await pm._get_open_positions())
+            assert self.SYM in ws.handlers
+
+            await ws.handlers[self.SYM]({"bid_price": bid, "ask_price": ask})
+
+            async with Session() as s:
+                pos = (await s.execute(select(Position).where(
+                    Position.symbol == self.SYM))).scalars().first()
+                trade = (await s.execute(select(Trade).where(
+                    Trade.symbol == self.SYM))).scalars().first()
+                status = pos.status
+                reason = trade.exit_reason if trade else None
+            return status, reason
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == self.SYM))
+                await s.execute(delete(Position).where(Position.symbol == self.SYM))
+                await s.commit()
+            await engine.dispose()
+
+    async def test_tick_at_take_profit_closes_position(self):
+        status, reason = await self._run(bid=130.5, ask=130.6)
+        assert status == "CLOSED" and reason == "TP_HIT"
+
+    async def test_tick_at_stop_loss_closes_position(self):
+        status, reason = await self._run(bid=89.5, ask=89.6)
+        assert status == "CLOSED" and reason == "SL_HIT"
+
+    async def test_midrange_tick_does_not_close(self):
+        status, reason = await self._run(bid=105.0, ask=105.1)
+        assert status == "OPEN" and reason is None

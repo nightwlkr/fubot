@@ -70,10 +70,13 @@ async def lifespan(app: FastAPI):
     engine = getattr(app.state, "bot_engine", None)
     position_manager = getattr(app.state, "position_manager", None)
     binance = getattr(app.state, "binance", None)
+    market_data_ws = getattr(app.state, "market_data_ws", None)
     if engine:
         await engine.stop()
     if position_manager:
         await position_manager.stop()
+    if market_data_ws:
+        await market_data_ws.close()
     if binance:
         await binance.close()
     await close_db()
@@ -88,6 +91,17 @@ async def init_bot(app: FastAPI) -> None:
     """
     binance = BinanceService()
     await load_binance_credentials(binance)
+
+    # Real-time market-data stream (bookTicker) for position TP/SL monitoring.
+    # Connected lazily; subscriptions are managed per open-position symbol.
+    from backend.services.binance_ws import BinanceWebSocketManager
+    market_data_ws = BinanceWebSocketManager(testnet=binance._testnet)
+    try:
+        await market_data_ws.connect()
+    except Exception:
+        logger.warning("Binance market-data WebSocket failed to connect; "
+                       "position monitoring falls back to REST polling", exc_info=True)
+        market_data_ws = None
 
     alert_service = get_alert_service()
     alert_service.register_ws_manager(ws_manager)
@@ -129,12 +143,14 @@ async def init_bot(app: FastAPI) -> None:
         alert_service=alert_service,
         settings=bot_settings,
         session_factory=AsyncSessionLocal,
+        market_data_ws=market_data_ws,
     )
 
     set_bot_engine(engine)
     app.state.bot_engine = engine
     app.state.position_manager = position_manager
     app.state.binance = binance
+    app.state.market_data_ws = market_data_ws
 
     # Position manager monitors open positions every 30s, independent of bot start/stop
     await position_manager.start()

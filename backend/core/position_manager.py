@@ -33,6 +33,7 @@ class PositionManager:
         alert_service: AlertService,
         settings: dict,
         session_factory: Optional[Callable] = None,
+        market_data_ws=None,
     ):
         self.session_factory = session_factory
         self.binance = binance
@@ -40,6 +41,13 @@ class PositionManager:
         self.daily_reset = daily_reset
         self.alerts = alert_service
         self.settings = settings
+        # Real-time Binance market-data stream (bookTicker). When present, TP/SL
+        # checks fire on every tick (sub-second) instead of the 30s REST poll.
+        # The REST loop still runs as a fallback/reconciliation pass.
+        self.market_data_ws = market_data_ws
+        self._latest_price: dict[str, float] = {}   # symbol -> last bookTicker mid
+        self._ws_symbols: set[str] = set()          # symbols currently subscribed
+        self._check_locks: dict[str, asyncio.Lock] = {}  # per-symbol close lock
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -51,6 +59,14 @@ class PositionManager:
     async def stop(self):
         """Stop the position manager loop."""
         self._running = False
+        if self.market_data_ws:
+            for symbol in list(self._ws_symbols):
+                try:
+                    await self.market_data_ws.unsubscribe(
+                        f"{symbol.lower()}@bookTicker")
+                except Exception:
+                    pass
+            self._ws_symbols.clear()
         if self._task:
             self._task.cancel()
             try:
@@ -103,22 +119,90 @@ class PositionManager:
                 for r in rows
             ]
 
+    async def _sync_ws_subscriptions(self, open_positions: list[dict]):
+        """Keep bookTicker subscriptions in sync with open-position symbols."""
+        if not self.market_data_ws:
+            return
+        desired = {p["symbol"] for p in open_positions}
+        # Subscribe new
+        for symbol in desired - self._ws_symbols:
+            try:
+                await self.market_data_ws.watch_book_ticker(
+                    symbol, self._make_tick_handler(symbol))
+                self._ws_symbols.add(symbol)
+                logger.info(f"[WS] Subscribed to {symbol}@bookTicker")
+            except Exception as e:
+                logger.warning(f"[WS] Subscribe {symbol} failed: {e}")
+        # Unsubscribe closed
+        for symbol in list(self._ws_symbols - desired):
+            try:
+                await self.market_data_ws.unsubscribe(f"{symbol.lower()}@bookTicker")
+            except Exception:
+                pass
+            self._ws_symbols.discard(symbol)
+            self._latest_price.pop(symbol, None)
+
+    def _make_tick_handler(self, symbol: str):
+        """bookTicker callback — record price and immediately check TP/SL."""
+        async def handler(data: dict):
+            if not self._running:
+                return
+            bid = float(data.get("bid_price", 0) or 0)
+            ask = float(data.get("ask_price", 0) or 0)
+            if bid <= 0 or ask <= 0:
+                return
+            mid = (bid + ask) / 2
+            self._latest_price[symbol] = mid
+            await self._on_tick(symbol, mid)
+        return handler
+
+    async def _on_tick(self, symbol: str, price: float):
+        """React to a real-time tick: close the position if TP/SL is crossed.
+
+        Uses a per-symbol lock so a burst of ticks can't double-close.
+        BE-trailing is NOT done here (it needs 5m klines) — the REST loop
+        still handles that plus reconciliation.
+        """
+        lock = self._check_locks.setdefault(symbol, asyncio.Lock())
+        if lock.locked():
+            return  # a check for this symbol is already in flight
+        async with lock:
+            positions = await self._get_open_positions()
+            for position in positions:
+                if position["symbol"] != symbol:
+                    continue
+                tp_hit, sl_hit = self._check_tp_sl_hit(position, price)
+                if tp_hit:
+                    await self._close_position(position, "TP_HIT", price)
+                elif sl_hit:
+                    await self._close_position(position, "SL_HIT", price)
+
     async def _check_all_positions(self):
-        """Check all open positions: price, BE trailing, TP/SL hits."""
+        """Check all open positions: price, BE trailing, TP/SL hits.
+
+        REST fallback/reconciliation pass — also the only place BE-trailing
+        runs (it needs 5m klines). When the WS stream is live it has usually
+        already closed TP/SL hits; _close_position is idempotent via the
+        status==OPEN guard.
+        """
         open_positions = await self._get_open_positions()
+        await self._sync_ws_subscriptions(open_positions)
 
         for position in open_positions:
             symbol = position["symbol"]
-            try:
-                ticker = await self.binance.get_ticker(symbol)
-                raw_price = ticker.get("price", 0) if isinstance(ticker, dict) else 0
-                current_price = float(raw_price) if raw_price else 0.0
-            except Exception:
-                continue
+            # Prefer the freshest WS price; fall back to REST ticker.
+            current_price = self._latest_price.get(symbol, 0.0)
+            if current_price <= 0:
+                try:
+                    ticker = await self.binance.get_ticker(symbol)
+                    raw_price = ticker.get("price", 0) if isinstance(ticker, dict) else 0
+                    current_price = float(raw_price) if raw_price else 0.0
+                except Exception:
+                    continue
             if current_price <= 0:
                 continue
 
-            # Check BE trailing
+            # Check BE trailing (REST-only; needs klines)
             await self._check_be_trailing(position, current_price)
 
             # Check if TP or SL was hit
