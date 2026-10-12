@@ -219,6 +219,64 @@ def test_scan_dedups_repeated_scans():
     _run(scenario())
 
 
+def test_stale_pending_signals_are_expired():
+    """Regression: a PENDING signal older than signal_max_age_minutes must be
+    EXPIRED on the next scan, so it stops blocking fresh signals for the same
+    symbol+strategy+direction (the stale-PENDING deadlock)."""
+    async def scenario():
+        from datetime import datetime, timedelta, timezone
+        from sqlalchemy import select, update, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.models.signal import Signal as SignalModel
+        from backend.services.signal_service import SignalService
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        svc_settings = {"rr_min": 3.0, "trade_neutral_markets": True}
+        try:
+            # clean slate
+            async with Session() as db:
+                await db.execute(delete(SignalModel).where(SignalModel.symbol == SYMBOL))
+                await db.commit()
+
+            svc = SignalService(session_factory=Session,
+                                binance=FakeBinance(make_klines("flat")),
+                                settings=svc_settings)
+
+            # scan #1: creates a fresh PENDING signal
+            await svc.scan_symbol(SYMBOL)
+            async with Session() as db:
+                rows = (await db.execute(select(SignalModel).where(
+                    SignalModel.symbol == SYMBOL))).scalars().all()
+            assert any(r.status == "PENDING" for r in rows), "scan #1 makes a PENDING"
+
+            # backdate all PENDING rows 2 hours (stale)
+            async with Session() as db:
+                await db.execute(
+                    update(SignalModel)
+                    .where(SignalModel.status == "PENDING")
+                    .values(created_at=datetime.now(timezone.utc) - timedelta(hours=2))
+                )
+                await db.commit()
+
+            # scan #2: must expire the stale row and allow a fresh one
+            await svc.scan_symbol(SYMBOL)
+            async with Session() as db:
+                rows2 = (await db.execute(select(SignalModel).where(
+                    SignalModel.symbol == SYMBOL))).scalars().all()
+            statuses = [r.status for r in rows2]
+            # the stale PENDING is now EXPIRED (not left blocking)
+            assert "EXPIRED" in statuses, f"expected an EXPIRED row, got {statuses}"
+            # and a fresh PENDING was created (the slot is free again)
+            assert "PENDING" in statuses, f"expected a fresh PENDING, got {statuses}"
+        finally:
+            async with Session() as db:
+                await db.execute(delete(SignalModel).where(SignalModel.symbol == SYMBOL))
+                await db.commit()
+            await engine.dispose()
+    _run(scenario())
+
+
 def test_scan_skips_neutral_market():
     """Default gate: a NEUTRAL trend bias skips the signal (don't trade chop)."""
     async def scenario():

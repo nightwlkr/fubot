@@ -13,7 +13,7 @@ Wired by: BotEngine (scan loop) and the /signals API route.
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -64,6 +64,14 @@ class SignalService:
             return []
 
         rr_min = float(self.settings.get("rr_min", 3.0))
+
+        # Expire stale PENDING signals for this symbol FIRST. Without this, a
+        # PENDING signal whose price never returned to its zone is never
+        # re-evaluated (dedup blocks fresh signals for the same
+        # symbol+strategy+direction) and never expires (only evaluate_signal
+        # expires, and it's not called again) — the stale row blocks trading
+        # for that symbol/strategy forever.
+        await self._expire_stale_pending(symbol)
 
         # 1. Fetch all timeframes in parallel
         try:
@@ -227,6 +235,38 @@ class SignalService:
                 await session.commit()
         except Exception:
             logger.exception("[%s] Failed to persist signals", symbol)
+
+    async def _expire_stale_pending(self, symbol: str) -> None:
+        """Mark PENDING signals older than signal_max_age_minutes as EXPIRED.
+
+        Prevents the stale-PENDING deadlock: a pending signal whose price never
+        returned to its zone is never re-evaluated (dedup blocks fresh signals
+        for the same symbol+strategy+direction) and never expires (only
+        evaluate_signal expires, and it isn't called again). Expiring here lets
+        the next scan generate a fresh signal for that symbol/strategy.
+        """
+        if self.session_factory is None:
+            return
+        max_age_min = float(self.settings.get("signal_max_age_minutes", 60))
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_min)
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    select(SignalModel).where(
+                        SignalModel.symbol == symbol,
+                        SignalModel.status == "PENDING",
+                        SignalModel.created_at < cutoff,
+                    )
+                )
+                stale = result.scalars().all()
+                if stale:
+                    for s in stale:
+                        s.status = "EXPIRED"
+                    await session.commit()
+                    logger.info("[%s] expired %d stale PENDING signal(s) "
+                                "(older than %.0f min)", symbol, len(stale), max_age_min)
+        except Exception:
+            logger.exception("[%s] Failed to expire stale PENDING signals", symbol)
 
     def get_pending(self) -> list[Signal]:
         return [s for s in self.pending if s.status == "PENDING"]
