@@ -30,11 +30,28 @@ class BinanceWebSocketManager:
 
 
 
-    async def connect(self):
-        """Establish WebSocket connection."""
-        self._session = aiohttp.ClientSession()
+    async def _open_socket(self):
+        """Open a fresh WebSocket connection (no task spawn).
+
+        Separate from connect() so _listen() can reconnect INLINE — calling
+        connect() from inside _listen() spawned a SECOND _listen task while the
+        old loop kept running, causing concurrent receive() on one socket and
+        an exponential task/memory leak (the 'Concurrent call to receive()'
+        storm that starved the event loop).
+        """
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        # close the old socket before opening a new one
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
         self._ws = await self._session.ws_connect(self._base_url, heartbeat=30)
+
+    async def connect(self):
+        """Establish WebSocket connection and start the single listener task."""
+        await self._open_socket()
         self._running = True
+        if self._listen_task and not self._listen_task.done():
+            self._listen_task.cancel()
         self._listen_task = asyncio.create_task(self._listen())
         logger.info(f"WebSocket connected to {'testnet' if self._testnet else 'prod'}")
 
@@ -98,7 +115,10 @@ class BinanceWebSocketManager:
                 await asyncio.sleep(self._reconnect_delay)
                 self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
                 try:
-                    await self.connect()
+                    # Reconnect INLINE (no new listener task) — connect() would
+                    # spawn a second _listen() while this loop continues,
+                    # causing concurrent receive() and a task/memory leak.
+                    await self._open_socket()
                     # Re-subscribe all
                     for stream, cb in list(self._subscriptions.items()):
                         msg = {"method": "SUBSCRIBE", "params": [stream], "id": 1}
