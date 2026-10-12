@@ -273,3 +273,60 @@ class TestTrendBias:
         assert tb.direction == "NEUTRAL"
         allowed, reason = should_trade_with_bias(tb, "LONG")
         assert allowed is True and "scalp" in reason.lower()
+
+
+class TestBacktester:
+    """Backtest harness: deterministic over synthetic candles, no lookahead."""
+
+    @staticmethod
+    def _candles(n=120, trend="up"):
+        """Simple synthetic 1h series with a strong trend (for aligned signals)."""
+        out = []
+        for i in range(n):
+            base = 100 + (i if trend == "up" else -i) * 0.5
+            o = base
+            c = base + (1.0 if trend == "up" else -1.0)
+            out.append({"open": o, "high": max(o, c) + 0.3, "low": min(o, c) - 0.3,
+                        "close": c, "volume": 100.0,
+                        "close_time": datetime(2026, 1, 1, i % 24)})
+        return out
+
+    def test_backtest_deterministic(self):
+        """Same input → identical result (pure function over candles)."""
+        from backend.backtest import Backtester
+        k1h = self._candles(120, "up")
+        k5m = self._candles(480, "up")
+        k15m = self._candles(160, "up")
+        bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
+                                  "trade_neutral_markets": True})
+        r1 = bt.run("X", k1h, k5m, k15m)
+        r2 = bt.run("X", k1h, k5m, k15m)
+        assert r1.summary() == r2.summary(), "backtest must be deterministic"
+
+    def test_backtest_no_lookahead(self):
+        """A signal detected at index i fills at i+1's open, never i's close."""
+        from backend.backtest import Backtester
+        k1h = self._candles(120, "up")
+        k5m = self._candles(480, "up")
+        k15m = self._candles(160, "up")
+        bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
+                                  "trade_neutral_markets": True})
+        r = bt.run("X", k1h, k5m, k15m)
+        for t in r.trades:
+            assert t.entry_idx >= 1
+            # entry equals the open of the candle AFTER detection
+            assert t.entry == k1h[t.entry_idx]["open"]
+
+    def test_backtest_reports_expectancy(self):
+        from backend.backtest import Backtester
+        k1h = self._candles(120, "up")
+        k5m = self._candles(480, "up")
+        k15m = self._candles(160, "up")
+        bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
+                                  "trade_neutral_markets": True})
+        r = bt.run("X", k1h, k5m, k15m)
+        s = r.summary()
+        # summary has the keys the CLI/report depends on
+        for key in ("signals", "closed", "win_rate", "total_r", "expectancy_r",
+                    "trades_per_day"):
+            assert key in s
