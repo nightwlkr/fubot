@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,11 +21,41 @@ from backend.services.risk_service import get_risk_service
 from backend.services.signal_service import SignalService
 from backend.services.strategy_service import StrategyService, set_strategy_service
 
+logger = logging.getLogger(__name__)
+
 
 async def load_bot_settings(db) -> dict:
     """Flatten the settings key-value table into the dict the engine expects."""
     result = await db.execute(select(Setting))
     return {row.key: row.value for row in result.scalars().all()}
+
+
+async def load_binance_credentials(binance: BinanceService) -> None:
+    """Load the saved (encrypted) API key/secret from the Account table into the
+    Binance client at startup.
+
+    Keys saved via the Settings UI live encrypted in `Account`; without this the
+    engine fell back to the (empty) env-var key and every signed call — balance,
+    positions, equity snapshots — failed. Precedence: DB key > env key.
+    """
+    from backend.models.account import Account
+    from backend.encryption import decrypt
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Account).where(Account.is_active == True))  # noqa: E712
+        account = result.scalar_one_or_none()
+        if not account:
+            return
+        try:
+            key = decrypt(account.api_key_encrypted)
+            secret = decrypt(account.api_secret_encrypted)
+        except Exception:
+            logger.exception("Failed to decrypt stored Binance credentials; using env key")
+            return
+        if key and secret:
+            binance.set_credentials(key, secret)
+            logger.info("Loaded Binance credentials from the Account table (masked key)")
+
 
 
 @asynccontextmanager
@@ -56,6 +87,7 @@ async def init_bot(app: FastAPI) -> None:
     scan loop and request handlers.
     """
     binance = BinanceService()
+    await load_binance_credentials(binance)
 
     alert_service = get_alert_service()
     alert_service.register_ws_manager(ws_manager)

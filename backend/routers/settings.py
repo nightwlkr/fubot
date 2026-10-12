@@ -66,6 +66,7 @@ async def get_trading_settings(
         "risk_percent", "max_positions", "daily_loss_limit_r", "rr_min",
         "check_interval_seconds", "leverage_btc", "leverage_alts",
         "strategy_fvg_enabled", "strategy_3candle_enabled", "strategy_choch_enabled",
+        "paper_use_real_balance", "paper_balance_usdt",
     ]
     defaults = {
         "risk_percent": 1.0,
@@ -78,6 +79,8 @@ async def get_trading_settings(
         "strategy_fvg_enabled": True,
         "strategy_3candle_enabled": True,
         "strategy_choch_enabled": True,
+        "paper_use_real_balance": True,
+        "paper_balance_usdt": 10000.0,
     }
 
     settings = {}
@@ -99,6 +102,8 @@ async def get_trading_settings(
         strategy_fvg_enabled=bool(settings.get("strategy_fvg_enabled", True)),
         strategy_3candle_enabled=bool(settings.get("strategy_3candle_enabled", True)),
         strategy_choch_enabled=bool(settings.get("strategy_choch_enabled", True)),
+        paper_use_real_balance=bool(settings.get("paper_use_real_balance", True)),
+        paper_balance_usdt=float(settings.get("paper_balance_usdt", 10000.0)),
     )
 
 

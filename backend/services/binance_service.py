@@ -65,6 +65,16 @@ class BinanceService:
         self._limiter = RateLimiter()
         self._client: httpx.AsyncClient | None = None
 
+    def set_credentials(self, api_key: str, api_secret: str) -> None:
+        """Load API credentials (e.g. from the encrypted Account table) at runtime.
+
+        Takes precedence over the env-var key. Used so a key saved in the
+        Settings UI actually reaches the engine without a redeploy/restart of
+        env vars. Public endpoints (klines/ticker) work regardless.
+        """
+        self._api_key = api_key
+        self._api_secret = api_secret
+
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(

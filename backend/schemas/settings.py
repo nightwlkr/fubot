@@ -13,6 +13,8 @@ class TradingSettingsResponse(BaseModel):
     strategy_fvg_enabled: bool = True
     strategy_3candle_enabled: bool = True
     strategy_choch_enabled: bool = True
+    paper_use_real_balance: bool = True
+    paper_balance_usdt: float = 10000.0
 
 
 class TradingSettingsUpdate(BaseModel):
@@ -21,6 +23,8 @@ class TradingSettingsUpdate(BaseModel):
     daily_loss_limit_r: float | None = None
     rr_min: float | None = None
     check_interval_seconds: int | None = None
+    paper_use_real_balance: bool | None = None
+    paper_balance_usdt: float | None = None
 
 
 class SymbolConfigResponse(BaseModel):

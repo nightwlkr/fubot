@@ -244,6 +244,17 @@ class StrategyService:
 
     async def _account_balance(self, paper_mode: bool) -> Optional[Decimal]:
         if paper_mode:
+            # paper_use_real_balance (default true): size paper trades against
+            # the trader's REAL Binance USDT balance so simulated positions
+            # reflect actual capital. Falls back to the fixed paper_balance_usdt
+            # setting when disabled (or when the real balance can't be fetched).
+            if self.settings.get("paper_use_real_balance", True) and self.binance is not None:
+                try:
+                    for asset in await self.binance.get_account_balance():
+                        if asset.get("asset") == "USDT":
+                            return Decimal(str(asset.get("availableBalance", 0)))
+                except Exception as exc:
+                    logger.debug("paper real-balance fetch failed, using paper_balance_usdt: %s", exc)
             return Decimal(str(self.settings.get("paper_balance_usdt", 10000)))
         if self.binance is None:
             return None

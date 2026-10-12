@@ -181,6 +181,54 @@ class TestStrategyServiceEvaluateSignal:
         assert decision.decision == "SKIP"
 
 
+class TestPaperBalanceSource:
+    """paper_use_real_balance (default true): paper sizing uses the real Binance
+    USDT availableBalance; when disabled it falls back to paper_balance_usdt."""
+
+    class BalanceBinance:
+        def __init__(self, available="4321.5"):
+            self.available = available
+
+        async def get_account_balance(self):
+            return [{"asset": "USDT", "availableBalance": self.available}]
+
+        async def get_ticker(self, symbol):
+            return {"symbol": symbol, "price": 100.0}
+
+    async def test_paper_uses_real_balance_by_default(self):
+        svc = make_strategy(binance=self.BalanceBinance(available="4321.5"))
+        bal = await svc._account_balance(paper_mode=True)
+        assert bal == Decimal("4321.5")
+
+    async def test_paper_uses_simulated_balance_when_disabled(self):
+        svc = make_strategy(
+            binance=self.BalanceBinance(available="4321.5"),
+            settings={"paper_use_real_balance": False, "paper_balance_usdt": 5000},
+        )
+        bal = await svc._account_balance(paper_mode=True)
+        assert bal == Decimal("5000")
+
+    async def test_paper_falls_back_to_simulated_on_fetch_error(self):
+        class BrokenBinance:
+            async def get_account_balance(self):
+                raise RuntimeError("no keys")
+
+        svc = make_strategy(
+            binance=BrokenBinance(),
+            settings={"paper_use_real_balance": True, "paper_balance_usdt": 7500},
+        )
+        bal = await svc._account_balance(paper_mode=True)
+        assert bal == Decimal("7500")
+
+    async def test_live_mode_always_uses_real_balance(self):
+        svc = make_strategy(
+            binance=self.BalanceBinance(available="999"),
+            settings={"paper_use_real_balance": False, "paper_balance_usdt": 5000},
+        )
+        bal = await svc._account_balance(paper_mode=False)
+        assert bal == Decimal("999")
+
+
 class TestOrderService:
     async def test_paper_order_fills_immediately(self):
         svc = OrderService()

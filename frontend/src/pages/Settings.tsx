@@ -18,6 +18,8 @@ interface TradingSettings {
   daily_loss_limit_r: number
   rr_min: number
   check_interval_seconds: number
+  paper_use_real_balance: boolean
+  paper_balance_usdt: number
 }
 
 interface SymbolConfig {
@@ -159,6 +161,8 @@ function TradingParamsSection() {
   const [dailyLossLimit, setDailyLossLimit] = useState(3)
   const [rrMin, setRrMin] = useState(3.0)
   const [checkInterval, setCheckInterval] = useState(60)
+  const [paperUseRealBalance, setPaperUseRealBalance] = useState(true)
+  const [paperBalanceUsdt, setPaperBalanceUsdt] = useState(10000)
 
   useEffect(() => {
     api.get<TradingSettings>(ENDPOINTS.settingsTrading)
@@ -169,6 +173,8 @@ function TradingParamsSection() {
         setDailyLossLimit(s.daily_loss_limit_r)
         setRrMin(s.rr_min)
         setCheckInterval(s.check_interval_seconds)
+        setPaperUseRealBalance(s.paper_use_real_balance ?? true)
+        setPaperBalanceUsdt(s.paper_balance_usdt ?? 10000)
         setIsLoading(false)
       })
       .catch(() => setIsLoading(false))
@@ -183,6 +189,8 @@ function TradingParamsSection() {
         daily_loss_limit_r: dailyLossLimit,
         rr_min: rrMin,
         check_interval_seconds: checkInterval,
+        paper_use_real_balance: paperUseRealBalance,
+        paper_balance_usdt: paperBalanceUsdt,
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
@@ -221,6 +229,47 @@ function TradingParamsSection() {
             <p className="text-xs text-muted mt-1">{desc}</p>
           </div>
         ))}
+      </div>
+
+      {/* Paper balance source */}
+      <div className="mt-6 pt-4 border-t border-border">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs text-muted uppercase tracking-wide">Paper Balance Source</p>
+            <p className="text-xs text-muted mt-1">
+              Size paper trades against your real Binance USDT balance (availableBalance), or a fixed simulated balance.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={paperUseRealBalance}
+            onClick={() => setPaperUseRealBalance(v => !v)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${paperUseRealBalance ? 'bg-primary' : 'bg-surface2'}`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${paperUseRealBalance ? 'translate-x-6' : 'translate-x-1'}`} />
+          </button>
+        </div>
+        <p className="text-xs mt-2">
+          <span className={`font-medium ${paperUseRealBalance ? 'text-primary' : 'text-muted'}`}>
+            {paperUseRealBalance ? 'Real balance (recommended)' : 'Simulated balance'}
+          </span>
+          {!paperUseRealBalance && (
+            <span className="text-muted"> — fixed USDT balance used for paper sizing</span>
+          )}
+        </p>
+        {!paperUseRealBalance && (
+          <div className="mt-3 max-w-xs">
+            <label className="text-xs text-muted uppercase tracking-wide block mb-1.5">Simulated Balance (USDT)</label>
+            <input
+              type="number"
+              min={1}
+              value={paperBalanceUsdt}
+              onChange={(e) => setPaperBalanceUsdt(Number(e.target.value))}
+              className="w-full bg-surface2 border border-border rounded-md px-3 py-2 text-sm font-mono text-text focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+          </div>
+        )}
       </div>
 
       <div className="flex justify-end mt-6 pt-4 border-t border-border">
