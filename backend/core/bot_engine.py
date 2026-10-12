@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from backend.models.symbol import Symbol
 from backend.models.equity_log import EquityLog
+from backend.models.trade import Trade
 from backend.services.signal_service import SignalService
 from backend.services.strategy_service import StrategyService
 from backend.services.risk_service import RiskService
@@ -131,6 +132,13 @@ class BotEngine:
         """For each enabled symbol: scan, evaluate, execute."""
         symbols = await self._get_enabled_symbols()
 
+        # Overtrading guard — daily trade cap (checked once per pass)
+        max_daily = int(self.settings.get("max_daily_trades", 12))
+        daily_stats = await self.daily_reset.get_daily_stats()
+        if max_daily > 0 and daily_stats["total_trades"] >= max_daily:
+            logger.info(f"Daily trade cap reached ({daily_stats['total_trades']}/{max_daily})")
+            return
+
         for symbol in symbols:
             if not self._running:
                 break
@@ -147,6 +155,16 @@ class BotEngine:
                     stats = await self.daily_reset.get_daily_stats()
                     await self.alerts.daily_limit_hit(stats["used_r"], stats["limit_r"])
                     break
+
+                # Per-symbol cooldown: don't re-enter a symbol traded recently
+                cooldown_min = int(self.settings.get("symbol_cooldown_minutes", 240))
+                if cooldown_min > 0:
+                    last_trade_age_min = await self._minutes_since_last_trade(symbol)
+                    if last_trade_age_min is not None and last_trade_age_min < cooldown_min:
+                        logger.debug(
+                            f"[{symbol}] cooldown: last trade {last_trade_age_min:.0f}m ago "
+                            f"< {cooldown_min}m")
+                        continue
 
                 # Scan for signals
                 signals = await self.signals.scan_symbol(symbol)
@@ -177,6 +195,25 @@ class BotEngine:
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}", exc_info=True)
                 continue
+
+    async def _minutes_since_last_trade(self, symbol: str) -> Optional[float]:
+        """Minutes since the most recent closed trade on `symbol` (None if no
+        trades yet). Backs the per-symbol cooldown overtrading guard."""
+        if self.session_factory is None:
+            return None
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(Trade.closed_at)
+                .where(Trade.symbol == symbol)
+                .order_by(Trade.closed_at.desc())
+                .limit(1)
+            )
+            last = result.scalar_one_or_none()
+        if last is None:
+            return None
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last).total_seconds() / 60.0
 
     async def _get_enabled_symbols(self) -> list[str]:
         """Fetch list of enabled symbols from DB."""

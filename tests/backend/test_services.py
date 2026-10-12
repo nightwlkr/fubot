@@ -442,6 +442,104 @@ async def test_engine_lifecycle_broadcasts_ws_events():
         await ws_manager.disconnect(99)
 
 
+class TestOvertradingGuard:
+    """Per-symbol cooldown + daily trade cap (the 'don't trade 101x/day' fix)."""
+
+    class _DailyWithStats:
+        """Stub daily_reset whose stats report a controllable trade count."""
+        def __init__(self, total_trades):
+            self._n = total_trades
+        async def get_daily_stats(self):
+            return {"total_trades": self._n, "used_r": 0.0, "limit_r": 3.0}
+        async def check_and_enforce_limit(self):
+            return True
+
+    async def _make_engine(self, daily, session_factory=None):
+        from backend.core.bot_engine import BotEngine
+        from backend.services.signal_service import SignalService
+        binance = SimpleNamespace()
+        engine = BotEngine(
+            settings={"max_daily_trades": 2, "symbol_cooldown_minutes": 240},
+            binance=binance,
+            signal_service=SignalService(),
+            strategy_service=None, risk_service=None, order_service=None,
+            alert_service=SimpleNamespace(),
+            daily_reset=daily, session_factory=session_factory,
+        )
+        engine._running = True  # the loop breaks immediately when not running
+        return engine
+
+    async def test_daily_trade_cap_stops_scanning(self):
+        """When today's trades >= max_daily_trades, the pass returns early."""
+        engine = await self._make_engine(self._DailyWithStats(total_trades=5))
+        scanned = []
+        async def fake_scan(sym):
+            scanned.append(sym)
+            return []
+        engine.signals.scan_symbol = fake_scan
+        engine._get_enabled_symbols = lambda: _async_list(["BTCUSDT"])
+        await engine._scan_and_evaluate()
+        assert scanned == [], "no scan when daily cap is already exceeded"
+
+    async def test_daily_trade_cap_allows_below_limit(self):
+        engine = await self._make_engine(self._DailyWithStats(total_trades=1))
+        scanned = []
+        async def fake_scan(sym):
+            scanned.append(sym)
+            return []
+        engine.signals.scan_symbol = fake_scan
+        engine._get_enabled_symbols = lambda: _async_list(["BTCUSDT"])
+        engine.orders = SimpleNamespace(get_current_position=lambda s: _async_none())
+        await engine._scan_and_evaluate()
+        assert scanned == ["BTCUSDT"], "scans normally below the cap"
+
+    async def test_minutes_since_last_trade(self):
+        """Cooldown helper: None when no trades, minutes when a recent trade."""
+        from sqlalchemy import delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.models.trade import Trade
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            pm = await self._make_engine(self._DailyWithStats(0), session_factory=Session)
+            # no trades yet
+            assert await pm._minutes_since_last_trade("NOPEUSDT") is None
+            # insert a trade closed ~10 minutes ago
+            async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == "COOLUSDT"))
+                s.add(Trade(symbol="COOLUSDT", side="LONG", entry_price=1, exit_price=1,
+                            quantity=1, pnl_usdt=0, pnl_r=0, exit_reason="TP_HIT",
+                            strategy_type="3CANDLE",
+                            closed_at=datetime.now(timezone.utc) - timedelta(minutes=10)))
+                await s.commit()
+            age = await pm._minutes_since_last_trade("COOLUSDT")
+            assert age is not None and 9 <= age <= 11
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == "COOLUSDT"))
+                await s.commit()
+            await engine.dispose()
+
+
+def _async_list(items):
+    async def _coro():
+        return items
+    return _coro()
+
+
+def _async_none():
+    async def _coro():
+        return None
+    return _coro()
+
+
+def _async_true():
+    async def _coro():
+        return True
+    return _coro()
+
+
 class TestPositionManagerWebSocket:
     """Regression: bookTicker ticks close positions on TP/SL in real time,
     without waiting for the 30s REST poll. Uses the real DB with a dedicated
