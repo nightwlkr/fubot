@@ -85,8 +85,11 @@ export default function App() {
     let lastRefresh = 0
     const off = wsManager.onMessage((msg) => {
       if (msg.type === 'alert') {
-        const data = (msg.data ?? {}) as { level?: string; message?: string }
-        useAlertStore.getState().push(data.level ?? 'INFO', data.message ?? '')
+        // Backend broadcasts alert fields at the TOP LEVEL of the message
+        // ({type, level, message, symbol}). Reading msg.data rendered empty
+        // toasts ("INFO" with no text).
+        const { level, message } = msg as { level?: string; message?: string }
+        useAlertStore.getState().push(level ?? 'INFO', message ?? '')
         return
       }
       if (['bot_status', 'pnl_update', 'position_update', 'position_closed',

@@ -356,6 +356,22 @@ async def test_alert_service_awaits_async_broadcast():
     assert ws.sent == [{"type": "alert", "level": "ERROR", "message": "hello", "symbol": None}]
 
 
+async def test_alert_payload_shape_matches_frontend_contract():
+    """Regression: the frontend toast handler reads `msg.level`/`msg.message`
+    from the TOP LEVEL of the alert message (not nested under `data`). Assert
+    the shape the frontend depends on, for the alert types it renders."""
+    ws = FakeWS()
+    svc = AlertService()
+    svc.register_ws_manager(ws)
+    await svc.sl_hit("BTCUSDT", pnl_r=-1.0, pnl_usdt=-50.0)
+    await svc.daily_limit_hit(used_r=3.0, limit_r=3.0)
+    for msg in ws.sent:
+        assert msg["type"] == "alert"
+        # frontend reads these top-level:
+        assert "level" in msg and isinstance(msg["level"], str)
+        assert "message" in msg and msg["message"]  # non-empty text
+
+
 async def test_alert_engine_facing_methods():
     ws = FakeWS()
     svc = AlertService()

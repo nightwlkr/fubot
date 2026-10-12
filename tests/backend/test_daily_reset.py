@@ -140,21 +140,18 @@ def test_midnight_reset_clears_the_latch():
             assert await svc.check_and_enforce_limit() is False
             assert svc._limit_hit_today is True
 
-            # simulate the UTC-midnight reset call (first 5 minutes of a UTC day)
+            # Same UTC day → latch stays set
+            svc.check_and_reset()
+            assert svc._limit_hit_today is True, "latch persists within the same day"
+
+            # Simulate the UTC day boundary: the latch was tripped on an
+            # earlier date, so the next check_and_reset clears it.
             import backend.core.daily_reset as dr
+            from datetime import date as _date
 
-            class FakeNow(datetime):
-                @classmethod
-                def now(cls, tz=None):
-                    return datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc)
-
-            real_datetime = dr.datetime
-            dr.datetime = FakeNow
-            try:
-                await svc.check_and_reset()
-            finally:
-                dr.datetime = real_datetime
-            assert svc._limit_hit_today is False, "midnight reset clears the latch"
+            svc._limit_hit_date = _date(2026, 1, 1)  # earlier day
+            svc.check_and_reset()
+            assert svc._limit_hit_today is False, "latch clears at the UTC day boundary"
         finally:
             await _cleanup(engine)
     asyncio.run(scenario())

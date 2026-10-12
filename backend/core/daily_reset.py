@@ -4,7 +4,7 @@ DB access: session factory + short-lived sessions (the service is called from
 both the engine's scan loop and request handlers concurrently).
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from typing import Callable, Optional
 
 from sqlalchemy import select
@@ -28,7 +28,12 @@ class DailyResetService:
         self.settings = settings or {}
         self.bot = bot_engine
         self.alerts = alert_service
+        # Daily-loss latch. Date-based so it self-clears at the UTC day
+        # boundary regardless of when the loop last ran — the old in-memory
+        # bool was never cleared (check_and_reset had no caller), so a -3R trip
+        # blocked trading until a service restart.
         self._limit_hit_today = False
+        self._limit_hit_date: Optional[date] = None
 
     def get_limit_r(self) -> float:
         """Get the daily loss limit in R (positive value)."""
@@ -85,6 +90,9 @@ class DailyResetService:
 
     async def check_and_enforce_limit(self) -> bool:
         """Called before every new trade. Returns True if trading is allowed."""
+        # Self-clear the latch at the UTC day boundary (date-based).
+        self.check_and_reset()
+
         if self._limit_hit_today:
             return False
 
@@ -106,6 +114,7 @@ class DailyResetService:
     async def _trigger_daily_stop(self):
         """Emergency stop: bot stops trading for the rest of the day."""
         self._limit_hit_today = True
+        self._limit_hit_date = datetime.now(timezone.utc).date()
 
         today = datetime.now(timezone.utc).date()
         if self.session_factory is not None:
@@ -165,10 +174,18 @@ class DailyResetService:
 
             await session.commit()
 
-    async def check_and_reset(self):
-        """Called at UTC midnight to reset the daily tracking."""
-        now = datetime.now(timezone.utc)
-        if now.hour == 0 and now.minute < 5:
-            if self._limit_hit_today:
-                logger.info("New UTC day — resetting daily loss limit flag.")
-                self._limit_hit_today = False
+    def check_and_reset(self):
+        """Clear the daily-loss latch at the UTC day boundary.
+
+        Date-based (not a time window): the latch is cleared whenever the
+        current UTC date differs from the date it was tripped. Called from
+        check_and_enforce_limit on every trade check, so it self-clears even
+        though no dedicated scheduler invokes it.
+        """
+        if not self._limit_hit_today:
+            return
+        today = datetime.now(timezone.utc).date()
+        if self._limit_hit_date is None or today > self._limit_hit_date:
+            logger.info("New UTC day — resetting daily loss limit flag.")
+            self._limit_hit_today = False
+            self._limit_hit_date = None
