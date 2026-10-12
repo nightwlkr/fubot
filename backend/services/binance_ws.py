@@ -10,8 +10,8 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-PROD_WS = "wss://fstream.binance.com"
-TESTNET_WS = "wss://testnet.binancefuture.com"
+PROD_WS = "wss://fstream.binance.com/stream"
+TESTNET_WS = "wss://stream.binancefuture.com/stream"
 
 
 class BinanceWebSocketManager:
