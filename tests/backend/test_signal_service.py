@@ -237,6 +237,59 @@ def test_scan_dedups_repeated_scans():
     _run(scenario())
 
 
+def test_skipped_signal_does_not_block_fresh():
+    """Regression: a SKIPPED signal must NOT reserve the (symbol, strategy,
+    direction) slot — a rejected signal (counter-trend etc.) shouldn't block
+    future attempts once the market changes. Observed live: 43 stale SKIPPED
+    rows blocked all new signals for 43 minutes of scanning."""
+    async def scenario():
+        from sqlalchemy import select, update
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.models.signal import Signal as SignalModel
+        from backend.services.signal_service import SignalService
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with Session() as db:
+                await db.execute(__import__("sqlalchemy").delete(SignalModel).where(
+                    SignalModel.symbol == SYMBOL))
+                await db.commit()
+
+            svc = SignalService(session_factory=Session,
+                                binance=FakeBinance(make_klines("flat")),
+                                settings={"rr_min": 3.0, "trade_neutral_markets": True})
+
+            # scan #1: creates a PENDING signal
+            await svc.scan_symbol(SYMBOL)
+            async with Session() as db:
+                row = (await db.execute(select(SignalModel).where(
+                    SignalModel.symbol == SYMBOL))).scalars().first()
+            assert row.status == "PENDING"
+
+            # mark it SKIPPED (as if a filter rejected it)
+            async with Session() as db:
+                await db.execute(update(SignalModel).where(
+                    SignalModel.id == row.id).values(status="SKIPPED"))
+                await db.commit()
+
+            # scan #2: the SKIPPED row must NOT block a fresh signal
+            await svc.scan_symbol(SYMBOL)
+            async with Session() as db:
+                rows = (await db.execute(select(SignalModel).where(
+                    SignalModel.symbol == SYMBOL))).scalars().all()
+            statuses = [r.status for r in rows]
+            assert "PENDING" in statuses, (
+                f"a fresh PENDING should be created despite the SKIPPED row, got {statuses}")
+        finally:
+            async with Session() as db:
+                await db.execute(__import__("sqlalchemy").delete(SignalModel).where(
+                    SignalModel.symbol == SYMBOL))
+                await db.commit()
+            await engine.dispose()
+    _run(scenario())
+
+
 def test_stale_pending_signals_are_expired():
     """Regression: a PENDING signal older than signal_max_age_minutes must be
     EXPIRED on the next scan, so it stops blocking fresh signals for the same

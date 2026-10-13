@@ -196,10 +196,17 @@ class SignalService:
     async def _persist_signals(self, symbol: str, to_persist: list[tuple[Signal, bool]]) -> None:
         """Insert new PENDING/SKIPPED signal rows, deduped per (symbol, strategy, direction).
 
-        A duplicate (same strategy+direction already PENDING/SKIPPED) is NOT
-        inserted and its in-memory Signal gets db_id=None. It is also marked
-        SKIPPED here so the scan loop never evaluates/executes a signal with no
-        DB row — that produced orphaned positions with signal_id=None.
+        A duplicate (same strategy+direction already PENDING) is NOT inserted
+        and its in-memory Signal gets db_id=None. It is also marked SKIPPED here
+        so the scan loop never evaluates/executes a signal with no DB row — that
+        produced orphaned positions with signal_id=None.
+
+        Only PENDING reserves the slot: a SKIPPED signal was REJECTED (counter-
+        trend, weak, etc.) and must NOT block future attempts — the trend flips
+        and a previously-skipped setup becomes valid. Deduping against SKIPPED
+        rows made 43 stale rejections permanently block all new signals for
+        those symbol+strategy+direction combos (observed live: 43 SKIPPED rows,
+        zero new signals in 43 min of scanning).
         """
         if self.session_factory is None or not to_persist:
             return
@@ -208,7 +215,7 @@ class SignalService:
                 existing = await session.execute(
                     select(SignalModel.strategy_type, SignalModel.direction).where(
                         SignalModel.symbol == symbol,
-                        SignalModel.status.in_(("PENDING", "SKIPPED")),
+                        SignalModel.status == "PENDING",
                     )
                 )
                 seen = set(existing.fetchall())
@@ -242,13 +249,17 @@ class SignalService:
             logger.exception("[%s] Failed to persist signals", symbol)
 
     async def _expire_stale_pending(self, symbol: str) -> None:
-        """Mark PENDING signals older than signal_max_age_minutes as EXPIRED.
+        """Mark stale PENDING and SKIPPED signals as EXPIRED.
 
         Prevents the stale-PENDING deadlock: a pending signal whose price never
         returned to its zone is never re-evaluated (dedup blocks fresh signals
         for the same symbol+strategy+direction) and never expires (only
         evaluate_signal expires, and it isn't called again). Expiring here lets
         the next scan generate a fresh signal for that symbol/strategy.
+
+        SKIPPED rows are also expired so the rejections table doesn't grow
+        unboundedly (they no longer block dedup — see _persist_signals — but
+        old rows are just noise).
         """
         if self.session_factory is None:
             return
@@ -259,7 +270,7 @@ class SignalService:
                 result = await session.execute(
                     select(SignalModel).where(
                         SignalModel.symbol == symbol,
-                        SignalModel.status == "PENDING",
+                        SignalModel.status.in_(("PENDING", "SKIPPED")),
                         SignalModel.created_at < cutoff,
                     )
                 )
@@ -268,10 +279,10 @@ class SignalService:
                     for s in stale:
                         s.status = "EXPIRED"
                     await session.commit()
-                    logger.info("[%s] expired %d stale PENDING signal(s) "
+                    logger.info("[%s] expired %d stale signal(s) "
                                 "(older than %.0f min)", symbol, len(stale), max_age_min)
         except Exception:
-            logger.exception("[%s] Failed to expire stale PENDING signals", symbol)
+            logger.exception("[%s] Failed to expire stale signals", symbol)
 
     def get_pending(self) -> list[Signal]:
         return [s for s in self.pending if s.status == "PENDING"]
