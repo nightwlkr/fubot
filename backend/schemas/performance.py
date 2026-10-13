@@ -11,6 +11,21 @@ class EquityResponse(BaseModel):
     data: list[EquityPoint]
 
 
+class PnLPoint(BaseModel):
+    """One point on the cumulative trading-P&L curve.
+
+    Unlike the equity curve (total account value incl. collateral drift), this
+    is ONLY realized PnL from closed trades — the strategy's actual performance.
+    """
+    date: str
+    pnl_r: float      # cumulative R up to this trade
+    pnl_usdt: float   # cumulative USD up to this trade
+
+
+class PnLResponse(BaseModel):
+    data: list[PnLPoint]
+
+
 class MonthlyReturn(BaseModel):
     month: str
     pnl_r: float

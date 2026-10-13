@@ -42,6 +42,7 @@ export const ENDPOINTS = {
 
   // Performance
   performanceEquity: '/performance/equity',
+  performancePnL: '/performance/pnl',
   performanceMonthly: '/performance/monthly',
   performanceStrategies: '/performance/strategies',
 } as const

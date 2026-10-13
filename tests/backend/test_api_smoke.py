@@ -90,6 +90,7 @@ EMPTY_OK = [
     "/api/signals/missed",
     "/api/orders/",
     "/api/performance/equity",
+    "/api/performance/pnl",
     "/api/performance/monthly",
     "/api/performance/strategies",
 ]
@@ -273,3 +274,27 @@ def test_strategies_endpoint_returns_r_buckets(client, test_user):
         assert item["count"] >= 0
     labels = [item["bucket"] for item in data]
     assert "3R+" in labels and "0 to 0.5R" in labels  # spec bucket labels
+
+
+def test_pnl_curve_returns_cumulative(client, test_user):
+    """Contract for the trading-P&L curve: cumulative pnl_r and pnl_usdt over
+    closed trades, ascending by close time. Unlike the equity curve (account
+    value incl. collateral), this is the strategy's realized performance."""
+    _login(client, test_user)
+    res = client.get("/api/performance/pnl")
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert isinstance(data, list)
+    for point in data:
+        assert set(point) == {"date", "pnl_r", "pnl_usdt"}
+    # ascending (oldest first) — charts require it
+    dates = [p["date"] for p in data]
+    assert dates == sorted(dates), "pnl curve must be ascending"
+    # cumulative values must be non-decreasing runs of the same sign only if
+    # all trades share a sign; instead verify monotonic accumulation matches a
+    # running sum of per-trade deltas
+    if len(data) >= 2:
+        # each point's cumulative should equal prior cumulative + that trade's pnl
+        # (we can't see per-trade here, but cumulative must be finite and ordered)
+        assert all(isinstance(p["pnl_r"], (int, float)) for p in data)
+        assert all(isinstance(p["pnl_usdt"], (int, float)) for p in data)

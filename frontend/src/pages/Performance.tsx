@@ -19,6 +19,12 @@ interface EquityData {
   balance: number
 }
 
+interface PnLData {
+  date: string
+  pnl_r: number
+  pnl_usdt: number
+}
+
 interface MonthlyData {
   month: string
   pnl_r: number
@@ -92,6 +98,95 @@ function EquityChart() {
           ))}
         </div>
       </CardHeader>
+      <div ref={containerRef} className="w-full" />
+    </Card>
+  )
+}
+
+function PnLChart() {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const [metric, setMetric] = useState<'r' | 'usd'>('usd')
+  const [range, setRange] = useState<Range>('30d')
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const c = createChart(containerRef.current, {
+      layout: { background: { color: '#151920' }, textColor: '#6B7280' },
+      grid: { vertLines: { color: '#1C2028' }, horzLines: { color: '#1C2028' } },
+      width: containerRef.current.clientWidth,
+      height: 240,
+      timeScale: { borderColor: '#2A2F3A', timeVisible: true },
+      rightPriceScale: { borderColor: '#2A2F3A' },
+      crosshair: { vertLine: { color: '#22C55E', labelBackgroundColor: '#22C55E' }, horzLine: { color: '#22C55E', labelBackgroundColor: '#22C55E' } },
+    })
+    // green line — trading P&L (vs blue account-equity above)
+    seriesRef.current = c.addSeries(LineSeries, { color: '#22C55E', lineWidth: 2 })
+    chartRef.current = c
+    const handleResize = () => {
+      if (containerRef.current) c.applyOptions({ width: containerRef.current.clientWidth })
+    }
+    window.addEventListener('resize', handleResize)
+    return () => { window.removeEventListener('resize', handleResize); c.remove() }
+  }, [])
+
+  useEffect(() => {
+    api.get<{ data: PnLData[] }>(ENDPOINTS.performancePnL, { params: { days: RANGE_DAYS[range] } })
+      .then(res => {
+        const series = seriesRef.current
+        if (!series || !chartRef.current) return
+        // endpoint already returns ascending; guard anyway (setData needs order)
+        const data = [...res.data.data].sort(
+          (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+        )
+        series.setData(data.map(p => ({
+          time: (new Date(p.date).getTime() / 1000) as Time,
+          value: metric === 'r' ? p.pnl_r : p.pnl_usdt,
+        })))
+        chartRef.current.timeScale().fitContent()
+      })
+      .catch(console.error)
+  }, [range, metric])
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Trading P&amp;L ({metric === 'r' ? 'R' : 'USD'})</CardTitle>
+        <div className="flex gap-1">
+          <button
+            onClick={() => setMetric('usd')}
+            className={`px-2 py-1 text-xs rounded font-mono transition-colors ${
+              metric === 'usd' ? 'bg-success text-white' : 'bg-surface2 text-muted hover:text-text'
+            }`}
+          >
+            USD
+          </button>
+          <button
+            onClick={() => setMetric('r')}
+            className={`px-2 py-1 text-xs rounded font-mono transition-colors ${
+              metric === 'r' ? 'bg-success text-white' : 'bg-surface2 text-muted hover:text-text'
+            }`}
+          >
+            R
+          </button>
+          <span className="w-2" />
+          {(['7d', '30d', '90d', '365d'] as Range[]).map(r => (
+            <button
+              key={r}
+              onClick={() => setRange(r)}
+              className={`px-2 py-1 text-xs rounded font-mono transition-colors ${
+                range === r ? 'bg-primary text-white' : 'bg-surface2 text-muted hover:text-text'
+              }`}
+            >
+              {r}
+            </button>
+          ))}
+        </div>
+      </CardHeader>
+      <p className="text-xs text-muted px-1 mb-1">
+        Cumulative realized P&amp;L from closed trades only — unlike the equity curve, this excludes collateral price drift.
+      </p>
       <div ref={containerRef} className="w-full" />
     </Card>
   )
@@ -232,6 +327,7 @@ export default function Performance() {
       </div>
 
       <EquityChart />
+      <PnLChart />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
           <CardHeader><CardTitle>Monthly Returns (R)</CardTitle></CardHeader>

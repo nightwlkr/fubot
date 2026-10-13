@@ -13,6 +13,8 @@ from backend.models.trade import Trade
 from backend.schemas.performance import (
     EquityPoint,
     EquityResponse,
+    PnLPoint,
+    PnLResponse,
     MonthlyReturn,
     MonthlyResponse,
     RBucket,
@@ -60,6 +62,43 @@ async def equity_curve(
             for r in rows
         ]
     )
+
+
+@router.get("/pnl", response_model=PnLResponse)
+async def pnl_curve(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    days: int = Query(365, ge=1, le=730),
+):
+    """Cumulative trading P&L (R and USD) from closed trades, in close order.
+
+    Unlike the equity curve (total account value, moves with collateral prices),
+    this shows ONLY realized PnL from the strategy — the honest performance line.
+    Returns ascending (oldest first) for charting.
+    """
+    user = await get_current_user_from_cookie(request, db)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    result = await db.execute(
+        select(Trade)
+        .where(Trade.closed_at >= cutoff)
+        .order_by(Trade.closed_at)
+    )
+    rows = result.scalars().all()
+
+    cum_r = 0.0
+    cum_usd = 0.0
+    points: list[PnLPoint] = []
+    for t in rows:
+        cum_r += float(t.pnl_r or 0)
+        cum_usd += float(t.pnl_usdt or 0)
+        points.append(PnLPoint(
+            date=t.closed_at.isoformat(),
+            pnl_r=round(cum_r, 4),
+            pnl_usdt=round(cum_usd, 4),
+        ))
+
+    return PnLResponse(data=points)
 
 
 @router.get("/monthly", response_model=MonthlyResponse)
