@@ -8,7 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
-Status: 148 passing, 0 xfail (2026-10-12 — payload-contract + WS-tick + ATR-stop + backtest + binance-ws-leak + stale-signal + pnl-curve + filter-relaxation regressions added)
+Status: 149 passing, 0 xfail (2026-10-12 — payload-contract + WS-tick + ATR-stop + backtest + binance-ws-leak + stale-signal + pnl-curve + filter-relaxation + dedup-fix regressions added)
 
 ## Local Contracts
 
@@ -37,7 +37,7 @@ Status: 148 passing, 0 xfail (2026-10-12 — payload-contract + WS-tick + ATR-st
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 148 passed
+- `PYTHONPATH=. pytest tests/backend/ -q` — 149 passed
 - A failing test blocks completion of the change that broke it
 
 ## Child DOX Index
