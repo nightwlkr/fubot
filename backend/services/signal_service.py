@@ -120,8 +120,9 @@ class SignalService:
 
         # 4/5. Apply filters and persist (deduped, one fresh session per scan)
         # Trend-strength gate settings
-        trade_neutral = bool(self.settings.get("trade_neutral_markets", False))
+        trade_neutral = bool(self.settings.get("trade_neutral_markets", True))
         min_strength = str(self.settings.get("trade_min_trend_strength", "MODERATE")).upper()
+        volume_filter_enabled = bool(self.settings.get("volume_filter_enabled", False))
         _strength_rank = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
         min_rank = _strength_rank.get(min_strength, 2)
 
@@ -158,7 +159,11 @@ class SignalService:
                 # the 1h FVG, 5m volume for 5m 3-candle / 15m CHoCH.
                 vol_candles = k1h[-15:-5] if strategy_type == "FVG" else k5m[-15:-5]
                 volume_confirmed = get_volume_confirmed_filter(direction, vol_candles).passes_filter
-                if not volume_confirmed:
+                # Volume filter DISABLED by default (2026-10-13): the backtest
+                # showed it blocked profitable trades without improving quality
+                # (428→664 trades, expectancy +0.072→+0.082 when off). Set
+                # volume_filter_enabled=true to restore it.
+                if volume_filter_enabled and not volume_confirmed:
                     status, skip_reason = "SKIPPED", "Volume filter: no dominant side confirmation"
                 # Filter 3 — minimum R:R
                 elif rr < rr_min:

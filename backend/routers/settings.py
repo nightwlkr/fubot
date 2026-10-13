@@ -67,7 +67,7 @@ async def get_trading_settings(
         "check_interval_seconds", "leverage_btc", "leverage_alts",
         "strategy_fvg_enabled", "strategy_3candle_enabled", "strategy_choch_enabled",
         "paper_use_real_balance", "paper_balance_usdt",
-        "trade_neutral_markets", "trade_min_trend_strength",
+        "trade_neutral_markets", "trade_min_trend_strength", "volume_filter_enabled",
         "symbol_cooldown_minutes", "max_daily_trades",
     ]
     defaults = {
@@ -83,8 +83,9 @@ async def get_trading_settings(
         "strategy_choch_enabled": True,
         "paper_use_real_balance": True,
         "paper_balance_usdt": 10000.0,
-        "trade_neutral_markets": False,
+        "trade_neutral_markets": True,
         "trade_min_trend_strength": "MODERATE",
+        "volume_filter_enabled": False,
         "symbol_cooldown_minutes": 240,
         "max_daily_trades": 12,
     }
@@ -110,10 +111,11 @@ async def get_trading_settings(
         strategy_choch_enabled=bool(settings.get("strategy_choch_enabled", True)),
         paper_use_real_balance=bool(settings.get("paper_use_real_balance", True)),
         paper_balance_usdt=float(settings.get("paper_balance_usdt", 10000.0)),
-        trade_neutral_markets=bool(settings.get("trade_neutral_markets", False)),
+        trade_neutral_markets=bool(settings.get("trade_neutral_markets", True)),
         trade_min_trend_strength=str(settings.get("trade_min_trend_strength", "MODERATE")),
         symbol_cooldown_minutes=int(settings.get("symbol_cooldown_minutes", 240)),
         max_daily_trades=int(settings.get("max_daily_trades", 12)),
+        volume_filter_enabled=bool(settings.get("volume_filter_enabled", False)),
     )
 
 

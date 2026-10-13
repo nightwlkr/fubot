@@ -193,13 +193,31 @@ def test_scan_skips_on_bearish_trend():
 
 def test_scan_skips_when_volume_not_confirmed():
     async def scenario():
+        # volume filter is OFF by default (backtest showed it blocked profitable
+        # trades) — opt in here to exercise the skip path
         signals, persisted = await _scan_and_fetch(
-            "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True})
+            "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
+                                         "volume_filter_enabled": True})
         try:
             assert signals[0].status == "SKIPPED"
             assert signals[0].skip_reason == "Volume filter: no dominant side confirmation"
             assert signals[0].volume_confirmed is False
             assert persisted[0]["skip_reason"] == "Volume filter: no dominant side confirmation"
+        finally:
+            await _cleanup()
+    _run(scenario())
+
+
+def test_volume_filter_disabled_by_default():
+    """The doji-volume fixture would be volume-skipped, but with the filter off
+    (default) the signal passes to PENDING."""
+    async def scenario():
+        signals, persisted = await _scan_and_fetch(
+            "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True})
+        try:
+            assert signals[0].status == "PENDING", (
+                f"expected PENDING with volume filter off, got {signals[0].status}: "
+                f"{signals[0].skip_reason}")
         finally:
             await _cleanup()
     _run(scenario())
@@ -278,9 +296,11 @@ def test_stale_pending_signals_are_expired():
 
 
 def test_scan_skips_neutral_market():
-    """Default gate: a NEUTRAL trend bias skips the signal (don't trade chop)."""
+    """With trade_neutral_markets=false, a NEUTRAL trend bias skips the signal
+    (default is now TRUE — neutral allowed — per the 2026-10-13 backtest)."""
     async def scenario():
-        signals, persisted = await _scan_and_fetch("neutral_1h")  # default settings
+        signals, persisted = await _scan_and_fetch(
+            "neutral_1h", svc_settings={"rr_min": 3.0, "trade_neutral_markets": False})
         try:
             assert signals, "candidate generated but gated"
             assert signals[0].status == "SKIPPED"

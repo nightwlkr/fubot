@@ -114,6 +114,7 @@ class Backtester:
         self.balance = float(self.settings.get("backtest_balance", 10000.0))
         self.trade_neutral = bool(self.settings.get("trade_neutral_markets", False))
         self.min_strength = str(self.settings.get("trade_min_trend_strength", "MODERATE")).upper()
+        self.volume_filter_enabled = bool(self.settings.get("volume_filter_enabled", True))
         self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
         self._strength_rank = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
 
@@ -181,7 +182,8 @@ class Backtester:
         if bias.rsi_zone == "OVERSOLD" and direction == "SHORT":
             skip["rsi_oversold"] = skip.get("rsi_oversold", 0) + 1
             return False
-        if not get_volume_confirmed_filter(direction, vol_candles).passes_filter:
+        if (self.volume_filter_enabled
+                and not get_volume_confirmed_filter(direction, vol_candles).passes_filter):
             skip["volume"] = skip.get("volume", 0) + 1
             return False
         if rr < self.rr_min:

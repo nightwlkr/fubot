@@ -32,6 +32,7 @@ async def main() -> None:
     ap.add_argument("--balance", type=float, default=10000.0)
     ap.add_argument("--neutral", action="store_true", help="allow NEUTRAL-bias trades")
     ap.add_argument("--strength", default="MODERATE", choices=["WEAK", "MODERATE", "STRONG"])
+    ap.add_argument("--no-volume", action="store_true", help="disable the volume-confirmation filter")
     args = ap.parse_args()
 
     symbols = ([s.strip() for s in args.symbols.split(",")]
@@ -42,6 +43,7 @@ async def main() -> None:
         "backtest_balance": args.balance,
         "trade_neutral_markets": args.neutral,
         "trade_min_trend_strength": args.strength,
+        "volume_filter_enabled": not args.no_volume,
     }
 
     print(f"Backtest: {', '.join(symbols)} | {args.days}d | "
