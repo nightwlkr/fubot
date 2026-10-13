@@ -20,6 +20,11 @@ interface TradingSettings {
   check_interval_seconds: number
   paper_use_real_balance: boolean
   paper_balance_usdt: number
+  trade_neutral_markets: boolean
+  trade_min_trend_strength: string
+  volume_filter_enabled: boolean
+  symbol_cooldown_minutes: number
+  max_daily_trades: number
 }
 
 interface SymbolConfig {
@@ -163,6 +168,11 @@ function TradingParamsSection() {
   const [checkInterval, setCheckInterval] = useState(60)
   const [paperUseRealBalance, setPaperUseRealBalance] = useState(true)
   const [paperBalanceUsdt, setPaperBalanceUsdt] = useState(10000)
+  const [tradeNeutralMarkets, setTradeNeutralMarkets] = useState(true)
+  const [tradeMinTrendStrength, setTradeMinTrendStrength] = useState('MODERATE')
+  const [volumeFilterEnabled, setVolumeFilterEnabled] = useState(false)
+  const [symbolCooldownMinutes, setSymbolCooldownMinutes] = useState(240)
+  const [maxDailyTrades, setMaxDailyTrades] = useState(12)
 
   useEffect(() => {
     api.get<TradingSettings>(ENDPOINTS.settingsTrading)
@@ -175,6 +185,11 @@ function TradingParamsSection() {
         setCheckInterval(s.check_interval_seconds)
         setPaperUseRealBalance(s.paper_use_real_balance ?? true)
         setPaperBalanceUsdt(s.paper_balance_usdt ?? 10000)
+        setTradeNeutralMarkets(s.trade_neutral_markets ?? true)
+        setTradeMinTrendStrength(s.trade_min_trend_strength ?? 'MODERATE')
+        setVolumeFilterEnabled(s.volume_filter_enabled ?? false)
+        setSymbolCooldownMinutes(s.symbol_cooldown_minutes ?? 240)
+        setMaxDailyTrades(s.max_daily_trades ?? 12)
         setIsLoading(false)
       })
       .catch(() => setIsLoading(false))
@@ -191,6 +206,11 @@ function TradingParamsSection() {
         check_interval_seconds: checkInterval,
         paper_use_real_balance: paperUseRealBalance,
         paper_balance_usdt: paperBalanceUsdt,
+        trade_neutral_markets: tradeNeutralMarkets,
+        trade_min_trend_strength: tradeMinTrendStrength,
+        volume_filter_enabled: volumeFilterEnabled,
+        symbol_cooldown_minutes: symbolCooldownMinutes,
+        max_daily_trades: maxDailyTrades,
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
@@ -270,6 +290,79 @@ function TradingParamsSection() {
             />
           </div>
         )}
+      </div>
+
+      {/* Strategy Filters — toggles for the signal-pipeline gates */}
+      <div className="mt-6 pt-4 border-t border-border">
+        <p className="text-xs text-muted uppercase tracking-wide mb-3">Strategy Filters</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="flex items-center justify-between">
+            <div className="pr-3">
+              <p className="text-sm">Allow Neutral Markets</p>
+              <p className="text-xs text-muted">Trade when the trend is choppy/directionless</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={tradeNeutralMarkets}
+              onClick={() => setTradeNeutralMarkets(v => !v)}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${tradeNeutralMarkets ? 'bg-primary' : 'bg-surface2'}`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${tradeNeutralMarkets ? 'translate-x-6' : 'translate-x-1'}`} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="pr-3">
+              <p className="text-sm">Volume Filter</p>
+              <p className="text-xs text-muted">Require dominant-side volume (backtest: reduces profit)</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={volumeFilterEnabled}
+              onClick={() => setVolumeFilterEnabled(v => !v)}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${volumeFilterEnabled ? 'bg-primary' : 'bg-surface2'}`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${volumeFilterEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+            </button>
+          </div>
+          <div>
+            <label className="text-xs text-muted uppercase tracking-wide block mb-1.5">Min Trend Strength</label>
+            <select
+              value={tradeMinTrendStrength}
+              onChange={(e) => setTradeMinTrendStrength(e.target.value)}
+              className="w-full bg-surface2 border border-border rounded-md px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-primary/50"
+            >
+              <option value="WEAK">Weak (most trades)</option>
+              <option value="MODERATE">Moderate (balanced)</option>
+              <option value="STRONG">Strong (fewest, highest conviction)</option>
+            </select>
+            <p className="text-xs text-muted mt-1">Minimum aligned-trend strength to enter</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Overtrading guards */}
+      <div className="mt-6 pt-4 border-t border-border">
+        <p className="text-xs text-muted uppercase tracking-wide mb-3">Overtrading Guards</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+          <div>
+            <label className="text-xs text-muted uppercase tracking-wide block mb-1.5">Max Daily Trades</label>
+            <div className="flex items-center gap-3">
+              <input type="range" min={1} max={50} step={1} value={maxDailyTrades} onChange={(e) => setMaxDailyTrades(Number(e.target.value))} className="flex-1 accent-primary" />
+              <span className="text-sm font-mono font-bold w-16 text-right">{maxDailyTrades}</span>
+            </div>
+            <p className="text-xs text-muted mt-1">Bot stops opening new trades after this many per day (0 = no cap)</p>
+          </div>
+          <div>
+            <label className="text-xs text-muted uppercase tracking-wide block mb-1.5">Per-Symbol Cooldown</label>
+            <div className="flex items-center gap-3">
+              <input type="range" min={0} max={1440} step={30} value={symbolCooldownMinutes} onChange={(e) => setSymbolCooldownMinutes(Number(e.target.value))} className="flex-1 accent-primary" />
+              <span className="text-sm font-mono font-bold w-16 text-right">{symbolCooldownMinutes < 60 ? `${symbolCooldownMinutes}m` : `${Math.floor(symbolCooldownMinutes / 60)}h`}</span>
+            </div>
+            <p className="text-xs text-muted mt-1">Wait before re-entering the same symbol (0 = no cooldown)</p>
+          </div>
+        </div>
       </div>
 
       <div className="flex justify-end mt-6 pt-4 border-t border-border">
