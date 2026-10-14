@@ -379,41 +379,44 @@ class BinanceService:
         )
 
     async def modify_position_stop(self, symbol: str, side: str, stop_price: float, quantity: float) -> dict:
-        """POST /fapi/v1/order — STOP_MARKET (reduce-only). Rounds qty + price."""
+        """POST /fapi/v1/algoOrder — STOP_MARKET (reduce-only). Rounds qty + price.
+        Binance migrated conditional orders to the Algo Order API (2025-12-09)."""
         close_side = "SELL" if side == "LONG" else "BUY"
         lot = await self.get_lot_size(symbol)
         qty = self._round_qty(quantity, lot)
         price = self._round_price(stop_price, lot)
         data = await self._signed_request(
-            "POST", "fapi/v1/order",
+            "POST", "fapi/v1/algoOrder",
             {"symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-             "stopPrice": price, "quantity": qty, "reduceOnly": "true"},
+             "triggerPrice": price, "quantity": qty, "reduceOnly": "true",
+             "algoType": "CONDITIONAL"},
             weight=2,
         )
         return {
-            "orderId": data.get("orderId"),
+            "orderId": data.get("algoId"),
             "symbol": symbol,
             "side": close_side,
-            "status": data.get("status", "NEW"),
+            "status": data.get("algoStatus", "NEW"),
         }
 
     async def place_take_profit_order(self, symbol: str, side: str, tp_price: float, quantity: float) -> dict:
-        """POST /fapi/v1/order — TAKE_PROFIT_MARKET (reduce-only). Rounds qty + price."""
+        """POST /fapi/v1/algoOrder — TAKE_PROFIT_MARKET (reduce-only). Rounds qty + price."""
         close_side = "SELL" if side == "LONG" else "BUY"
         lot = await self.get_lot_size(symbol)
         qty = self._round_qty(quantity, lot)
         price = self._round_price(tp_price, lot)
         data = await self._signed_request(
-            "POST", "fapi/v1/order",
+            "POST", "fapi/v1/algoOrder",
             {"symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
-             "stopPrice": price, "quantity": qty, "reduceOnly": "true"},
+             "triggerPrice": price, "quantity": qty, "reduceOnly": "true",
+             "algoType": "CONDITIONAL"},
             weight=2,
         )
         return {
-            "orderId": data.get("orderId"),
+            "orderId": data.get("algoId"),
             "symbol": symbol,
             "side": close_side,
-            "status": data.get("status", "NEW"),
+            "status": data.get("algoStatus", "NEW"),
         }
 
     async def get_open_orders(self, symbol: str) -> list[dict]:
