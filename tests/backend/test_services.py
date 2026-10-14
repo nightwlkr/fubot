@@ -770,8 +770,8 @@ class TestLiveModeSafety:
                 await s.commit()
 
             class RecBinance:
-                async def cancel_order(self, symbol, order_id):
-                    cancelled.append(order_id)
+                async def cancel_algo_order(self, symbol, algo_id):
+                    cancelled.append(algo_id)
                     return {}
                 async def place_market_order(self, symbol, side, qty):
                     market_closed.append((symbol, side, qty))
@@ -825,8 +825,8 @@ class TestLiveModeSafety:
                 await s.commit()
 
             class RecBinance:
-                async def cancel_order(self, symbol, order_id):
-                    cancelled.append(order_id)
+                async def cancel_algo_order(self, symbol, algo_id):
+                    cancelled.append(algo_id)
                     return {}
                 async def place_market_order(self, symbol, side, qty):
                     market_closed.append((symbol, side, qty))
@@ -845,6 +845,59 @@ class TestLiveModeSafety:
 
             assert 888 in cancelled, f"SL not cancelled on TP hit: {cancelled}"
             assert market_closed == [], f"redundant market close on TP hit: {market_closed}"
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
+    async def test_trail_stop_cancels_old_sl_before_placing_new(self):
+        """BE-trailing must cancel the old exchange SL before placing the new
+        one — otherwise two active SLs remain (observed live on 3 positions)."""
+        from sqlalchemy import select, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        from backend.models.order import Order
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "DUPSLTST"
+        cancelled = []
+        placed = []
+        try:
+            async with Session() as s:
+                await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=1.0,
+                             stop_loss=105.0, take_profit=90.0, status="OPEN")
+                s.add(p); await s.flush()
+                pos_id = p.id
+                # an existing active SL algo order for this position
+                s.add(Order(position_id=pos_id, symbol=SYM, side="BUY",
+                            order_type="STOP_MARKET", quantity=1.0, binance_order_id=555))
+                await s.commit()
+
+            class RecBinance:
+                async def cancel_algo_order(self, symbol, algo_id):
+                    cancelled.append(algo_id)
+                    return {}
+                async def modify_position_stop(self, symbol, side, stop_price, qty):
+                    placed.append((symbol, side, stop_price))
+                    return {"orderId": 2}
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            await pm._trail_stop_to_be(pos_id, 100.0)
+
+            assert 555 in cancelled, f"old SL not cancelled before re-placing: {cancelled}"
+            assert placed == [(SYM, "SHORT", 100.0)], f"new SL not placed: {placed}"
         finally:
             async with Session() as s:
                 await s.execute(delete(Order).where(Order.symbol == SYM))

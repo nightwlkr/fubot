@@ -365,10 +365,19 @@ class BinanceService:
         }
 
     async def cancel_order(self, symbol: str, order_id: int) -> dict:
-        """DELETE /fapi/v1/order"""
+        """DELETE /fapi/v1/order — regular orders only. Algo (conditional)
+        orders need cancel_algo_order."""
         return await self._signed_request(
             "DELETE", "fapi/v1/order",
             {"symbol": symbol, "orderId": order_id},
+        )
+
+    async def cancel_algo_order(self, symbol: str, algo_id: int) -> dict:
+        """DELETE /fapi/v1/algoOrder — cancel a CONDITIONAL (STOP_MARKET /
+        TAKE_PROFIT_MARKET) algo order. The param is `algoId` (lowercase 'd')."""
+        return await self._signed_request(
+            "DELETE", "fapi/v1/algoOrder",
+            {"symbol": symbol, "algoId": algo_id},
         )
 
     async def get_order(self, symbol: str, order_id: int) -> dict:

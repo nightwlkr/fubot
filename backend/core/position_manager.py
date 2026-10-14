@@ -329,8 +329,10 @@ class PositionManager:
 
         logger.info(f"[{symbol}] Trailing stop to BE: {old_stop} → {new_stop}")
 
-        # LIVE mode: move the exchange stop too (so the stop actually protects).
+        # LIVE mode: cancel the old exchange stop, then place the new one (so
+        # the stop actually protects without leaving a duplicate active SL).
         if self._mode == "live" and symbol and qty:
+            await self._cancel_active_sl(position_id, symbol)
             try:
                 await self.binance.modify_position_stop(symbol, side, new_stop, qty)
             except Exception as e:
@@ -338,6 +340,34 @@ class PositionManager:
 
         if self.alerts:
             await self.alerts.be_trailing(symbol)
+
+    async def _cancel_active_sl(self, position_id: int, symbol: str) -> None:
+        """Cancel the position's active STOP_MARKET algo orders (before re-placing).
+
+        Prevents duplicate active SL orders when BE-trailing moves the stop —
+        placing a new stop without cancelling the old leaves both active.
+        """
+        if self.session_factory is None:
+            return
+        try:
+            from backend.models.order import Order as OrderModel
+            from sqlalchemy import select
+            async with self.session_factory() as session:
+                rows = (await session.execute(
+                    select(OrderModel).where(
+                        OrderModel.position_id == position_id,
+                        OrderModel.order_type == "STOP_MARKET",
+                    ))).scalars().all()
+            for row in rows:
+                if not row.binance_order_id:
+                    continue
+                try:
+                    await self.binance.cancel_algo_order(symbol, int(row.binance_order_id))
+                    logger.info(f"[{symbol}] Cancelled old SL algo order {row.binance_order_id} before re-placing")
+                except Exception as e:
+                    logger.debug(f"[{symbol}] Cancel old SL {row.binance_order_id} (likely filled): {e}")
+        except Exception:
+            logger.exception("Failed to cancel active SL for position %s", position_id)
 
     def _check_tp_sl_hit(self, position: dict, current_price: float) -> tuple[bool, bool]:
         """Check if TP or SL was hit."""
@@ -463,11 +493,14 @@ class PositionManager:
                 if not oid:
                     continue
                 try:
-                    await self.binance.cancel_order(row.symbol, int(oid))
-                    logger.info(f"[{row.symbol}] Cancelled exchange order {oid} ({row.order_type})")
+                    # SL/TP are ALGO (conditional) orders — cancel via the algo
+                    # endpoint (the regular /fapi/v1/order DELETE silently fails
+                    # on them, leaving orphan stops that fire after close).
+                    await self.binance.cancel_algo_order(row.symbol, int(oid))
+                    logger.info(f"[{row.symbol}] Cancelled exchange algo order {oid} ({row.order_type})")
                 except Exception as e:
-                    # -2011 = unknown order (already filled/cancelled) — benign
-                    logger.debug(f"[{row.symbol}] Cancel order {oid} failed (likely filled): {e}")
+                    # -2011/-4048 = unknown order (already filled/cancelled) — benign
+                    logger.debug(f"[{row.symbol}] Cancel algo order {oid} failed (likely filled): {e}")
         except Exception:
             logger.exception("Failed to cancel exchange orders for position %s", position_id)
 
