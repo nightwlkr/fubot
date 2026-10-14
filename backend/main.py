@@ -52,7 +52,9 @@ async def load_binance_credentials(binance: BinanceService) -> None:
             Account.is_active == True,  # noqa: E712
             Account.testnet == is_testnet,
         ))
-        account = result.scalar_one_or_none()
+        # scalars().first() — not scalar_one() — so a duplicate active row (e.g.
+        # from a data mishap) can't crash the whole app at startup.
+        account = result.scalars().first()
         if not account:
             logger.warning("No %s API key stored — signed calls will fail. "
                            "Save one in Settings.",
