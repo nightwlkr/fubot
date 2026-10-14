@@ -303,11 +303,46 @@ class BinanceService:
             "status": data.get("status", "NEW"),
         }
 
+    async def get_lot_size(self, symbol: str) -> dict:
+        """GET /fapi/v1/exchangeInfo — LOT_SIZE + MARKET_LOT_SIZE filters for one symbol."""
+        try:
+            info = await self._public_request("fapi/v1/exchangeInfo")
+            for s in info.get("symbols", []):
+                if s.get("symbol") == symbol:
+                    lot = {}
+                    for f in s.get("filters", []):
+                        ft = f.get("filterType", "")
+                        if ft in ("LOT_SIZE", "MARKET_LOT_SIZE"):
+                            lot[ft] = f
+                    return lot
+        except Exception:
+            pass
+        return {}
+
+    def _round_qty(self, qty: float, lot_filters: dict) -> float:
+        """Round quantity down to the LOT_SIZE step (MARKET_LOT_SIZE if present)."""
+        import math
+        # MARKET_LOT_SIZE overrides LOT_SIZE for market orders
+        f = lot_filters.get("MARKET_LOT_SIZE") or lot_filters.get("LOT_SIZE")
+        if not f:
+            return qty
+        step = float(f.get("stepSize", "0.0001"))
+        min_qty = float(f.get("minQty", "0"))
+        # round DOWN to step (floor to avoid exceeding step)
+        rounded = math.floor(qty / step) * step
+        # strip floating point artifacts
+        rounded = float(f"{rounded:.8f}".rstrip("0").rstrip("."))
+        if rounded < min_qty:
+            raise ValueError(f"Quantity {qty} below minQty {min_qty} for {symbol}")
+        return rounded
+
     async def place_market_order(self, symbol: str, side: str, quantity: float) -> dict:
-        """POST /fapi/v1/order — MARKET"""
+        """POST /fapi/v1/order — MARKET. Rounds quantity to LOT_SIZE step."""
+        lot = await self.get_lot_size(symbol)
+        qty = self._round_qty(quantity, lot)
         data = await self._signed_request(
             "POST", "fapi/v1/order",
-            {"symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity},
+            {"symbol": symbol, "side": side, "type": "MARKET", "quantity": qty},
             weight=2,
         )
         return {
@@ -333,13 +368,14 @@ class BinanceService:
         )
 
     async def modify_position_stop(self, symbol: str, side: str, stop_price: float, quantity: float) -> dict:
-        """POST /fapi/v1/order — STOP_MARKET (reduce-only)"""
-        # side here is the position side: LONG means we SELL to close, SHORT means we BUY to close
+        """POST /fapi/v1/order — STOP_MARKET (reduce-only). Rounds qty to step."""
         close_side = "SELL" if side == "LONG" else "BUY"
+        lot = await self.get_lot_size(symbol)
+        qty = self._round_qty(quantity, lot)
         data = await self._signed_request(
             "POST", "fapi/v1/order",
             {"symbol": symbol, "side": close_side, "type": "STOP_MARKET",
-             "stopPrice": stop_price, "quantity": quantity, "reduceOnly": "true"},
+             "stopPrice": stop_price, "quantity": qty, "reduceOnly": "true"},
             weight=2,
         )
         return {
@@ -350,12 +386,14 @@ class BinanceService:
         }
 
     async def place_take_profit_order(self, symbol: str, side: str, tp_price: float, quantity: float) -> dict:
-        """POST /fapi/v1/order — TAKE_PROFIT_MARKET (reduce-only)"""
+        """POST /fapi/v1/order — TAKE_PROFIT_MARKET (reduce-only). Rounds qty to step."""
         close_side = "SELL" if side == "LONG" else "BUY"
+        lot = await self.get_lot_size(symbol)
+        qty = self._round_qty(quantity, lot)
         data = await self._signed_request(
             "POST", "fapi/v1/order",
             {"symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
-             "stopPrice": tp_price, "quantity": quantity, "reduceOnly": "true"},
+             "stopPrice": tp_price, "quantity": qty, "reduceOnly": "true"},
             weight=2,
         )
         return {

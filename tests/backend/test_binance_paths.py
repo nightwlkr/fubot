@@ -101,7 +101,11 @@ async def test_closing_orders_are_reduce_only():
     seen = []
 
     def handler(request: httpx.Request):
-        seen.append(str(request.url))
+        url = str(request.url)
+        seen.append(url)
+        # exchangeInfo (for LOT_SIZE rounding) returns a minimal payload
+        if "exchangeInfo" in url:
+            return httpx.Response(200, json={"symbols": []})
         return httpx.Response(200, json={"orderId": 55, "status": "NEW"})
 
     svc = make_service(handler)
@@ -110,6 +114,8 @@ async def test_closing_orders_are_reduce_only():
         tp = await svc.place_take_profit_order("BTCUSDT", "LONG", 110000.0, 0.01)
     finally:
         await svc._client.aclose()
+    # find the order URLs (skip exchangeInfo)
+    order_urls = [u for u in seen if "order" in u]
     assert stop["side"] == "SELL" and tp["side"] == "SELL"  # LONG closes with SELL
-    assert "type=STOP_MARKET" in seen[0] and "reduceOnly=true" in seen[0]
-    assert "type=TAKE_PROFIT_MARKET" in seen[1] and "reduceOnly=true" in seen[1]
+    assert "type=STOP_MARKET" in order_urls[0] and "reduceOnly=true" in order_urls[0]
+    assert "type=TAKE_PROFIT_MARKET" in order_urls[1] and "reduceOnly=true" in order_urls[1]
