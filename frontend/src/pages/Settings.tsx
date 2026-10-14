@@ -349,8 +349,8 @@ function TradingParamsSection() {
           <div>
             <label className="text-xs text-muted uppercase tracking-wide block mb-1.5">Max Daily Trades</label>
             <div className="flex items-center gap-3">
-              <input type="range" min={1} max={50} step={1} value={maxDailyTrades} onChange={(e) => setMaxDailyTrades(Number(e.target.value))} className="flex-1 accent-primary" />
-              <span className="text-sm font-mono font-bold w-16 text-right">{maxDailyTrades}</span>
+              <input type="range" min={0} max={50} step={1} value={maxDailyTrades} onChange={(e) => setMaxDailyTrades(Number(e.target.value))} className="flex-1 accent-primary" />
+              <span className="text-sm font-mono font-bold w-16 text-right">{maxDailyTrades === 0 ? '∞' : maxDailyTrades}</span>
             </div>
             <p className="text-xs text-muted mt-1">Bot stops opening new trades after this many per day (0 = no cap)</p>
           </div>
