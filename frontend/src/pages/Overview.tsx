@@ -155,29 +155,30 @@ export default function Overview() {
                   </button>
                 </div>
               </div>
-              <Button
-                variant={isRunning ? 'danger' : 'primary'}
-                size="md"
-                onClick={handleToggle}
-                isLoading={isTransitioning}
-                disabled={isTransitioning}
-              >
-                {isTransitioning ? <Loader2 className="w-4 h-4 animate-spin" /> : isRunning ? <><Square className="w-4 h-4" /> Stop</> : <><Play className="w-4 h-4" /> Start</>}
-              </Button>
-              {positions.length > 0 && (
+              <div className="flex items-center justify-end gap-2 mt-1">
                 <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleCloseAll}
-                  isLoading={isClosingAll}
-                  disabled={isClosingAll}
-                  className="mt-1 text-xs"
+                  variant={isRunning ? 'danger' : 'primary'}
+                  size="md"
+                  onClick={handleToggle}
+                  isLoading={isTransitioning}
+                  disabled={isTransitioning}
                 >
-                  {isClosingAll ? <Loader2 className="w-3 h-3 animate-spin" /> : <><XCircle className="w-3 h-3" /> Close All ({positions.length})</>}
+                  {isTransitioning ? <Loader2 className="w-4 h-4 animate-spin" /> : isRunning ? <><Square className="w-4 h-4" /> Stop</> : <><Play className="w-4 h-4" /> Start</>}
                 </Button>
-              )}
+                {positions.length > 0 && (
+                  <Button
+                    variant="danger"
+                    size="md"
+                    onClick={handleCloseAll}
+                    isLoading={isClosingAll}
+                    disabled={isClosingAll}
+                  >
+                    {isClosingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <><XCircle className="w-4 h-4" /> Close All ({positions.length})</>}
+                  </Button>
+                )}
+              </div>
               {closedCount !== null && (
-                <p className="text-xs text-success mt-1">Closed {closedCount} position(s)</p>
+                <p className="text-xs text-success mt-1 text-right">Closed {closedCount} position(s)</p>
               )}
             </div>
             <div className="grid grid-cols-2 gap-3 pt-2 border-t border-border/50">
