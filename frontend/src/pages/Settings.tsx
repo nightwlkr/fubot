@@ -234,7 +234,7 @@ function TradingParamsSection() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
         {[
-          { label: 'Risk Per Trade', value: riskPercent, setValue: setRiskPercent, min: 0.5, max: 5, step: 0.5, suffix: '%', desc: 'Percentage of balance risked per trade' },
+          { label: 'Risk Per Trade', value: riskPercent, setValue: setRiskPercent, min: 0.5, max: 20, step: 0.5, suffix: '%', desc: 'Percentage of balance risked per trade (high risk = larger swings)' },
           { label: 'Max Open Positions', value: maxPositions, setValue: setMaxPositions, min: 1, max: 10, step: 1, suffix: '', desc: 'Maximum concurrent positions' },
           { label: 'Daily Loss Limit', value: dailyLossLimit, setValue: setDailyLossLimit, min: 1, max: 10, step: 0.5, suffix: 'R', desc: 'Bot stops trading after this loss (in R)' },
           { label: 'Min R:R Ratio', value: rrMin, setValue: setRrMin, min: 1.5, max: 5, step: 0.5, suffix: ':1', desc: 'Minimum risk:reward to execute a trade' },
