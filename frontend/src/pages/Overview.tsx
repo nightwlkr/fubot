@@ -171,7 +171,7 @@ export default function Overview() {
                   onClick={handleCloseAll}
                   isLoading={isClosingAll}
                   disabled={isClosingAll}
-                  className="w-full mt-1 text-xs"
+                  className="mt-1 text-xs"
                 >
                   {isClosingAll ? <Loader2 className="w-3 h-3 animate-spin" /> : <><XCircle className="w-3 h-3" /> Close All ({positions.length})</>}
                 </Button>
