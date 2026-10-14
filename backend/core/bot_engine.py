@@ -76,6 +76,10 @@ class BotEngine:
 
         self._running = True
         self._mode = mode
+        # Tell the position manager the mode — in live mode it must update
+        # exchange stops on BE-trailing and cancel/place orders on close.
+        if self.position_manager is not None:
+            self.position_manager._mode = mode
         self._started_at = datetime.now(timezone.utc)
         self._task = asyncio.create_task(self._main_loop())
         await self.alerts.bot_started(mode)

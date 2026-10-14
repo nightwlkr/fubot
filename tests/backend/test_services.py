@@ -689,3 +689,165 @@ class TestCloseAllPositions:
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()
+
+
+class TestLiveModeSafety:
+    """Live-mode exchange hygiene: BE-trailing moves the exchange stop, closes
+    cancel the exchange SL/TP, manual closes place a market order, and orders
+    link to their position (orders.position_id)."""
+
+    async def test_trail_stop_updates_exchange_in_live_mode(self):
+        """In live mode, BE-trailing must call modify_position_stop on the exchange."""
+        from sqlalchemy import select, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "TRAILTST"
+        calls = []
+        try:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                p = Position(symbol=SYM, side="LONG", entry_price=100.0, quantity=1.0,
+                             stop_loss=95.0, take_profit=110.0, status="OPEN")
+                s.add(p); await s.flush()
+                pos_id = p.id
+                await s.commit()
+
+            class RecBinance:
+                async def modify_position_stop(self, symbol, side, stop_price, qty):
+                    calls.append((symbol, side, stop_price, qty))
+                    return {"orderId": 1}
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            await pm._trail_stop_to_be(pos_id, 100.0)
+
+            assert len(calls) == 1, f"expected exchange stop update, got {calls}"
+            assert calls[0][0] == SYM and calls[0][2] == 100.0
+            async with Session() as s:
+                row = await s.get(Position, pos_id)
+                assert float(row.stop_loss) == 100.0  # DB also updated
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
+    async def test_close_cancels_exchange_orders_in_live(self):
+        """In live mode, closing a position must cancel its exchange SL/TP orders."""
+        from sqlalchemy import select, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        from backend.models.order import Order
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "CLOSETST"
+        cancelled = []
+        market_closed = []
+        try:
+            async with Session() as s:
+                await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                p = Position(symbol=SYM, side="LONG", entry_price=100.0, quantity=2.0,
+                             stop_loss=95.0, take_profit=110.0, status="OPEN")
+                s.add(p); await s.flush()
+                pos_id = p.id
+                # link a STOP_MARKET order to this position
+                s.add(Order(position_id=pos_id, symbol=SYM, side="SELL",
+                            order_type="STOP_MARKET", quantity=2.0,
+                            binance_order_id=999))
+                await s.commit()
+
+            class RecBinance:
+                async def cancel_order(self, symbol, order_id):
+                    cancelled.append(order_id)
+                    return {}
+                async def place_market_order(self, symbol, side, qty):
+                    market_closed.append((symbol, side, qty))
+                    return {"orderId": 2}
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            pos = {"id": pos_id, "symbol": SYM, "side": "LONG", "quantity": 2.0,
+                   "entry_price": 100.0, "stop_loss": 95.0, "take_profit": 110.0}
+            await pm._close_position(pos, "MANUAL_CLOSE", 101.0)
+
+            assert 999 in cancelled, f"exchange SL order not cancelled: {cancelled}"
+            assert (SYM, "SELL", 2.0) in market_closed, f"no live market close: {market_closed}"
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
+    async def test_close_tp_hit_only_cancels_no_market_close(self):
+        """On TP_HIT in live mode, the exchange already closed — cancel the
+        sibling SL but do NOT place a redundant market close."""
+        from sqlalchemy import select, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        from backend.models.order import Order
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "TPHITTST"
+        cancelled = []
+        market_closed = []
+        try:
+            async with Session() as s:
+                await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                p = Position(symbol=SYM, side="LONG", entry_price=100.0, quantity=1.0,
+                             stop_loss=95.0, take_profit=110.0, status="OPEN")
+                s.add(p); await s.flush()
+                pos_id = p.id
+                s.add(Order(position_id=pos_id, symbol=SYM, side="SELL",
+                            order_type="STOP_MARKET", quantity=1.0, binance_order_id=888))
+                await s.commit()
+
+            class RecBinance:
+                async def cancel_order(self, symbol, order_id):
+                    cancelled.append(order_id)
+                    return {}
+                async def place_market_order(self, symbol, side, qty):
+                    market_closed.append((symbol, side, qty))
+                    return {"orderId": 2}
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            pos = {"id": pos_id, "symbol": SYM, "side": "LONG", "quantity": 1.0,
+                   "entry_price": 100.0, "stop_loss": 95.0, "take_profit": 110.0}
+            await pm._close_position(pos, "TP_HIT", 110.0)
+
+            assert 888 in cancelled, f"SL not cancelled on TP hit: {cancelled}"
+            assert market_closed == [], f"redundant market close on TP hit: {market_closed}"
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()

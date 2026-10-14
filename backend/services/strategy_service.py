@@ -195,7 +195,12 @@ class StrategyService:
             "initial_risk_distance": risk_distance,
         }
 
-        # 6. Execute — simulated fills in paper, real Binance orders in live
+        # 6. Execute — simulated fills in paper, real Binance orders in live.
+        # The Position row is created FIRST so live SL/TP order records can link
+        # to it (orders.position_id) — lets the position manager cancel the
+        # exchange SL/TP when the position closes.
+        position_id = await self._create_position(
+            signal, entry, size, paper_mode, initial_risk_distance=risk_distance)
         if paper_mode:
             await self.order_svc.place_order(
                 symbol, side, "MARKET", size, price=Decimal(str(entry)),
@@ -208,6 +213,7 @@ class StrategyService:
                 await self.order_svc.place_order(
                     symbol, side, "MARKET", size, price=Decimal(str(entry)),
                     simulate=False, binance_order_id=entry_res.get("orderId"),
+                    position_id=position_id,
                 )
                 sl_res = await self.binance.modify_position_stop(
                     symbol, signal.direction, float(signal.stop_loss), float(size))
@@ -215,6 +221,7 @@ class StrategyService:
                     symbol, "SELL" if signal.direction == "LONG" else "BUY",
                     "STOP_MARKET", size, price=signal.stop_loss,
                     simulate=False, binance_order_id=sl_res.get("orderId"),
+                    position_id=position_id,
                 )
                 tp_res = await self.binance.place_take_profit_order(
                     symbol, signal.direction, float(signal.take_profit), float(size))
@@ -222,14 +229,16 @@ class StrategyService:
                     symbol, "SELL" if signal.direction == "LONG" else "BUY",
                     "TAKE_PROFIT_MARKET", size, price=signal.take_profit,
                     simulate=False, binance_order_id=tp_res.get("orderId"),
+                    position_id=position_id,
                 )
             except Exception as exc:
                 logger.error("[%s] Live order flow failed: %s", symbol, exc)
+                # Best-effort: undo the position row we just created so a failed
+                # live entry doesn't leave an OPEN position with no exchange order.
+                await self._close_position_row(position_id)
                 return TradeDecision("SKIP", skip_reason=f"Order placement failed: {exc}")
 
-        # 7. Record the position and mark the signal TRIGGERED
-        position_id = await self._create_position(
-            signal, entry, size, paper_mode, initial_risk_distance=risk_distance)
+        # 7. Mark the signal TRIGGERED (position row already created above)
         signal.status = "TRIGGERED"
         signal.triggered_at = datetime.now(timezone.utc)
         await self._mark_signal(signal.db_id, "TRIGGERED")
@@ -334,6 +343,25 @@ class StrategyService:
                 await session.commit()
         except Exception:
             logger.exception("Failed to mark signal %s as %s", db_id, status)
+
+    async def _close_position_row(self, position_id: Optional[int]) -> None:
+        """Mark a just-created position row CLOSED after a failed live entry.
+
+        A live entry that fails after the position row is created would leave an
+        OPEN position with no exchange order behind it. Best-effort cleanup —
+        the entry order itself may also have partially filled (see caller).
+        """
+        if self.session_factory is None or position_id is None:
+            return
+        try:
+            async with self.session_factory() as session:
+                row = await session.get(PositionModel, position_id)
+                if row and row.status == "OPEN":
+                    row.status = "CLOSED"
+                    row.closed_at = datetime.now(timezone.utc)
+                    await session.commit()
+        except Exception:
+            logger.exception("Failed to close position row %s after failed entry", position_id)
 
 
 _strategy_service: Optional[StrategyService] = None

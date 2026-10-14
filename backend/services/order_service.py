@@ -40,6 +40,7 @@ class OrderService:
         *,
         simulate: bool = False,
         binance_order_id: Optional[int] = None,
+        position_id: Optional[int] = None,
     ) -> dict:
         """
         Create an order record. In simulation mode the order is immediately
@@ -57,6 +58,7 @@ class OrderService:
             "filled_quantity": 0 if not simulate else quantity,
             "simulate": simulate,
             "binance_order_id": binance_order_id,
+            "position_id": position_id,
         }
         if simulate:
             order["status"] = "FILLED"
@@ -76,6 +78,7 @@ class OrderService:
             async with self.session_factory() as session:
                 session.add(OrderModel(
                     binance_order_id=order.get("binance_order_id"),
+                    position_id=order.get("position_id"),
                     symbol=order["symbol"],
                     side=order["side"],
                     order_type=order["type"],

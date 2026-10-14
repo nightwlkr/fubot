@@ -50,10 +50,20 @@ class PositionManager:
         self._check_locks: dict[str, asyncio.Lock] = {}  # per-symbol close lock
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        # "paper" | "live" — set by BotEngine.start(). In live mode, closing a
+        # position must also place a market order on the exchange (manual close)
+        # or leave the exchange SL/TP to fire (auto TP/SL); the exchange SL/TP
+        # must always be cancelled when the position closes.
+        self._mode: str = "paper"
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     async def start(self):
         """Start the position manager loop."""
         self._running = True
+        await self._reconcile_exchange_positions()
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self):
@@ -73,6 +83,50 @@ class PositionManager:
                 await self._task
             except asyncio.CancelledError:
                 pass
+
+    async def _reconcile_exchange_positions(self) -> None:
+        """Sync DB positions with actual exchange positions (live mode, on start).
+
+        If the exchange holds a position the DB has no OPEN row for (e.g. an
+        orphan exchange SL fired and opened a new position while the bot was
+        stopped), record it as an OPEN position so the manager monitors it —
+        otherwise it's an untracked exposure that can't be closed or trailed.
+        """
+        if self._mode != "live" or self.session_factory is None:
+            return
+        try:
+            exchange_positions = await self.binance.get_all_positions()
+        except Exception as e:
+            logger.warning(f"Position reconcile: could not fetch exchange positions: {e}")
+            return
+
+        # current DB OPEN positions per symbol
+        open_positions = await self._get_open_positions()
+        db_open = {p["symbol"]: p for p in open_positions}
+
+        for ep in exchange_positions or []:
+            amt = float(ep.get("positionAmt", 0) or 0)
+            if amt == 0:
+                continue
+            symbol = ep.get("symbol")
+            if symbol in db_open:
+                continue  # already tracked
+            side = "LONG" if amt > 0 else "SHORT"
+            qty = abs(amt)
+            entry = float(ep.get("entryPrice", 0) or 0)
+            logger.warning(
+                f"[{symbol}] Reconcile: exchange holds {side} {qty} @ {entry} "
+                f"but no DB position — recording as OPEN")
+            try:
+                async with self.session_factory() as session:
+                    session.add(Position(
+                        symbol=symbol, side=side, entry_price=entry,
+                        quantity=qty, leverage=1,
+                        stop_loss=None, take_profit=None,
+                        initial_risk_distance=None, status="OPEN"))
+                    await session.commit()
+            except Exception:
+                logger.exception(f"[{symbol}] Reconcile: failed to record position")
 
     async def _loop(self):
         """Main loop — runs every 30 seconds."""
@@ -247,10 +301,17 @@ class PositionManager:
             logger.debug(f"BE trailing check failed for {position['symbol']}: {e}")
 
     async def _trail_stop_to_be(self, position_id: int, new_stop: float):
-        """Move stop loss to break-even (entry price). One-way, idempotent."""
+        """Move stop loss to break-even (entry price). One-way, idempotent.
+
+        In live mode this also modifies the exchange STOP_MARKET order so the
+        stop actually protects the position — previously BE-trailing only moved
+        the DB stop, leaving the exchange stop at the original (wider) level.
+        """
         if self.session_factory is None:
             return
         symbol = None
+        side = None
+        qty = None
         async with self.session_factory() as session:
             position = await session.get(Position, position_id)
             if not position or position.status != "OPEN":
@@ -262,9 +323,19 @@ class PositionManager:
             old_stop = position.stop_loss
             position.stop_loss = new_stop
             symbol = position.symbol
+            side = position.side
+            qty = float(position.quantity)
             await session.commit()
 
         logger.info(f"[{symbol}] Trailing stop to BE: {old_stop} → {new_stop}")
+
+        # LIVE mode: move the exchange stop too (so the stop actually protects).
+        if self._mode == "live" and symbol and qty:
+            try:
+                await self.binance.modify_position_stop(symbol, side, new_stop, qty)
+            except Exception as e:
+                logger.error(f"[{symbol}] Failed to trail exchange stop to BE: {e}")
+
         if self.alerts:
             await self.alerts.be_trailing(symbol)
 
@@ -336,6 +407,22 @@ class PositionManager:
             row.closed_at = datetime.now(timezone.utc)
             await session.commit()
             symbol = row.symbol
+            side = row.side
+            qty = float(row.quantity)
+
+        # LIVE-mode exchange hygiene. In live mode the exchange holds resting
+        # reduce-only SL/TP orders for this position. When it closes we must:
+        #   - always cancel the resting SL/TP (an orphan SL is a phantom-position
+        #     bomb: once restarted it fires and opens a NEW opposite position)
+        #   - place a MARKET close ONLY when this wasn't an exchange-side exit
+        #     (TP_HIT/SL_HIT: the exchange order already closed the position —
+        #     cancelling the sibling suffices; MANUAL_CLOSE/CLOSED_LOOP/force:
+        #     we must actively close on the exchange).
+        if self._mode == "live" and reason in ("TP_HIT", "SL_HIT"):
+            await self._cancel_exchange_orders(position["id"])
+        elif self._mode == "live":
+            await self._cancel_exchange_orders(position["id"])
+            await self._market_close(symbol, side, qty)
 
         # Update daily summary + alert outside the session
         await self.daily_reset.update_daily_summary(pnl_r, pnl_usdt)
@@ -351,6 +438,50 @@ class PositionManager:
                 await self.alerts.sl_hit(symbol, pnl_r, pnl_usdt)
 
         logger.info(f"[{symbol}] Position closed: {reason}, PnL: {pnl_usdt:.2f} USDT ({pnl_r:.2f}R)")
+
+    async def _cancel_exchange_orders(self, position_id: int) -> None:
+        """Cancel all resting exchange orders linked to a position (live mode).
+
+        Looks up the SL/TP orders recorded in the `orders` table (by position_id)
+        and cancels them on Binance. Best-effort — an already-filled order raises
+        -2011 which is benign. Prevents orphan SL/TP orders from firing after the
+        position closes.
+        """
+        if self.session_factory is None:
+            return
+        try:
+            from backend.models.order import Order as OrderModel
+            from sqlalchemy import select
+            async with self.session_factory() as session:
+                rows = (await session.execute(
+                    select(OrderModel).where(
+                        OrderModel.position_id == position_id,
+                        OrderModel.order_type.in_(["STOP_MARKET", "TAKE_PROFIT_MARKET"]),
+                    ))).scalars().all()
+            for row in rows:
+                oid = row.binance_order_id
+                if not oid:
+                    continue
+                try:
+                    await self.binance.cancel_order(row.symbol, int(oid))
+                    logger.info(f"[{row.symbol}] Cancelled exchange order {oid} ({row.order_type})")
+                except Exception as e:
+                    # -2011 = unknown order (already filled/cancelled) — benign
+                    logger.debug(f"[{row.symbol}] Cancel order {oid} failed (likely filled): {e}")
+        except Exception:
+            logger.exception("Failed to cancel exchange orders for position %s", position_id)
+
+    async def _market_close(self, symbol: str, side: str, qty: float) -> None:
+        """Place a MARKET order to close a live position (manual/closed-loop exit).
+
+        Opposite side of the position: LONG → SELL, SHORT → BUY.
+        """
+        close_side = "SELL" if side == "LONG" else "BUY"
+        try:
+            await self.binance.place_market_order(symbol, close_side, qty)
+            logger.info(f"[{symbol}] Live market close placed: {close_side} {qty}")
+        except Exception as e:
+            logger.error(f"[{symbol}] Live market close failed: {e}")
 
     async def close_all_positions(self, reason: str = "MANUAL_CLOSE") -> int:
         """Close ALL open positions at market price (manual stop / kill switch).
@@ -373,16 +504,7 @@ class PositionManager:
                 if price <= 0:
                     continue
 
-                # in live mode, place a market order to close the position
-                if not getattr(self, "_mode", "paper") == "paper":
-                    side = "BUY" if pos["side"] == "SHORT" else "SELL"
-                    qty = float(pos["quantity"])
-                    try:
-                        await self.binance.place_market_order(symbol, side, qty)
-                    except Exception as e:
-                        logger.error(f"[{symbol}] Failed to close on exchange: {e}")
-                        # continue to record the close anyway
-
+                # _close_position handles live-mode market close + SL/TP cancel
                 await self._close_position(pos, reason, price)
                 closed += 1
             except Exception as e:
