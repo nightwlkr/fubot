@@ -190,12 +190,13 @@ async def update_symbol_config(
 async def get_api_key_status(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    testnet: bool = Query(False, description="Check the testnet key instead of mainnet"),
 ):
     user = await get_current_user_from_cookie(request, db)
 
-    # Check if any account exists with an API key
     from backend.models.account import Account
-    result = await db.execute(select(Account).where(Account.is_active == True))
+    result = await db.execute(select(Account).where(
+        Account.is_active == True, Account.testnet == testnet))
     account = result.scalar_one_or_none()
 
     if not account:
@@ -226,8 +227,10 @@ async def save_api_key(
 
     from backend.models.account import Account
 
-    # Check for existing account
-    existing = await db.execute(select(Account).where(Account.is_active == True))
+    # One active account per environment (testnet/mainnet) — a mainnet key
+    # 401s on testnet and vice versa, so they must never share a row.
+    existing = await db.execute(select(Account).where(
+        Account.is_active == True, Account.testnet == bool(body.testnet)))
     account = existing.scalar_one_or_none()
 
     encrypted_key = encrypt(body.api_key)
@@ -242,11 +245,13 @@ async def save_api_key(
             api_key_encrypted=encrypted_key,
             api_secret_encrypted=encrypted_secret,
             is_active=True,
+            testnet=bool(body.testnet),
         )
         db.add(account)
 
     await db.commit()
 
-    logger.info(f"API key updated by user '{user.username}' (masked: {mask_key(body.api_key)})")
+    env = "testnet" if body.testnet else "mainnet"
+    logger.info(f"{env} API key updated by user '{user.username}' (masked: {mask_key(body.api_key)})")
 
     return {"ok": True, "masked_key": mask_key(body.api_key)}

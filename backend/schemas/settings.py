@@ -60,3 +60,6 @@ class APIKeyStatusResponse(BaseModel):
 class APIKeySaveRequest(BaseModel):
     api_key: str
     api_secret: str
+    # store as the testnet credential (default False = mainnet). Binance keys
+    # are not interchangeable across environments.
+    testnet: bool = False

@@ -37,14 +37,26 @@ async def load_binance_credentials(binance: BinanceService) -> None:
     Keys saved via the Settings UI live encrypted in `Account`; without this the
     engine fell back to the (empty) env-var key and every signed call — balance,
     positions, equity snapshots — failed. Precedence: DB key > env key.
+
+    Loads the key matching the environment (binance._testnet) — a mainnet key
+    401s on testnet and vice versa, so the environments must never share a key.
+    Falls back to the other env's key only if the matching one is absent (with
+    a warning, since it will fail auth).
     """
     from backend.models.account import Account
     from backend.encryption import decrypt
 
+    is_testnet = bool(getattr(binance, "_testnet", False))
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Account).where(Account.is_active == True))  # noqa: E712
+        result = await db.execute(select(Account).where(
+            Account.is_active == True,  # noqa: E712
+            Account.testnet == is_testnet,
+        ))
         account = result.scalar_one_or_none()
         if not account:
+            logger.warning("No %s API key stored — signed calls will fail. "
+                           "Save one in Settings.",
+                           "testnet" if is_testnet else "mainnet")
             return
         try:
             key = decrypt(account.api_key_encrypted)
@@ -54,7 +66,8 @@ async def load_binance_credentials(binance: BinanceService) -> None:
             return
         if key and secret:
             binance.set_credentials(key, secret)
-            logger.info("Loaded Binance credentials from the Account table (masked key)")
+            logger.info("Loaded %s Binance credentials from the Account table",
+                        "testnet" if is_testnet else "mainnet")
 
 
 
