@@ -166,14 +166,14 @@ export default function Overview() {
               </Button>
               {positions.length > 0 && (
                 <Button
-                  variant="danger"
-                  size="md"
+                  variant="ghost"
+                  size="sm"
                   onClick={handleCloseAll}
                   isLoading={isClosingAll}
                   disabled={isClosingAll}
-                  className="w-full mt-2"
+                  className="w-full mt-1 text-xs"
                 >
-                  {isClosingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <><XCircle className="w-4 h-4" /> Close All Positions ({positions.length})</>}
+                  {isClosingAll ? <Loader2 className="w-3 h-3 animate-spin" /> : <><XCircle className="w-3 h-3" /> Close All ({positions.length})</>}
                 </Button>
               )}
               {closedCount !== null && (
