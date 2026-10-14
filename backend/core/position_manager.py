@@ -130,10 +130,18 @@ class PositionManager:
 
     async def _loop(self):
         """Main loop — runs every 30 seconds."""
+        reconcile_counter = 0
         while self._running:
             try:
                 await self._check_all_positions()
                 await self._broadcast_pnl_update()
+                
+                # Reconcile with exchange every 5 minutes (10 passes × 30s)
+                reconcile_counter += 1
+                if reconcile_counter >= 10:
+                    reconcile_counter = 0
+                    if self._mode == "live" and self.binance:
+                        await self._reconcile_exchange_positions()
             except Exception as e:
                 logger.error(f"PositionManager error: {e}", exc_info=True)
             await asyncio.sleep(30)
@@ -583,3 +591,45 @@ class PositionManager:
                 level="INFO",
             )
         return closed
+
+    async def close_position(self, position_id: int, reason: str = "MANUAL_CLOSE") -> bool:
+        """Close a SINGLE position at market price.
+
+        In live mode this places a real MARKET order on the exchange and cancels
+        the SL/TP. In paper mode it records the close. Returns True if closed.
+        """
+        if self.session_factory is None:
+            return False
+
+        # Fetch the position
+        async with self.session_factory() as session:
+            row = await session.get(Position, position_id)
+            if not row or row.status != "OPEN":
+                logger.warning(f"Position {position_id} not found or already closed")
+                return False
+            pos = {
+                "id": row.id,
+                "symbol": row.symbol,
+                "side": row.side,
+                "entry_price": float(row.entry_price),
+                "quantity": float(row.quantity),
+                "stop_loss": float(row.stop_loss) if row.stop_loss else None,
+                "take_profit": float(row.take_profit) if row.take_profit else None,
+            }
+
+        symbol = pos["symbol"]
+        try:
+            # Fetch current market price
+            ticker = await self.binance.get_ticker(symbol)
+            price = float(ticker.get("price", 0))
+            if price <= 0:
+                logger.error(f"[{symbol}] Could not fetch price for close")
+                return False
+
+            # _close_position handles live-mode market close + SL/TP cancel
+            await self._close_position(pos, reason, price)
+            logger.info(f"[{symbol}] Position {position_id} closed manually at {price}")
+            return True
+        except Exception as e:
+            logger.error(f"[{symbol}] close_position failed: {e}")
+            return False

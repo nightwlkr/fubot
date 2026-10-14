@@ -87,6 +87,33 @@ async def close_all_positions(
     return {"ok": True, "closed": closed}
 
 
+@router.post("/close/{position_id}")
+async def close_position(
+    position_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Close a SINGLE position at market price.
+
+    In live mode this places a real MARKET order on the exchange and cancels
+    the SL/TP. Use this for manual intervention on a specific position.
+    """
+    global _bot_engine
+    if _bot_engine is None:
+        raise HTTPException(status_code=503, detail="Bot engine not initialized")
+    user = await get_current_user_from_cookie(request, db)
+    pm = getattr(_bot_engine, "position_manager", None)
+    if pm is None:
+        raise HTTPException(status_code=503, detail="Position manager not initialized")
+    
+    success = await pm.close_position(position_id, reason="MANUAL_CLOSE")
+    if success:
+        logger.info(f"Closed position {position_id} by user '{user.username}'")
+        return {"ok": True, "position_id": position_id}
+    else:
+        raise HTTPException(status_code=404, detail="Position not found or already closed")
+
+
 @router.get("/status")
 async def get_bot_status(
     request: Request,

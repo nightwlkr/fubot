@@ -22,11 +22,27 @@ export default function Overview() {
   // createChart()'s object has no getSeries() at runtime — hold the series
   // returned by addSeries() instead of calling chart.getSeries().
   const [series, setSeries] = useState<ISeriesApi<'Line'> | null>(null)
+  const [closingPositionId, setClosingPositionId] = useState<number | null>(null)
 
   useEffect(() => {
     fetchOverview()
     fetchToday()
   }, [])
+
+  const handleClosePosition = async (positionId: number) => {
+    if (!window.confirm('Close this position at market price?')) return
+    setClosingPositionId(positionId)
+    try {
+      await api.post(ENDPOINTS.botClose(positionId))
+      await fetchOverview()
+      await fetchToday()
+    } catch (err) {
+      console.error('Failed to close position:', err)
+      window.alert('Failed to close position. Check console for details.')
+    } finally {
+      setClosingPositionId(null)
+    }
+  }
 
   useEffect(() => {
     if (!chartContainer) return
@@ -274,6 +290,7 @@ export default function Overview() {
                 <TableHeadCell className="text-right">Mark</TableHeadCell>
                 <TableHeadCell className="text-right">PnL (USD)</TableHeadCell>
                 <TableHeadCell className="text-right">Lev</TableHeadCell>
+                <TableHeadCell className="text-right">Action</TableHeadCell>
               </TableRow>
             </TableHead>
             <tbody>
@@ -297,6 +314,20 @@ export default function Overview() {
                     </span>
                   </TableCell>
                   <TableCell className="text-right font-mono text-sm">{pos.leverage}x</TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => handleClosePosition(pos.id)}
+                      disabled={closingPositionId === pos.id}
+                    >
+                      {closingPositionId === pos.id ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        'Close'
+                      )}
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
             </tbody>

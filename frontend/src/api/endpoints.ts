@@ -15,6 +15,7 @@ export const ENDPOINTS = {
   botStart: '/bot/start',
   botStop: '/bot/stop',
   botCloseAll: '/bot/close-all',
+  botClose: (positionId: number) => `/bot/close/${positionId}`,
   botStatus: '/bot/status',
 
   // Positions
