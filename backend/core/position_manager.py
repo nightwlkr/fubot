@@ -351,3 +351,46 @@ class PositionManager:
                 await self.alerts.sl_hit(symbol, pnl_r, pnl_usdt)
 
         logger.info(f"[{symbol}] Position closed: {reason}, PnL: {pnl_usdt:.2f} USDT ({pnl_r:.2f}R)")
+
+    async def close_all_positions(self, reason: str = "MANUAL_CLOSE") -> int:
+        """Close ALL open positions at market price (manual stop / kill switch).
+
+        In live mode this places real MARKET orders to close each position on
+        the exchange. In paper mode it records the close as usual. Returns the
+        number of positions closed.
+        """
+        if self.session_factory is None:
+            return 0
+
+        positions = await self._get_open_positions()
+        closed = 0
+        for pos in positions:
+            symbol = pos["symbol"]
+            try:
+                # fetch current market price
+                ticker = await self.binance.get_ticker(symbol)
+                price = float(ticker.get("price", 0))
+                if price <= 0:
+                    continue
+
+                # in live mode, place a market order to close the position
+                if not getattr(self, "_mode", "paper") == "paper":
+                    side = "BUY" if pos["side"] == "SHORT" else "SELL"
+                    qty = float(pos["quantity"])
+                    try:
+                        await self.binance.place_market_order(symbol, side, qty)
+                    except Exception as e:
+                        logger.error(f"[{symbol}] Failed to close on exchange: {e}")
+                        # continue to record the close anyway
+
+                await self._close_position(pos, reason, price)
+                closed += 1
+            except Exception as e:
+                logger.error(f"[{symbol}] close_all failed: {e}")
+
+        if self.alerts and closed > 0:
+            await self.alerts.signal(
+                f"🔒 Closed {closed} position(s) ({reason})",
+                level="INFO",
+            )
+        return closed

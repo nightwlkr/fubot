@@ -6,8 +6,10 @@ import { Table, TableHead, TableRow, TableHeadCell, TableCell } from '../compone
 import { useDashboardStore } from '../store/dashboardStore'
 import type { Position } from '../store/dashboardStore'
 import { clsx } from 'clsx'
-import { Play, Square, Loader2, ExternalLink } from 'lucide-react'
+import { Play, Square, Loader2, ExternalLink, XCircle } from 'lucide-react'
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
+import { api } from '../api/client'
+import { ENDPOINTS } from '../api/endpoints'
 
 function formatPrice(p: number) {
   return p >= 1000 ? p.toFixed(2) : p >= 1 ? p.toFixed(4) : p.toFixed(6)
@@ -64,6 +66,8 @@ export default function Overview() {
   const isRunning = botStatus?.status === 'running'
   const mode = botStatus?.mode || 'paper'
   const [isTransitioning, setIsTransitioning] = useState(false)
+  const [isClosingAll, setIsClosingAll] = useState(false)
+  const [closedCount, setClosedCount] = useState<number | null>(null)
 
   const handleToggle = async () => {
     setIsTransitioning(true)
@@ -72,6 +76,23 @@ export default function Overview() {
       else await startBot(mode as 'paper' | 'live')
     } finally {
       setIsTransitioning(false)
+    }
+  }
+
+  const handleCloseAll = async () => {
+    if (!window.confirm('Close ALL open positions at market price? This cannot be undone.')) {
+      return
+    }
+    setIsClosingAll(true)
+    try {
+      const res = await api.post<{ closed: number }>(ENDPOINTS.botCloseAll)
+      setClosedCount(res.data.closed)
+      setTimeout(() => setClosedCount(null), 5000)
+      await fetchOverview()  // refresh positions table
+    } catch (err) {
+      console.error('Failed to close all positions:', err)
+    } finally {
+      setIsClosingAll(false)
     }
   }
 
@@ -143,6 +164,21 @@ export default function Overview() {
               >
                 {isTransitioning ? <Loader2 className="w-4 h-4 animate-spin" /> : isRunning ? <><Square className="w-4 h-4" /> Stop</> : <><Play className="w-4 h-4" /> Start</>}
               </Button>
+              {positions.length > 0 && (
+                <Button
+                  variant="danger"
+                  size="md"
+                  onClick={handleCloseAll}
+                  isLoading={isClosingAll}
+                  disabled={isClosingAll}
+                  className="w-full mt-2"
+                >
+                  {isClosingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <><XCircle className="w-4 h-4" /> Close All Positions ({positions.length})</>}
+                </Button>
+              )}
+              {closedCount !== null && (
+                <p className="text-xs text-success mt-1">Closed {closedCount} position(s)</p>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3 pt-2 border-t border-border/50">
               <div>

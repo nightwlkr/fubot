@@ -630,3 +630,62 @@ class TestPositionManagerWebSocket:
     async def test_midrange_tick_does_not_close(self):
         status, reason = await self._run(bid=105.0, ask=105.1)
         assert status == "OPEN" and reason is None
+
+
+class TestCloseAllPositions:
+    """Manual close-all (kill switch): closing the bot must not leave positions
+    open with no TP/SL management (dangerous in live mode)."""
+
+    class _DailyWithStats:
+        async def get_daily_stats(self):
+            return {"total_trades": 0, "used_r": 0.0, "limit_r": 3.0}
+        async def update_daily_summary(self, *a, **k):
+            return None
+        async def check_and_enforce_limit(self):
+            return True
+
+    async def test_close_all_closes_open_positions(self):
+        from sqlalchemy import select, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        from backend.models.trade import Trade
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "CLOSEALLUSDT"
+        try:
+            async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                s.add(Position(symbol=SYM, side="LONG", entry_price=100.0, quantity=1.0,
+                               stop_loss=95.0, take_profit=110.0, status="OPEN",
+                               initial_risk_distance=5.0))
+                await s.commit()
+
+            class NoopBinance:
+                async def get_ticker(self, symbol):
+                    return {"symbol": symbol, "price": 105.0}
+
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, tp_hit=_noop, sl_hit=_noop, be_trailing=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+
+            pm = PositionManager(binance=NoopBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "paper"
+            closed = await pm.close_all_positions(reason="MANUAL_CLOSE")
+            assert closed == 1, f"expected 1 closed, got {closed}"
+            async with Session() as s:
+                pos = (await s.execute(select(Position).where(Position.symbol == SYM))).scalars().first()
+                trade = (await s.execute(select(Trade).where(Trade.symbol == SYM))).scalars().first()
+            assert pos.status == "CLOSED"
+            assert trade is not None and trade.exit_reason == "MANUAL_CLOSE"
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()

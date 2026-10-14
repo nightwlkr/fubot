@@ -160,6 +160,7 @@ async def init_bot(app: FastAPI) -> None:
     )
 
     set_bot_engine(engine)
+    engine.position_manager = position_manager  # wire for /bot/close-all
     app.state.bot_engine = engine
     app.state.position_manager = position_manager
     app.state.binance = binance

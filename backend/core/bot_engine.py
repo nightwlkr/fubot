@@ -51,6 +51,7 @@ class BotEngine:
         self.orders = order_service
         self.alerts = alert_service
         self.daily_reset = daily_reset
+        self.position_manager = None  # set by main.py after construction
 
         self._running = False
         self._mode: str = "paper"

@@ -64,6 +64,29 @@ async def stop_bot(
     return {"ok": True, "status": "stopped"}
 
 
+@router.post("/close-all")
+async def close_all_positions(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Close ALL open positions at market price (manual stop / kill switch).
+
+    In live mode this places real MARKET orders on the exchange. Useful when
+    stopping the bot — without this, stopping leaves positions open with no
+    TP/SL management (dangerous in live mode).
+    """
+    global _bot_engine
+    if _bot_engine is None:
+        raise HTTPException(status_code=503, detail="Bot engine not initialized")
+    user = await get_current_user_from_cookie(request, db)
+    pm = getattr(_bot_engine, "position_manager", None)
+    if pm is None:
+        raise HTTPException(status_code=503, detail="Position manager not initialized")
+    closed = await pm.close_all_positions(reason="MANUAL_CLOSE")
+    logger.info(f"Closed {closed} position(s) by user '{user.username}'")
+    return {"ok": True, "closed": closed}
+
+
 @router.get("/status")
 async def get_bot_status(
     request: Request,
