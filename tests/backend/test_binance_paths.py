@@ -28,7 +28,7 @@ async def test_klines_url_carries_fapi_prefix():
         rows = await svc.get_klines("BTCUSDT", "1h", 1)
     finally:
         await svc._client.aclose()
-    assert seen[0].startswith("https://demo.binance.com/fapi/v1/klines")
+    assert seen[0].startswith("https://testnet.binancefuture.com/fapi/v1/klines")
     assert "symbol=BTCUSDT" in seen[0]
     assert rows[0]["close"] == 105.0
 
@@ -78,7 +78,7 @@ async def test_signed_balance_url_and_signature():
     finally:
         await svc._client.aclose()
     url, headers = seen[0]
-    assert url.startswith("https://demo.binance.com/fapi/v2/balance")
+    assert url.startswith("https://testnet.binancefuture.com/fapi/v2/balance")
     assert "timestamp=" in url and "signature=" in url
     assert headers.get("x-mbx-apikey") == "k"  # httpx lowercases header names
     assert balance[0]["asset"] == "USDT"
