@@ -3,6 +3,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from typing import AsyncIterator
 from urllib.parse import urlencode
 
@@ -348,7 +349,12 @@ class BinanceService:
         return rounded
 
     async def place_market_order(self, symbol: str, side: str, quantity: float) -> dict:
-        """POST /fapi/v1/order — MARKET. Rounds quantity to LOT_SIZE step."""
+        """POST /fapi/v1/order — MARKET. Rounds quantity to LOT_SIZE step.
+        
+        Returns avgPrice (actual fill price) from Binance — use this instead of
+        the planned entry price. Binance fills at market, which can drift from
+        the signal's entry-zone midpoint.
+        """
         lot = await self.get_lot_size(symbol)
         qty = self._round_qty(quantity, lot)
         data = await self._signed_request(
@@ -361,6 +367,8 @@ class BinanceService:
             "symbol": symbol,
             "side": side,
             "executedQty": data.get("executedQty", "0"),
+            "avgPrice": data.get("avgPrice", "0"),  # actual fill price
+            "cumQuote": data.get("cumQuote", "0"),  # total quote qty (notional)
             "status": data.get("status", "FILLED"),
         }
 
@@ -445,6 +453,61 @@ class BinanceService:
             }
             for o in data
         ]
+
+    async def get_position_income(self, symbol: str, income_type: str = "REALIZED_PNL") -> dict:
+        """GET /fapi/v1/income — fetch realized PnL + fees for a symbol.
+        
+        Binance returns income events (REALIZED_PNL, COMMISSION, FUNDING_FEE).
+        This fetches recent events and sums them to get the actual PnL including
+        fees. Use this after closing a position to record exchange-truth PnL.
+        
+        Args:
+            symbol: Trading pair (e.g., "BTCUSDT")
+            income_type: Filter by type, default "REALIZED_PNL" (includes fees)
+        
+        Returns:
+            {"totalPnl": float, "realizedPnl": float, "fees": float, "funding": float}
+        """
+        # Last 7 days of income
+        end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+        start_time = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
+        
+        data = await self._signed_request(
+            "GET", "fapi/v1/income",
+            {
+                "symbol": symbol,
+                "incomeType": income_type,
+                "startTime": start_time,
+                "endTime": end_time,
+                "limit": 1000,
+            }
+        )
+        
+        # Sum income events
+        realized_pnl = 0.0
+        fees = 0.0
+        funding = 0.0
+        
+        for item in data:
+            income = float(item.get("income", 0))
+            itype = item.get("incomeType", "")
+            
+            if itype == "REALIZED_PNL":
+                realized_pnl += income
+            elif itype == "COMMISSION":
+                fees += income  # negative
+            elif itype == "FUNDING_FEE":
+                funding += income
+        
+        total = realized_pnl + fees + funding
+        
+        return {
+            "totalPnl": total,
+            "realizedPnl": realized_pnl,
+            "fees": fees,
+            "funding": funding,
+            "events": len(data),
+        }
 
     async def close(self):
         if self._client:

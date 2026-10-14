@@ -381,7 +381,11 @@ class PositionManager:
         return tp_hit, sl_hit
 
     async def _close_position(self, position: dict, reason: str, exit_price: float):
-        """Close position: record trade, update DB, log P&L."""
+        """Close position: record trade, update DB, log P&L.
+        
+        For live positions, fetches actual realized PnL from Binance (includes
+        fees and real fill prices). Paper positions use synthetic PnL.
+        """
         if self.session_factory is None:
             return
 
@@ -395,10 +399,40 @@ class PositionManager:
             side = row.side
 
             # Calculate realized P&L
-            if side == "LONG":
-                pnl_usdt = (exit_price - entry) * qty
-            else:
-                pnl_usdt = (entry - exit_price) * qty
+            # LIVE: try to fetch actual realized PnL from Binance (includes fees)
+            # PAPER: synthetic PnL (no fees)
+            pnl_usdt = None
+            if self._mode == "live" and self.binance is not None:
+                try:
+                    income = await self.binance.get_position_income(row.symbol)
+                    pnl_usdt = income.get("totalPnl", 0)
+                    if pnl_usdt is not None:
+                        logger.info(
+                            "[%s] Using exchange PnL: %.4f USDT (fees included)",
+                            row.symbol, pnl_usdt
+                        )
+                except Exception as exc:
+                    logger.debug("get_position_income failed, using synthetic PnL: %s", exc)
+            
+            # Fallback: synthetic PnL (paper mode, or live fetch failed)
+            if pnl_usdt is None:
+                if side == "LONG":
+                    pnl_usdt = (exit_price - entry) * qty
+                else:
+                    pnl_usdt = (entry - exit_price) * qty
+                
+                # Estimate fees for paper mode (realistic simulation)
+                # Binance taker fee: 0.05% per side (entry + exit)
+                if self._mode == "paper":
+                    notional_entry = entry * qty
+                    notional_exit = exit_price * qty
+                    fee_rate = 0.0005  # 0.05% taker fee
+                    fees = (notional_entry + notional_exit) * fee_rate
+                    pnl_usdt -= fees
+                    logger.debug(
+                        "[%s] Paper PnL after fees: %.4f (raw: %.4f, fees: %.4f)",
+                        row.symbol, pnl_usdt, pnl_usdt + fees, fees
+                    )
 
             # Calculate P&L in R units — against the FROZEN initial risk
             # (entry-to-original-SL), NOT the live stop_loss. BE-trailing moves

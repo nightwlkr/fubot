@@ -210,8 +210,22 @@ class StrategyService:
         else:
             try:
                 entry_res = await self.binance.place_market_order(symbol, side, float(size))
+                
+                # Use ACTUAL fill price from Binance, not the planned midpoint.
+                # Binance fills at market — the midpoint can drift 0.1-0.5% from
+                # the real fill, making dashboard PnL disagree with Binance.
+                actual_fill_price = float(entry_res.get("avgPrice", 0) or entry)
+                if actual_fill_price > 0 and abs(actual_fill_price - float(entry)) / float(entry) > 0.001:
+                    logger.info(
+                        "[%s] Fill price drifted %.2f%%: planned=%.6f actual=%.6f",
+                        symbol, abs(actual_fill_price - float(entry)) / float(entry) * 100,
+                        float(entry), actual_fill_price
+                    )
+                    # Update the position row with the real fill price
+                    await self._update_position_entry(position_id, actual_fill_price)
+                
                 await self.order_svc.place_order(
-                    symbol, side, "MARKET", size, price=Decimal(str(entry)),
+                    symbol, side, "MARKET", size, price=Decimal(str(actual_fill_price)),
                     simulate=False, binance_order_id=entry_res.get("orderId"),
                     position_id=position_id,
                 )
@@ -304,6 +318,9 @@ class StrategyService:
 
     async def _create_position(self, signal, price: float, size: Decimal, paper_mode: bool,
                                initial_risk_distance: float | None = None) -> Optional[int]:
+        """Create a Position row. For live positions, pass the ACTUAL fill price
+        (from Binance avgPrice), not the signal's entry-zone midpoint — Binance
+        fills at market and the midpoint can drift 0.1-0.5% from the real fill."""
         if self.session_factory is None:
             return None
         leverage_key = "leverage_btc" if signal.symbol.upper().startswith("BTC") else "leverage_alts"
@@ -312,7 +329,7 @@ class StrategyService:
                 signal_id=signal.db_id,
                 symbol=signal.symbol,
                 side=signal.direction,
-                entry_price=price,
+                entry_price=price,  # actual fill price for live, midpoint for paper
                 quantity=float(size),
                 leverage=int(self.settings.get(leverage_key, 10)),
                 stop_loss=float(signal.stop_loss),
@@ -325,6 +342,26 @@ class StrategyService:
             position_id = position.id
             await session.commit()
             return position_id
+
+    async def _update_position_entry(self, position_id: Optional[int], actual_price: float) -> None:
+        """Update position entry_price with the actual fill price from Binance.
+        
+        The initial _create_position uses the signal's entry-zone midpoint, but
+        Binance fills at market — the real fill can drift 0.1-0.5%. This keeps
+        dashboard PnL in sync with exchange PnL.
+        """
+        if self.session_factory is None or position_id is None:
+            return
+        try:
+            async with self.session_factory() as session:
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.id == position_id)
+                    .values(entry_price=actual_price)
+                )
+                await session.commit()
+        except Exception:
+            logger.exception("Failed to update position %s entry to %.6f", position_id, actual_price)
 
     async def _mark_signal(self, db_id: Optional[int], status: str,
                            skip_reason: Optional[str] = None) -> None:
