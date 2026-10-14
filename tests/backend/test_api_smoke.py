@@ -206,13 +206,18 @@ def test_overview_ok_after_scan_sets_last_scan(client, test_user, monkeypatch):
     client.post("/api/bot/stop")
 
 
-def test_position_payload_has_live_mark_price(client, test_user):
+def test_position_payload_has_live_mark_price(client, test_user, monkeypatch):
     """Regression: PositionsTable renders pos.mark_price/unrealized_pnl via .toFixed —
     the payload used to omit them, crashing the Overview the moment a paper
-    position existed."""
+    position existed. Mocks the ticker so the test doesn't depend on network
+    (demo.binance.com has an SSL cert issue on some local machines)."""
     import asyncio as _asyncio
     from datetime import datetime, timezone as _tz
     from sqlalchemy import select as _select
+
+    async def fake_ticker(self, symbol):
+        return {"symbol": symbol, "price": 83000.0}
+    monkeypatch.setattr("backend.services.binance_service.BinanceService.get_ticker", fake_ticker)
 
     async def _make_position():
         engine = create_async_engine(settings.DATABASE_URL)

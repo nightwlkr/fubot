@@ -13,9 +13,11 @@ logger = logging.getLogger(__name__)
 
 # Binance Futures API endpoints
 PROD_BASE = "https://fapi.binance.com"
-TESTNET_BASE = "https://testnet.binancefuture.com"
+# Binance migrated the testnet to demo.binance.com (2026-10). The old
+# testnet.binancefuture.com is deprecated and returns 401 for valid testnet keys.
+TESTNET_BASE = "https://demo.binance.com"
 PROD_WS = "wss://fstream.binance.com"
-TESTNET_WS = "wss://testnet.binancefuture.com"
+TESTNET_WS = "wss://fstream.binance.com"  # demo.binance.com uses the same WS host
 
 
 @dataclass
