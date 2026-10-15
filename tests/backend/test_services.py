@@ -891,6 +891,57 @@ class TestLiveModeSafety:
                 await s.commit()
             await engine.dispose()
 
+    async def test_close_sweeps_unrecorded_algo_orders(self):
+        """Resting algo orders NOT in the orders table (BE-trail stops, manual
+        re-placements) must be swept by symbol on close — otherwise they
+        outlive the position and can close a FUTURE position prematurely
+        (observed live: a BE-trail stop survived a TP_HIT close)."""
+        from sqlalchemy import select, delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "SWEEPTST"
+        cancelled = []
+        try:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=1.0,
+                             stop_loss=105.0, take_profit=90.0, status="OPEN")
+                s.add(p); await s.flush()
+                pos_id = p.id
+                await s.commit()
+
+            class RecBinance:
+                # NO orders-table records for this position — the orphan is
+                # only visible via openAlgoOrders.
+                async def get_open_algo_orders(self, symbol):
+                    return [{"algoId": 777, "symbol": symbol,
+                             "orderType": "STOP_MARKET", "quantity": "1.0"}]
+                async def cancel_algo_order(self, symbol, algo_id):
+                    cancelled.append((symbol, algo_id))
+                    return {}
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            pos = {"id": pos_id, "symbol": SYM, "side": "SHORT", "quantity": 1.0,
+                   "entry_price": 100.0, "stop_loss": 105.0, "take_profit": 90.0}
+            await pm._close_position(pos, "TP_HIT", 90.0)
+
+            assert (SYM, 777) in cancelled, f"unrecorded algo order not swept: {cancelled}"
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
     async def test_trail_stop_cancels_old_sl_before_placing_new(self):
         """BE-trailing must cancel the old exchange SL before placing the new
         one — otherwise two active SLs remain (observed live on 3 positions)."""

@@ -535,9 +535,9 @@ class PositionManager:
         #     opposite position. MANUAL_CLOSE/CLOSED_LOOP/force: we must
         #     actively close on the exchange).
         if self._mode == "live" and reason in ("TP_HIT", "SL_HIT", "EXTERNAL_CLOSE"):
-            await self._cancel_exchange_orders(position["id"])
+            await self._cancel_exchange_orders(position["id"], position["symbol"])
         elif self._mode == "live":
-            await self._cancel_exchange_orders(position["id"])
+            await self._cancel_exchange_orders(position["id"], position["symbol"])
             await self._market_close(symbol, side, qty)
 
         # Update daily summary + alert outside the session
@@ -555,13 +555,15 @@ class PositionManager:
 
         logger.info(f"[{symbol}] Position closed: {reason}, PnL: {pnl_usdt:.2f} USDT ({pnl_r:.2f}R)")
 
-    async def _cancel_exchange_orders(self, position_id: int) -> None:
+    async def _cancel_exchange_orders(self, position_id: int, symbol: str | None = None) -> None:
         """Cancel all resting exchange orders linked to a position (live mode).
 
         Looks up the SL/TP orders recorded in the `orders` table (by position_id)
-        and cancels them on Binance. Best-effort — an already-filled order raises
-        -2011 which is benign. Prevents orphan SL/TP orders from firing after the
-        position closes.
+        and cancels them on Binance, then sweeps openAlgoOrders for the symbol to
+        catch any resting order NOT recorded there (BE-trail stops, manual
+        re-placements). Best-effort — an already-filled order raises -2011 which
+        is benign. Prevents orphan SL/TP orders from firing after the position
+        closes.
         """
         if self.session_factory is None:
             return
@@ -574,6 +576,8 @@ class PositionManager:
                         OrderModel.position_id == position_id,
                         OrderModel.order_type.in_(["STOP_MARKET", "TAKE_PROFIT_MARKET"]),
                     ))).scalars().all()
+            if symbol is None and rows:
+                symbol = rows[0].symbol
             for row in rows:
                 oid = row.binance_order_id
                 if not oid:
@@ -587,6 +591,30 @@ class PositionManager:
                 except Exception as e:
                     # -2011/-4048 = unknown order (already filled/cancelled) — benign
                     logger.debug(f"[{row.symbol}] Cancel algo order {oid} failed (likely filled): {e}")
+
+            # Sweep: cancel ANY resting algo order still open on this symbol.
+            # Orders placed outside the orders-table logging (BE-trail stops,
+            # manual re-placements) are invisible to the position-linked pass
+            # above and would survive as orphans that can close a FUTURE
+            # position prematurely (observed: a BE-trail stop and a manually
+            # re-placed SL outlived their closed positions). The engine only
+            # ever holds one position per symbol, so at close time every
+            # resting algo order on the symbol is an orphan.
+            if symbol:
+                try:
+                    for algo in await self.binance.get_open_algo_orders(symbol):
+                        algo_id = algo.get("algoId")
+                        if not algo_id:
+                            continue
+                        try:
+                            await self.binance.cancel_algo_order(symbol, int(algo_id))
+                            logger.info(
+                                f"[{symbol}] Sweep-cancelled resting algo order {algo_id} "
+                                f"({algo.get('orderType')}) after position close")
+                        except Exception as e:
+                            logger.debug(f"[{symbol}] Sweep cancel {algo_id} failed: {e}")
+                except Exception:
+                    logger.exception("Algo-order sweep failed after position close")
         except Exception:
             logger.exception("Failed to cancel exchange orders for position %s", position_id)
 

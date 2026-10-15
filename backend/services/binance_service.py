@@ -112,13 +112,17 @@ class BinanceService:
                 resp.raise_for_status()
                 data = resp.json()
                 if isinstance(data, dict) and "code" in data and "msg" in data:
-                    # Algo endpoints return {"code": 200, "msg": "success"} on
+                    # Algo endpoints return {"code": "200", "msg": "success"} on
                     # SUCCESS — only non-200 codes are errors (Binance error
-                    # codes are negative or 4xx). Treating code==200 as an
-                    # error made every cancel_algo_order raise on success, so
-                    # orphan SL/TP orders were never auto-cancelled.
-                    if data["code"] != 200:
-                        raise BinanceAPIError(data["code"], data["msg"])
+                    # codes are negative or 4xx). `code` arrives as a STRING on
+                    # some endpoints ("200" != 200 raised on every successful
+                    # cancel_algo_order), so compare numerically.
+                    try:
+                        code = int(data["code"])
+                    except (TypeError, ValueError):
+                        code = -1
+                    if code != 200:
+                        raise BinanceAPIError(code, data["msg"])
                 return data
             except (httpx.HTTPStatusError, BinanceAPIError):
                 raise
@@ -466,6 +470,27 @@ class BinanceService:
                 "time": o.get("time"),
             }
             for o in data
+        ]
+
+    async def get_open_algo_orders(self, symbol: str) -> list[dict]:
+        """GET /fapi/v1/openAlgoOrders — resting conditional (SL/TP) orders.
+
+        Used to sweep orphans on position close: orders placed outside the
+        orders-table logging (BE-trail stops, manual re-placements) are
+        invisible to the position-linked cancel and would otherwise survive
+        the close."""
+        data = await self._signed_request(
+            "GET", "fapi/v1/openAlgoOrders", {"symbol": symbol})
+        return [
+            {
+                "algoId": a.get("algoId"),
+                "symbol": a.get("symbol"),
+                "orderType": a.get("orderType"),
+                "triggerPrice": a.get("triggerPrice"),
+                "quantity": a.get("quantity"),
+                "algoStatus": a.get("algoStatus"),
+            }
+            for a in data
         ]
 
     async def get_position_income(
