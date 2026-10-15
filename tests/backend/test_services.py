@@ -95,7 +95,13 @@ class FakeBinance:
 
     async def place_market_order(self, symbol, side, quantity):
         self.calls.append(("MARKET", side, quantity))
-        return {"orderId": 101, "status": "FILLED"}
+        return {"orderId": 101, "status": "FILLED",
+                "executedQty": str(quantity), "avgPrice": str(self.price)}
+
+    async def get_order(self, symbol, order_id):
+        self.calls.append(("GET_ORDER", order_id))
+        return {"orderId": order_id, "status": "FILLED",
+                "executedQty": "10", "avgPrice": str(self.price)}
 
     async def modify_position_stop(self, symbol, side, stop_price, quantity):
         self.calls.append(("STOP_MARKET", stop_price, quantity))
@@ -189,6 +195,39 @@ class TestStrategyServiceEvaluateSignal:
         assert kinds == ["MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"]
         # live orders are recorded in-memory and marked non-simulated
         assert all(o["simulate"] is False for o in order_svc.pending.values())
+
+    async def test_live_mode_fetches_fill_via_get_order_when_response_lacks_it(self):
+        """place_market_order responses can omit avgPrice/executedQty (ACK type) —
+        the flow must fetch the order detail so the DB records the exchange's
+        fill instead of the signal midpoint (observed: entry 1.1515 planned vs
+        1.1518 filled on DOTUSDT)."""
+        binance = FakeBinance(price=100.5)
+        async def place_no_fill(symbol, side, quantity):
+            binance.calls.append(("MARKET", side, quantity))
+            return {"orderId": 101, "status": "FILLED"}  # no executedQty/avgPrice
+        binance.place_market_order = place_no_fill
+        decision = await make_strategy(binance, FakeOrderService()).evaluate_signal(
+            make_signal(), paper_mode=False)
+        assert decision.decision == "EXECUTE"
+        assert ("GET_ORDER", 101) in binance.calls
+
+    async def test_live_mode_survives_fill_fetch_failure(self):
+        """A failed fill-detail fetch must NOT abort the entry — by then the
+        MARKET order has already filled; closing the flow would mark the DB row
+        CLOSED while a live position exists on the exchange."""
+        binance = FakeBinance(price=100.5)
+        async def place_no_fill(symbol, side, quantity):
+            binance.calls.append(("MARKET", side, quantity))
+            return {"orderId": 101, "status": "FILLED"}
+        async def get_order_boom(symbol, order_id):
+            raise RuntimeError("timeout")
+        binance.place_market_order = place_no_fill
+        binance.get_order = get_order_boom
+        decision = await make_strategy(binance, FakeOrderService()).evaluate_signal(
+            make_signal(), paper_mode=False)
+        assert decision.decision == "EXECUTE"
+        kinds = [c[0] for c in binance.calls]
+        assert "STOP_MARKET" in kinds and "TAKE_PROFIT_MARKET" in kinds
 
     async def test_skips_when_position_already_open(self):
         order_svc = FakeOrderService(open_position={"quantity": 1})

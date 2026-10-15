@@ -112,7 +112,13 @@ class BinanceService:
                 resp.raise_for_status()
                 data = resp.json()
                 if isinstance(data, dict) and "code" in data and "msg" in data:
-                    raise BinanceAPIError(data["code"], data["msg"])
+                    # Algo endpoints return {"code": 200, "msg": "success"} on
+                    # SUCCESS — only non-200 codes are errors (Binance error
+                    # codes are negative or 4xx). Treating code==200 as an
+                    # error made every cancel_algo_order raise on success, so
+                    # orphan SL/TP orders were never auto-cancelled.
+                    if data["code"] != 200:
+                        raise BinanceAPIError(data["code"], data["msg"])
                 return data
             except (httpx.HTTPStatusError, BinanceAPIError):
                 raise
@@ -207,8 +213,10 @@ class BinanceService:
         return {"symbol": symbol, "price": float(data.get("price", 0))}
 
     async def get_mark_price(self, symbol: str) -> dict:
-        """GET /fapi/v1/ticker/markPrice"""
-        data = await self._public_request("fapi/v1/ticker/markPrice", {"symbol": symbol})
+        """GET /fapi/v1/premiumIndex — the mark price Binance itself uses for
+        unrealized PnL. (fapi/v1/ticker/markPrice does not exist — the old
+        path 404'd, so callers silently fell back to last-trade price.)"""
+        data = await self._public_request("fapi/v1/premiumIndex", {"symbol": symbol})
         return {
             "markPrice": float(data.get("markPrice", 0)),
             "indexPrice": float(data.get("indexPrice", 0)),
@@ -274,6 +282,7 @@ class BinanceService:
                 "side": "LONG" if float(p["positionAmt"]) > 0 else "SHORT",
                 "quantity": abs(float(p["positionAmt"])),
                 "entryPrice": float(p["entryPrice"]),
+                "markPrice": float(p.get("markPrice", 0) or 0),
                 "unrealizedPnl": float(p.get("unRealizedProfit", 0)),
                 "leverage": int(p.get("leverage", 1)),
             }
@@ -321,29 +330,34 @@ class BinanceService:
         return {}
 
     def _round_qty(self, qty: float, lot_filters: dict) -> float:
-        """Round quantity down to the LOT_SIZE step (MARKET_LOT_SIZE if present)."""
-        import math
+        """Round quantity down to the LOT_SIZE step (MARKET_LOT_SIZE if present).
+
+        Decimal-based: the naive `math.floor(qty / step)` mis-floors exact
+        multiples through float error (89.3 / 0.1 == 892.9999… → 89.2), which
+        left a 0.1-lot slice of a position uncovered by its reduce-only SL/TP.
+        """
+        from decimal import Decimal, ROUND_DOWN
         f = lot_filters.get("MARKET_LOT_SIZE") or lot_filters.get("LOT_SIZE")
         if not f:
             return qty
-        step = float(f.get("stepSize", "0.0001"))
+        step = Decimal(str(f.get("stepSize", "0.0001")))
         min_qty = float(f.get("minQty", "0"))
-        rounded = math.floor(qty / step) * step
-        rounded = float(f"{rounded:.8f}".rstrip("0").rstrip("."))
+        rounded = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        rounded = float(rounded)
         if rounded < min_qty:
             raise ValueError(f"Quantity {qty} below minQty {min_qty}")
         return rounded
 
     def _round_price(self, price: float, lot_filters: dict) -> float:
-        """Round price to the PRICE_FILTER tick size."""
-        import math
+        """Round price to the PRICE_FILTER tick size (Decimal — see _round_qty)."""
+        from decimal import Decimal, ROUND_DOWN
         f = lot_filters.get("PRICE_FILTER")
         if not f:
             return price
-        tick = float(f.get("tickSize", "0.1"))
+        tick = Decimal(str(f.get("tickSize", "0.1")))
         min_price = float(f.get("minPrice", "0"))
-        rounded = math.floor(price / tick) * tick
-        rounded = float(f"{rounded:.8f}".rstrip("0").rstrip("."))
+        rounded = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+        rounded = float(rounded)
         if rounded < min_price:
             raise ValueError(f"Price {price} below minPrice {min_price}")
         return rounded
@@ -454,23 +468,29 @@ class BinanceService:
             for o in data
         ]
 
-    async def get_position_income(self, symbol: str, income_type: str = "REALIZED_PNL") -> dict:
+    async def get_position_income(
+        self, symbol: str, income_type: str = "REALIZED_PNL", start_time: int | None = None
+    ) -> dict:
         """GET /fapi/v1/income — fetch realized PnL + fees for a symbol.
         
         Binance returns income events (REALIZED_PNL, COMMISSION, FUNDING_FEE).
-        This fetches recent events and sums them to get the actual PnL including
+        This fetches events and sums them to get the actual PnL including
         fees. Use this after closing a position to record exchange-truth PnL.
         
         Args:
             symbol: Trading pair (e.g., "BTCUSDT")
             income_type: Filter by type, default "REALIZED_PNL" (includes fees)
+            start_time: Epoch ms — only sum events from this instant. Pass the
+                POSITION's open time; without it the 7-day window would also
+                sum a previous position's PnL on the same symbol.
         
         Returns:
             {"totalPnl": float, "realizedPnl": float, "fees": float, "funding": float}
         """
-        # Last 7 days of income
+        # Last 7 days of income (or since the given instant)
         end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
-        start_time = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
+        if start_time is None:
+            start_time = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
         
         data = await self._signed_request(
             "GET", "fapi/v1/income",

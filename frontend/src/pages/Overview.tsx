@@ -289,6 +289,7 @@ export default function Overview() {
                 <TableHeadCell className="text-right">Entry</TableHeadCell>
                 <TableHeadCell className="text-right">Mark</TableHeadCell>
                 <TableHeadCell className="text-right">PnL (USD)</TableHeadCell>
+                <TableHeadCell className="text-right">ROI</TableHeadCell>
                 <TableHeadCell className="text-right">Lev</TableHeadCell>
                 <TableHeadCell className="text-right">Action</TableHeadCell>
               </TableRow>
@@ -311,6 +312,12 @@ export default function Overview() {
                   <TableCell className="text-right">
                     <span className={clsx('font-mono font-bold text-sm', pos.unrealized_pnl >= 0 ? 'text-success' : 'text-danger')}>
                       {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toFixed(2)}
+                    </span>
+                  </TableCell>
+                  {/* ROI % vs initial margin — same definition as Binance's position ROI */}
+                  <TableCell className="text-right">
+                    <span className={clsx('font-mono text-sm', pos.unrealized_pnl_pct >= 0 ? 'text-success' : 'text-danger')}>
+                      {pos.unrealized_pnl_pct >= 0 ? '+' : ''}{pos.unrealized_pnl_pct.toFixed(2)}%
                     </span>
                   </TableCell>
                   <TableCell className="text-right font-mono text-sm">{pos.leverage}x</TableCell>

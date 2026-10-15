@@ -66,8 +66,9 @@ class PositionItem(BaseModel):
     take_profit: Optional[float] = None
     status: str
     opened_at: datetime
-    mark_price: float = 0.0        # live mark price (frontend PositionsTable)
-    unrealized_pnl: float = 0.0    # USDT, signed by side
+    mark_price: float = 0.0        # mark price (Binance premiumIndex in paper, positionRisk in live)
+    unrealized_pnl: float = 0.0    # USDT — exchange-truth in live mode, computed in paper
+    unrealized_pnl_pct: float = 0.0  # ROI % vs initial margin (Binance's definition)
 
     class Config:
         from_attributes = True

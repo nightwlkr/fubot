@@ -12,6 +12,7 @@ from backend.models.daily_summary import DailySummary
 from backend.models.position import Position
 from backend.models.trade import Trade
 from backend.models.equity_log import EquityLog
+from backend.routers.position_pricing import apply_pricing, fetch_pricing
 from backend.schemas.dashboard import (
     BotStatus,
     DailyLimitStatus,
@@ -20,26 +21,6 @@ from backend.schemas.dashboard import (
     EquityPoint,
     DashboardOverview,
 )
-
-async def _mark_prices(symbols) -> dict:
-    """Live mark prices for the given symbols (public endpoint — no API keys)."""
-    from backend.services.binance_service import BinanceService
-    prices: dict = {}
-    binance = BinanceService()
-    for s in set(symbols):
-        try:
-            prices[s] = float((await binance.get_ticker(s))["price"])
-        except Exception:
-            prices[s] = 0.0
-    return prices
-
-
-def _unrealized_pnl(side: str, entry: float, mark: float, quantity: float) -> float:
-    if mark <= 0:
-        return 0.0
-    direction = 1.0 if side == "LONG" else -1.0
-    return (mark - entry) * quantity * direction
-
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -64,21 +45,22 @@ def _format_bot_status(is_running: bool, mode: str, uptime: float, scan_count: i
     )
 
 
-def _format_position(pos: Position, mark_price: float = 0.0) -> PositionItem:
+def _format_position(pos: Position, pricing: dict) -> PositionItem:
+    px = apply_pricing(pos, pricing)
     return PositionItem(
         id=pos.id,
         symbol=pos.symbol,
         side=pos.side,
-        entry_price=float(pos.entry_price),
-        quantity=float(pos.quantity),
-        leverage=pos.leverage,
+        entry_price=px["entry_price"],
+        quantity=px["quantity"],
+        leverage=px["leverage"],
         stop_loss=float(pos.stop_loss) if pos.stop_loss is not None else None,
         take_profit=float(pos.take_profit) if pos.take_profit is not None else None,
         status=pos.status,
         opened_at=pos.opened_at,
-        mark_price=mark_price,
-        unrealized_pnl=_unrealized_pnl(pos.side, float(pos.entry_price), mark_price,
-                                       float(pos.quantity)),
+        mark_price=px["mark_price"],
+        unrealized_pnl=px["unrealized_pnl"],
+        unrealized_pnl_pct=px["unrealized_pnl_pct"],
     )
 
 
@@ -98,10 +80,11 @@ async def dashboard_overview(
         engine_status = {"status": "stopped", "mode": "paper", "uptime_seconds": 0.0,
                          "scan_count": 0, "last_scan": None}
 
-    # Open positions (+ live mark prices for the table)
+    # Open positions (+ live pricing for the table: exchange truth in live
+    # mode, mark price in paper mode)
     result = await db.execute(select(Position).where(Position.status == "OPEN"))
     positions = result.scalars().all()
-    prices = await _mark_prices([p.symbol for p in positions]) if positions else {}
+    pricing = await fetch_pricing(request, [p.symbol for p in positions]) if positions else {}
 
     # Equity curve (last 30 days)
     cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(days=30)
@@ -148,7 +131,7 @@ async def dashboard_overview(
             losses=daily.losses if daily else 0,
             trades_count=daily.total_trades if daily else 0,
         ),
-        open_positions=[_format_position(p, prices.get(p.symbol, 0.0)) for p in positions],
+        open_positions=[_format_position(p, pricing) for p in positions],
         equity_curve=[
             EquityPoint(date=r.recorded_at.isoformat(),
                         balance=float(r.balance_usdt),

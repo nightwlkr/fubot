@@ -210,22 +210,45 @@ class StrategyService:
         else:
             try:
                 entry_res = await self.binance.place_market_order(symbol, side, float(size))
-                
-                # Use ACTUAL fill price from Binance, not the planned midpoint.
-                # Binance fills at market — the midpoint can drift 0.1-0.5% from
-                # the real fill, making dashboard PnL disagree with Binance.
-                actual_fill_price = float(entry_res.get("avgPrice", 0) or entry)
-                if actual_fill_price > 0 and abs(actual_fill_price - float(entry)) / float(entry) > 0.001:
-                    logger.info(
-                        "[%s] Fill price drifted %.2f%%: planned=%.6f actual=%.6f",
-                        symbol, abs(actual_fill_price - float(entry)) / float(entry) * 100,
-                        float(entry), actual_fill_price
-                    )
-                    # Update the position row with the real fill price
-                    await self._update_position_entry(position_id, actual_fill_price)
-                
+
+                # Exchange truth: Binance rounds qty to LOT_SIZE and fills at
+                # market, which drifts from the planned midpoint. Record BOTH
+                # the executed qty and the actual fill price on the position
+                # row — otherwise dashboard PnL/ROI can never match Binance
+                # (observed: DB 89.332934 vs exchange 89.3, entry 1.1515 vs
+                # 1.1518 fill).
+                #
+                # STRICTLY best-effort: the entry has ALREADY filled here — a
+                # failed detail fetch must never abort the flow (that would
+                # close the DB row while a live position exists on the
+                # exchange).
+                try:
+                    fill_qty = float(entry_res.get("executedQty", 0) or 0)
+                    fill_price = float(entry_res.get("avgPrice", 0) or 0)
+                    if fill_price <= 0 or fill_qty <= 0:
+                        # Response type may omit fills — fetch the order detail.
+                        order_id = entry_res.get("orderId")
+                        if order_id:
+                            det = await self.binance.get_order(symbol, int(order_id))
+                            fill_qty = float(det.get("executedQty", 0) or 0) or fill_qty
+                            fill_price = float(det.get("avgPrice", 0) or 0) or fill_price
+                    if fill_price > 0 or (0 < fill_qty != float(size)):
+                        await self._update_position_fill(
+                            position_id, fill_price or float(entry), fill_qty or float(size))
+                        if fill_price and abs(fill_price - float(entry)) / float(entry) > 0.001:
+                            logger.info(
+                                "[%s] Fill price drifted %.2f%%: planned=%.6f actual=%.6f",
+                                symbol, abs(fill_price - float(entry)) / float(entry) * 100,
+                                float(entry), fill_price)
+                except Exception as fill_exc:
+                    logger.warning(
+                        "[%s] Could not record exchange fill (entry still live): %s",
+                        symbol, fill_exc)
+
+                # Log the order with the planned entry — the exchange's actual
+                # fill lands on the position row via _update_position_fill.
                 await self.order_svc.place_order(
-                    symbol, side, "MARKET", size, price=Decimal(str(actual_fill_price)),
+                    symbol, side, "MARKET", size, price=Decimal(str(entry)),
                     simulate=False, binance_order_id=entry_res.get("orderId"),
                     position_id=position_id,
                 )
@@ -343,25 +366,34 @@ class StrategyService:
             await session.commit()
             return position_id
 
-    async def _update_position_entry(self, position_id: Optional[int], actual_price: float) -> None:
-        """Update position entry_price with the actual fill price from Binance.
-        
-        The initial _create_position uses the signal's entry-zone midpoint, but
-        Binance fills at market — the real fill can drift 0.1-0.5%. This keeps
-        dashboard PnL in sync with exchange PnL.
+    async def _update_position_fill(self, position_id: Optional[int],
+                                    actual_price: float, actual_qty: float | None = None) -> None:
+        """Update a position row with the exchange's executed qty + fill price.
+
+        The initial _create_position stores the planned size and the signal's
+        entry-zone midpoint, but Binance rounds qty to LOT_SIZE and fills at
+        market. Recording the exchange's numbers keeps dashboard PnL/ROI in
+        sync with Binance.
         """
         if self.session_factory is None or position_id is None:
+            return
+        values = {}
+        if actual_price and actual_price > 0:
+            values["entry_price"] = actual_price
+        if actual_qty is not None and actual_qty > 0:
+            values["quantity"] = actual_qty
+        if not values:
             return
         try:
             async with self.session_factory() as session:
                 await session.execute(
                     update(PositionModel)
                     .where(PositionModel.id == position_id)
-                    .values(entry_price=actual_price)
+                    .values(**values)
                 )
                 await session.commit()
         except Exception:
-            logger.exception("Failed to update position %s entry to %.6f", position_id, actual_price)
+            logger.exception("Failed to update position %s fill to %s", position_id, values)
 
     async def _mark_signal(self, db_id: Optional[int], status: str,
                            skip_reason: Optional[str] = None) -> None:

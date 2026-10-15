@@ -8,27 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models.position import Position
+from backend.routers.position_pricing import apply_pricing, fetch_pricing
 from backend.schemas.position import PositionResponse, PositionListResponse, PositionUpdateRequest
-
-async def _mark_prices(symbols) -> dict:
-    """Live mark prices for the given symbols (public endpoint — no API keys)."""
-    from backend.services.binance_service import BinanceService
-    prices: dict = {}
-    binance = BinanceService()
-    for s in set(symbols):
-        try:
-            prices[s] = float((await binance.get_ticker(s))["price"])
-        except Exception:
-            prices[s] = 0.0
-    return prices
-
-
-def _unrealized_pnl(side: str, entry: float, mark: float, quantity: float) -> float:
-    if mark <= 0:
-        return 0.0
-    direction = 1.0 if side == "LONG" else -1.0
-    return (mark - entry) * quantity * direction
-
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/positions", tags=["positions"])
@@ -45,23 +26,24 @@ async def get_current_user_from_cookie(request: Request, db: AsyncSession):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
-def _format_position(pos: Position, mark_price: float = 0.0) -> PositionResponse:
+def _format_position(pos: Position, pricing: dict) -> PositionResponse:
+    px = apply_pricing(pos, pricing)
     return PositionResponse(
         id=pos.id,
         signal_id=pos.signal_id,
         symbol=pos.symbol,
         side=pos.side,
-        entry_price=float(pos.entry_price),
-        quantity=float(pos.quantity),
-        leverage=pos.leverage,
+        entry_price=px["entry_price"],
+        quantity=px["quantity"],
+        leverage=px["leverage"],
         stop_loss=float(pos.stop_loss) if pos.stop_loss is not None else None,
         take_profit=float(pos.take_profit) if pos.take_profit is not None else None,
         status=pos.status,
         opened_at=pos.opened_at,
         closed_at=pos.closed_at,
-        mark_price=mark_price,
-        unrealized_pnl=_unrealized_pnl(pos.side, float(pos.entry_price), mark_price,
-                                       float(pos.quantity)),
+        mark_price=px["mark_price"],
+        unrealized_pnl=px["unrealized_pnl"],
+        unrealized_pnl_pct=px["unrealized_pnl_pct"],
     )
 
 
@@ -85,10 +67,10 @@ async def list_positions(
 
     result = await db.execute(query)
     positions = result.scalars().all()
-    prices = await _mark_prices([p.symbol for p in positions]) if positions else {}
+    pricing = await fetch_pricing(request, [p.symbol for p in positions]) if positions else {}
 
     return PositionListResponse(
-        positions=[_format_position(p, prices.get(p.symbol, 0.0)) for p in positions]
+        positions=[_format_position(p, pricing) for p in positions]
     )
 
 
@@ -103,7 +85,8 @@ async def get_position(
     position = result.scalar_one_or_none()
     if not position:
         raise HTTPException(status_code=404, detail="Position not found")
-    return _format_position(position)
+    pricing = await fetch_pricing(request, [position.symbol])
+    return _format_position(position, pricing)
 
 
 @router.patch("/{position_id}", response_model=PositionResponse)
@@ -128,4 +111,5 @@ async def update_position(
 
     await db.commit()
     await db.refresh(position)
-    return _format_position(position)
+    pricing = await fetch_pricing(request, [position.symbol])
+    return _format_position(position, pricing)

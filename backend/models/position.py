@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import String, Integer, DateTime, Numeric, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 from backend.database import Base
@@ -20,6 +20,12 @@ class Position(Base):
     # stop_loss — BE-trailing moves stop_loss toward entry, which would shrink
     # the denominator and inflate |R| on a later close.
     initial_risk_distance: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    strategy_type: Mapped[str] = mapped_column(String(20), default="UNKNOWN")  # FVG, 3CANDLE, CHOC, etc.
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
-    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    # timezone-aware UTC now — the old naive datetime.utcnow() default made
+    # Postgres interpret the wall time as session-TZ (+02), skewing every
+    # opened_at by -2h. That skew fed the reconcile age guard and the
+    # income-API startTime (exchange PnL attribution).
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

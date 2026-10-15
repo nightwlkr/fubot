@@ -104,6 +104,36 @@ class PositionManager:
         open_positions = await self._get_open_positions()
         db_open = {p["symbol"]: p for p in open_positions}
 
+        # Reverse direction: the DB says OPEN but the exchange holds nothing —
+        # the position was closed outside the bot (its exchange SL/TP fired
+        # while the engine was down, or a manual close on Binance). Without
+        # this the dashboard shows a phantom position with self-computed PnL
+        # forever. Guard: ignore rows younger than 120s so a just-opened
+        # position whose positionRisk row hasn't appeared yet isn't misjudged.
+        exchange_symbols = {ep["symbol"] for ep in (exchange_positions or [])}
+        for p in open_positions:
+            if p["symbol"] in exchange_symbols:
+                continue
+            opened_at = p.get("opened_at")
+            if opened_at is not None:
+                age = (datetime.now(timezone.utc) - opened_at).total_seconds() \
+                    if opened_at.tzinfo else 120.0
+                if age < 120:
+                    continue
+            logger.warning(
+                f"[{p['symbol']}] Reconcile: DB position {p['id']} OPEN but the "
+                f"exchange holds no position — closing as EXTERNAL_CLOSE")
+            exit_price = self._latest_price.get(p["symbol"], 0.0)
+            if exit_price <= 0:
+                try:
+                    ticker = await self.binance.get_ticker(p["symbol"])
+                    exit_price = float(ticker.get("price", 0) or 0)
+                except Exception:
+                    exit_price = 0.0
+            if exit_price <= 0:
+                exit_price = p["entry_price"]
+            await self._close_position(p, "EXTERNAL_CLOSE", exit_price)
+
         for ep in exchange_positions or []:
             amt = float(ep.get("positionAmt", 0) or 0)
             if amt == 0:
@@ -177,6 +207,7 @@ class PositionManager:
                     "stop_loss": float(r["stop_loss"]) if r["stop_loss"] is not None else None,
                     "take_profit": float(r["take_profit"]) if r["take_profit"] is not None else None,
                     "signal_id": r["signal_id"],
+                    "opened_at": r["opened_at"],
                 }
                 for r in rows
             ]
@@ -412,7 +443,17 @@ class PositionManager:
             pnl_usdt = None
             if self._mode == "live" and self.binance is not None:
                 try:
-                    income = await self.binance.get_position_income(row.symbol)
+                    # Scope income to THIS position's lifetime — the 7-day
+                    # default window would also sum an earlier position's PnL
+                    # on the same symbol.
+                    opened_at = row.opened_at
+                    start_ms = None
+                    if opened_at is not None:
+                        if opened_at.tzinfo is None:
+                            opened_at = opened_at.replace(tzinfo=timezone.utc)
+                        start_ms = int(opened_at.timestamp() * 1000) - 60_000
+                    income = await self.binance.get_position_income(
+                        row.symbol, start_time=start_ms)
                     pnl_usdt = income.get("totalPnl", 0)
                     if pnl_usdt is not None:
                         logger.info(
@@ -487,11 +528,13 @@ class PositionManager:
         # reduce-only SL/TP orders for this position. When it closes we must:
         #   - always cancel the resting SL/TP (an orphan SL is a phantom-position
         #     bomb: once restarted it fires and opens a NEW opposite position)
-        #   - place a MARKET close ONLY when this wasn't an exchange-side exit
-        #     (TP_HIT/SL_HIT: the exchange order already closed the position —
-        #     cancelling the sibling suffices; MANUAL_CLOSE/CLOSED_LOOP/force:
-        #     we must actively close on the exchange).
-        if self._mode == "live" and reason in ("TP_HIT", "SL_HIT"):
+        #   - place a MARKET close ONLY when the exchange doesn't already know
+        #     the position is gone (TP_HIT/SL_HIT/EXTERNAL_CLOSE: an exchange
+        #     order or an outside close already flattened it — cancelling the
+        #     resting orders suffices; a redundant market close would OPEN an
+        #     opposite position. MANUAL_CLOSE/CLOSED_LOOP/force: we must
+        #     actively close on the exchange).
+        if self._mode == "live" and reason in ("TP_HIT", "SL_HIT", "EXTERNAL_CLOSE"):
             await self._cancel_exchange_orders(position["id"])
         elif self._mode == "live":
             await self._cancel_exchange_orders(position["id"])
