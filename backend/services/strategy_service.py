@@ -193,8 +193,29 @@ class StrategyService:
             balance, risk_percent, Decimal(str(entry)), signal.stop_loss
         )
         # Safety backstop: never let a single position exceed a fraction of the
-        # account, regardless of how it was sized.
-        size = self.risk_svc.cap_position_notional(size, Decimal(str(entry)), balance)
+        # account, regardless of how it was sized. The fraction is the
+        # `max_position_notional_pct` setting (Settings UI). When the cap binds
+        # it LOWERS the effective risk well below risk_percent — with ~1% stops
+        # a 50% cap turns a 5% risk target into ~$1-2 per trade — so log the
+        # real numbers instead of silently overriding the risk setting.
+        notional_pct = Decimal(str(self.settings.get("max_position_notional_pct", 50.0)))
+        capped = self.risk_svc.cap_position_notional(
+            size, Decimal(str(entry)), balance, notional_pct / Decimal("100"))
+        if capped < size:
+            intended_risk = balance * risk_percent / Decimal("100")
+            eff_risk = capped * abs(Decimal(str(entry)) - signal.stop_loss)
+            try:
+                eff_pct = float(eff_risk / balance * 100) if balance else 0.0
+            except Exception:
+                eff_pct = 0.0
+            logger.warning(
+                "[%s] Notional cap %.0f%% of balance binds — position cut from "
+                "%.6f to %.6f qty; risk %.2f -> %.2f USDT (%.2f%% of balance "
+                "instead of %.2f%%). Raise 'Max Position Notional' to size by "
+                "Risk Per Trade.",
+                symbol, float(notional_pct), float(size), float(capped),
+                float(intended_risk), float(eff_risk), eff_pct, float(risk_percent))
+        size = capped
         if size == Decimal("0"):
             return TradeDecision("SKIP", skip_reason="Position size too small")
 

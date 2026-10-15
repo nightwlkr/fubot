@@ -249,6 +249,35 @@ class TestStrategyServiceEvaluateSignal:
         assert decision.decision == "EXECUTE" and decision.paper is True
         assert decision.plan["entry"] == 100.5
 
+    async def test_notional_cap_is_configurable(self):
+        """The position-notional cap silently overrode risk_percent: with ~1%
+        stops the 50%-of-balance cap turned a 5% risk target into ~$1-2 per
+        trade (live 2026-10-15). It must now come from the
+        `max_position_notional_pct` setting so Settings can drive it.
+
+        Setup: $200 balance, 5% risk = $10, entry 100.5, stop 99 (1.5% away) =>
+        risk-based qty 6.667, notional $670."""
+        base = {"rr_min": 3.0, "max_positions": 3, "risk_percent": 5.0,
+                "paper_use_real_balance": False, "paper_balance_usdt": 200.0}
+        over = dict(stop_loss=Decimal("99"), take_profit=Decimal("110"),
+                    rr_ratio=Decimal("3"))
+
+        d_50 = await make_strategy(
+            FakeBinance(price=100.5), FakeOrderService(),
+            settings={**base, "max_position_notional_pct": 50.0},
+        ).evaluate_signal(make_signal(**over), paper_mode=True)
+        d_500 = await make_strategy(
+            FakeBinance(price=100.5), FakeOrderService(),
+            settings={**base, "max_position_notional_pct": 500.0},
+        ).evaluate_signal(make_signal(**over), paper_mode=True)
+
+        assert d_50.decision == "EXECUTE" and d_500.decision == "EXECUTE"
+        # 50% of 200 = $100 notional -> 100 / 100.5 = 0.995 qty (risk ~$1.49)
+        assert abs(float(d_50.plan["size"]) - 0.995) < 0.01, d_50.plan["size"]
+        # 500% cap no longer binds -> risk-based 10 / 1.5 = 6.667 qty
+        assert abs(float(d_500.plan["size"]) - 6.667) < 0.01, d_500.plan["size"]
+        assert float(d_500.plan["size"]) > float(d_50.plan["size"])
+
     async def test_skips_when_position_already_open(self):
         order_svc = FakeOrderService(open_position={"quantity": 1})
         decision = await make_strategy(order_svc=order_svc).evaluate_signal(make_signal(), paper_mode=True)

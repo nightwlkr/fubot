@@ -121,6 +121,32 @@ def test_settings_trading_roundtrip(client, test_user):
     assert res.json()["max_positions"] == original["max_positions"]
 
 
+def test_trading_settings_hot_reload_engine(client, test_user):
+    """A slider change must reach the RUNNING engine, not just the DB.
+
+    main.init_bot hands every component the same settings dict; the PUT handler
+    mutates it in place. Before this, changing Risk Per Trade / the position
+    notional cap had no effect until a service restart (the engine read its
+    startup snapshot forever)."""
+    from backend.main import app
+
+    _login(client, test_user)
+    original = client.get("/api/settings/trading").json()
+    try:
+        res = client.put("/api/settings/trading",
+                         json={"max_position_notional_pct": 250.0})
+        assert res.status_code == 200
+        assert res.json()["max_position_notional_pct"] == 250.0
+
+        engine = getattr(app.state, "bot_engine", None)
+        assert engine is not None, "engine not wired into app.state"
+        assert float(engine.settings.get("max_position_notional_pct")) == 250.0, \
+            "running engine did not pick up the new setting"
+    finally:
+        client.put("/api/settings/trading", json={
+            "max_position_notional_pct": original["max_position_notional_pct"]})
+
+
 def test_bot_engine_wired(client, test_user, monkeypatch):
     """PHASE4_STEP1: main.py lifespan builds the BotEngine and registers it."""
     _login(client, test_user)

@@ -20,6 +20,10 @@ class TradingSettingsResponse(BaseModel):
     symbol_cooldown_minutes: int = 240
     max_daily_trades: int = 12
     volume_filter_enabled: bool = False
+    # Max position notional as a % of balance. This is a CAP, not a target: when
+    # it binds it reduces the effective risk below risk_percent (with ~1% stops,
+    # a 50% cap turns a 5% risk target into ~$1-2 per trade).
+    max_position_notional_pct: float = 50.0
 
 
 class TradingSettingsUpdate(BaseModel):
@@ -35,6 +39,7 @@ class TradingSettingsUpdate(BaseModel):
     symbol_cooldown_minutes: int | None = None
     max_daily_trades: int | None = None
     volume_filter_enabled: bool | None = None
+    max_position_notional_pct: float | None = None
 
 
 class SymbolConfigResponse(BaseModel):

@@ -25,6 +25,7 @@ interface TradingSettings {
   volume_filter_enabled: boolean
   symbol_cooldown_minutes: number
   max_daily_trades: number
+  max_position_notional_pct: number
 }
 
 interface SymbolConfig {
@@ -173,6 +174,7 @@ function TradingParamsSection() {
   const [volumeFilterEnabled, setVolumeFilterEnabled] = useState(false)
   const [symbolCooldownMinutes, setSymbolCooldownMinutes] = useState(240)
   const [maxDailyTrades, setMaxDailyTrades] = useState(12)
+  const [maxPositionNotionalPct, setMaxPositionNotionalPct] = useState(50)
 
   useEffect(() => {
     api.get<TradingSettings>(ENDPOINTS.settingsTrading)
@@ -190,6 +192,7 @@ function TradingParamsSection() {
         setVolumeFilterEnabled(s.volume_filter_enabled ?? false)
         setSymbolCooldownMinutes(s.symbol_cooldown_minutes ?? 240)
         setMaxDailyTrades(s.max_daily_trades ?? 12)
+        setMaxPositionNotionalPct(s.max_position_notional_pct ?? 50)
         setIsLoading(false)
       })
       .catch(() => setIsLoading(false))
@@ -211,6 +214,7 @@ function TradingParamsSection() {
         volume_filter_enabled: volumeFilterEnabled,
         symbol_cooldown_minutes: symbolCooldownMinutes,
         max_daily_trades: maxDailyTrades,
+        max_position_notional_pct: maxPositionNotionalPct,
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
@@ -235,6 +239,7 @@ function TradingParamsSection() {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
         {[
           { label: 'Risk Per Trade', value: riskPercent, setValue: setRiskPercent, min: 0.5, max: 20, step: 0.5, suffix: '%', desc: 'Percentage of balance risked per trade (high risk = larger swings)' },
+          { label: 'Max Position Notional', value: maxPositionNotionalPct, setValue: setMaxPositionNotionalPct, min: 50, max: 1000, step: 50, suffix: '%', desc: 'Hard cap on position notional as % of balance. This CAP overrides Risk Per Trade when it binds: with ~1% stops, 50% caps risk at ~$1-2 per $200 balance (raise to ~500% to actually risk 5%)' },
           { label: 'Max Open Positions', value: maxPositions, setValue: setMaxPositions, min: 1, max: 10, step: 1, suffix: '', desc: 'Maximum concurrent positions' },
           { label: 'Daily Loss Limit', value: dailyLossLimit, setValue: setDailyLossLimit, min: 1, max: 10, step: 0.5, suffix: 'R', desc: 'Bot stops trading after this loss (in R)' },
           { label: 'Min R:R Ratio', value: rrMin, setValue: setRrMin, min: 1.5, max: 5, step: 0.5, suffix: ':1', desc: 'Minimum risk:reward to execute a trade' },

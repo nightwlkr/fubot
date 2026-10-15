@@ -58,7 +58,10 @@ class RiskService:
         max_notional = balance_usdt * max_notional_fraction
         max_qty = (max_notional / entry_price).quantize(Decimal("0.000001"))
         if qty > max_qty:
-            logger.warning(
+            # StrategyService logs the symbol + resulting effective risk; keep
+            # this generic note at debug so a capped position isn't announced
+            # twice.
+            logger.debug(
                 f"position notional capped: qty {qty} -> {max_qty} "
                 f"(notional {qty * entry_price} > {max_notional})"
             )

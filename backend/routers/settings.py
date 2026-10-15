@@ -69,6 +69,7 @@ async def get_trading_settings(
         "paper_use_real_balance", "paper_balance_usdt",
         "trade_neutral_markets", "trade_min_trend_strength", "volume_filter_enabled",
         "symbol_cooldown_minutes", "max_daily_trades",
+        "max_position_notional_pct",
     ]
     defaults = {
         "risk_percent": 1.0,
@@ -88,6 +89,7 @@ async def get_trading_settings(
         "volume_filter_enabled": False,
         "symbol_cooldown_minutes": 240,
         "max_daily_trades": 12,
+        "max_position_notional_pct": 50.0,
     }
 
     settings = {}
@@ -116,6 +118,7 @@ async def get_trading_settings(
         symbol_cooldown_minutes=int(settings.get("symbol_cooldown_minutes", 240)),
         max_daily_trades=int(settings.get("max_daily_trades", 12)),
         volume_filter_enabled=bool(settings.get("volume_filter_enabled", False)),
+        max_position_notional_pct=float(settings.get("max_position_notional_pct", 50.0)),
     )
 
 
@@ -131,6 +134,23 @@ async def update_trading_settings(
 
     for key, value in updates.items():
         await _get_or_create_setting(db, key, value)
+
+    # Apply immediately. Every engine component (BotEngine, StrategyService,
+    # SignalService, DailyResetService, PositionManager) is handed the SAME
+    # settings dict at startup, so mutating it in place hot-reloads the running
+    # engine — before this, changing a slider (Risk Per Trade, the notional cap,
+    # filters, guards) had no effect until the service was restarted.
+    try:
+        from backend.main import app, load_bot_settings
+        engine = getattr(app.state, "bot_engine", None)
+        live = getattr(engine, "settings", None) if engine is not None else None
+        if isinstance(live, dict):
+            fresh = await load_bot_settings(db)
+            # clear+update with no await between them: atomic w.r.t. the loop
+            live.clear()
+            live.update(fresh)
+    except Exception:
+        logger.exception("Failed to hot-reload bot settings")
 
     # Return updated settings
     return await get_trading_settings(request, db)
