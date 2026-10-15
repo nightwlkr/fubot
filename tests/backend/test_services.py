@@ -249,6 +249,109 @@ class TestStrategyServiceEvaluateSignal:
         assert decision.decision == "EXECUTE" and decision.paper is True
         assert decision.plan["entry"] == 100.5
 
+    def test_rr_validator_is_side_aware(self):
+        """An inverted stop must fail the R:R check.
+
+        The abs()-based check scored a LONG with its stop ABOVE the entry at
+        93:1 (risk 30.5 "on the wrong side", reward 2859) and the bot executed
+        it — Binance then rejected the SL (400 would-immediately-trigger) and
+        the filled entry was left naked (live 2026-10-15, BTCUSDT)."""
+        svc = RiskService()
+        # LONG with stop ABOVE entry / target below -> invalid, however far away
+        assert svc.validate_rr_ratio(Decimal("100"), Decimal("105"), Decimal("130"),
+                                     Decimal("3"), direction="LONG") is False
+        assert svc.validate_rr_ratio(Decimal("100"), Decimal("95"), Decimal("80"),
+                                     Decimal("3"), direction="LONG") is False
+        # correct sides still pass/fail on the ratio
+        assert svc.validate_rr_ratio(Decimal("100"), Decimal("90"), Decimal("130"),
+                                     Decimal("3"), direction="LONG") is True
+        # SHORT mirror image
+        assert svc.validate_rr_ratio(Decimal("100"), Decimal("95"), Decimal("70"),
+                                     Decimal("3"), direction="SHORT") is False
+        assert svc.validate_rr_ratio(Decimal("100"), Decimal("110"), Decimal("70"),
+                                     Decimal("3"), direction="SHORT") is True
+
+    async def test_skips_when_stop_already_breached(self):
+        """The market must still be on the correct side of the stop. Entries
+        fill at market, so a setup whose stop has been passed is void — placing
+        the SL would fail with 400 and leave the entry naked (BTCUSDT/XRPUSDT
+        2026-10-15)."""
+        # LONG zone 100-101 (mid 100.5) with stop 99.5: market 99.2 has passed
+        # the stop but still passes the +/-1% zone tolerance (>= 99.0)
+        signal = make_signal(stop_loss=Decimal("99.5"))
+        decision = await make_strategy(FakeBinance(price=99.2), FakeOrderService()
+                                       ).evaluate_signal(signal, paper_mode=False)
+        assert decision.decision == "SKIP"
+        assert "stop already breached" in decision.skip_reason, decision.skip_reason
+
+        # SHORT zone 100-101 with stop 100.8: market 101.0 has passed the stop
+        short = make_signal(direction="SHORT", entry_zone_min=Decimal("100"),
+                            entry_zone_max=Decimal("101"), stop_loss=Decimal("100.8"),
+                            take_profit=Decimal("70"), rr_ratio=Decimal("3"))
+        decision = await make_strategy(FakeBinance(price=101.0), FakeOrderService()
+                                       ).evaluate_signal(short, paper_mode=False)
+        assert decision.decision == "SKIP"
+        assert "stop already breached" in decision.skip_reason, decision.skip_reason
+
+    async def test_failed_live_flow_flattens_naked_position(self):
+        """A live-flow exception after the entry filled must not leave an
+        unprotected position on the exchange — flatten it."""
+        binance = FakeBinance(price=100.5)
+        closed = []
+
+        async def boom(symbol, side, stop_price, quantity):
+            raise RuntimeError("Binance API Error 400: would immediately trigger")
+
+        async def get_position(symbol):
+            return {"symbol": symbol, "side": "LONG", "quantity": 1.0}
+
+        async def no_stops(symbol):
+            return []
+
+        async def market_close(symbol, side, qty):
+            closed.append((symbol, side, qty))
+            return {"orderId": 7}
+
+        binance.modify_position_stop = boom
+        binance.get_position = get_position
+        binance.get_open_algo_orders = no_stops
+        binance.place_market_order = market_close
+
+        decision = await make_strategy(binance, FakeOrderService()).evaluate_signal(
+            make_signal(), paper_mode=False)
+        assert decision.decision == "SKIP"
+        # place_market_order is also the entry leg, so look for the close leg
+        assert ("BTCUSDT", "SELL", 1.0) in closed, f"naked position not flattened: {closed}"
+
+    async def test_failed_live_flow_keeps_position_when_stop_rests(self):
+        """If a stop IS resting, the failure was elsewhere — keep the position
+        (the reconcile adopts it with its SL/TP) instead of closing it."""
+        binance = FakeBinance(price=100.5)
+        closed = []
+
+        async def tp_boom(symbol, side, tp_price, quantity):
+            raise RuntimeError("Binance API Error 400")
+
+        async def get_position(symbol):
+            return {"symbol": symbol, "side": "LONG", "quantity": 1.0}
+
+        async def has_stop(symbol):
+            return [{"algoId": 1, "orderType": "STOP_MARKET"}]
+
+        async def market_close(symbol, side, qty):
+            closed.append((symbol, side, qty))
+
+        binance.place_take_profit_order = tp_boom
+        binance.get_position = get_position
+        binance.get_open_algo_orders = has_stop
+        binance.place_market_order = market_close
+
+        decision = await make_strategy(binance, FakeOrderService()).evaluate_signal(
+            make_signal(), paper_mode=False)
+        assert decision.decision == "SKIP"
+        assert not [c for c in closed if c[1] == "SELL"], \
+            f"protected position was closed: {closed}"
+
     async def test_notional_cap_is_configurable(self):
         """The position-notional cap silently overrode risk_percent: with ~1%
         stops the 50%-of-balance cap turned a 5% risk target into ~$1-2 per
@@ -318,8 +421,10 @@ class TestEntryFillAndRiskGuard:
     async def test_skips_degenerate_risk_distance(self):
         # entry zone [100,101] mid 100.5; stop 100.45 -> diff 0.05 < min (0.0502).
         # TP set so R:R still passes (3.0) — the min-risk guard must catch it.
+        # Market must sit ABOVE the stop (100.45) or the newer side check fires.
         signal = make_signal(stop_loss=Decimal("100.45"), take_profit=Decimal("100.65"))
-        decision = await make_strategy().evaluate_signal(signal, paper_mode=True)
+        decision = await make_strategy(FakeBinance(price=100.5)).evaluate_signal(
+            signal, paper_mode=True)
         assert decision.decision == "SKIP"
         assert "too small" in decision.skip_reason
 

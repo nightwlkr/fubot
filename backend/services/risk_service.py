@@ -74,12 +74,30 @@ class RiskService:
         stop_loss: Decimal,
         take_profit: Decimal,
         min_rr: Decimal,
+        direction: str | None = None,
     ) -> bool:
-        """True when the setup meets or exceeds the minimum R:R."""
-        risk = abs(entry - stop_loss)
-        reward = abs(take_profit - entry)
-        if risk == Decimal("0"):
-            return False
+        """True when the setup meets or exceeds the minimum R:R.
+
+        With `direction` ("LONG"/"SHORT") the check is SIDE-AWARE: the stop must
+        sit on the losing side and the target on the winning side of `entry`.
+        The abs()-based fallback cannot see an inverted stop — a LONG whose stop
+        is ABOVE the entry scored 93:1 (risk 30.5 on the wrong side, reward
+        2859) and got executed, then Binance rejected the SL with 400 "would
+        immediately trigger", leaving the filled entry unprotected (live
+        2026-10-15, BTCUSDT/XRPUSDT).
+        """
+        if direction is None:
+            risk = abs(entry - stop_loss)
+            reward = abs(take_profit - entry)
+            if risk == Decimal("0"):
+                return False
+            return (reward / risk) >= min_rr
+
+        long_side = direction.upper() == "LONG"
+        risk = (entry - stop_loss) if long_side else (stop_loss - entry)
+        reward = (take_profit - entry) if long_side else (entry - take_profit)
+        if risk <= Decimal("0") or reward <= Decimal("0"):
+            return False  # stop and/or target on the wrong side of entry
         return (reward / risk) >= min_rr
 
     def hit_daily_loss_limit(self, limit_r: Decimal) -> bool:

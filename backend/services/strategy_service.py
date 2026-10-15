@@ -140,6 +140,27 @@ class StrategyService:
             if market_price > float(signal.entry_zone_max) * 1.01:
                 return TradeDecision("SKIP", skip_reason="Price already above zone")
 
+        # 4b. The stop (and target) must still be on the CORRECT SIDE of the
+        #     market. Entries fill at market, so a setup whose stop has already
+        #     been passed is void — and placing the SL then fails with 400
+        #     "would immediately trigger", aborting the flow AFTER the entry
+        #     filled and leaving the position NAKED (live 2026-10-15: XRPUSDT
+        #     and BTCUSDT). The abs()-based R:R check cannot see this.
+        stop_px = float(signal.stop_loss)
+        tp_px = float(signal.take_profit)
+        if signal.direction == "LONG":
+            void_reason = ("stop already breached by the market"
+                           if stop_px >= market_price else
+                           "target already reached" if tp_px <= market_price else None)
+        else:
+            void_reason = ("stop already breached by the market"
+                           if stop_px <= market_price else
+                           "target already reached" if tp_px >= market_price else None)
+        if void_reason:
+            signal.status = "SKIPPED"
+            await self._mark_signal(signal.db_id, "SKIPPED", f"Setup void: {void_reason}")
+            return TradeDecision("SKIP", skip_reason=f"Setup void: {void_reason}")
+
         # Fill at the signal's entry-zone midpoint, NOT the live market price.
         # Filling at market could put entry ~at the stop, shrinking the realized
         # risk to near zero and turning any noise into -2R. The zone midpoint
@@ -149,7 +170,8 @@ class StrategyService:
         # 5. Risk validation + sizing
         min_rr = Decimal(str(self.settings.get("rr_min", 3.0)))
         if not self.risk_svc.validate_rr_ratio(
-            entry, signal.stop_loss, signal.take_profit, min_rr
+            entry, signal.stop_loss, signal.take_profit, min_rr,
+            direction=signal.direction,
         ):
             signal.status = "SKIPPED"
             await self._mark_signal(signal.db_id, "SKIPPED", "R:R below minimum")
@@ -161,7 +183,8 @@ class StrategyService:
         # zone of 1.3258-1.3275 (planned 3.25:1) but filled at 1.3131, leaving
         # ~1.1:1 while stop/TP stayed at the planned levels.
         if not paper_mode and not self.risk_svc.validate_rr_ratio(
-            Decimal(str(market_price)), signal.stop_loss, signal.take_profit, min_rr
+            Decimal(str(market_price)), signal.stop_loss, signal.take_profit, min_rr,
+            direction=signal.direction,
         ):
             signal.status = "SKIPPED"
             await self._mark_signal(
@@ -305,6 +328,13 @@ class StrategyService:
                 )
             except Exception as exc:
                 logger.error("[%s] Live order flow failed: %s", symbol, exc)
+                # The MARKET entry may already have filled before the failure.
+                # Never leave an UNPROTECTED position behind (live 2026-10-15:
+                # a rejected SL left XRPUSDT and BTCUSDT open and naked for
+                # hours). If the exchange holds a position for this symbol with
+                # no resting stop, flatten it. If a stop IS resting, keep the
+                # position — the reconcile adopts it with its SL/TP.
+                await self._flatten_if_unprotected(symbol)
                 # Best-effort: undo the position row we just created so a failed
                 # live entry doesn't leave an OPEN position with no exchange order.
                 await self._close_position_row(position_id)
@@ -452,6 +482,46 @@ class StrategyService:
                 await session.commit()
         except Exception:
             logger.exception("Failed to mark signal %s as %s", db_id, status)
+
+    async def _flatten_if_unprotected(self, symbol: str) -> None:
+        """Close an exchange position left naked by a failed live order flow.
+
+        Called after any live-flow exception. The MARKET entry can fill before a
+        later leg fails (SL/TP placement, logging); the DB row is then dropped,
+        so without this the position sits on the exchange with no stop — and the
+        reconcile can only adopt it UNPROTECTED (SL=None/TP=None).
+        """
+        if self.binance is None:
+            return
+        try:
+            pos = await self.binance.get_position(symbol)
+        except Exception as exc:
+            logger.error("[%s] Could not verify position after failed flow: %s", symbol, exc)
+            return
+        qty = float((pos or {}).get("quantity", 0) or 0)
+        if qty <= 0:
+            return  # entry never filled — nothing to clean up
+
+        try:
+            algos = await self.binance.get_open_algo_orders(symbol)
+        except Exception:
+            algos = []
+        if any(a.get("orderType") == "STOP_MARKET" for a in algos):
+            logger.warning(
+                "[%s] Live flow failed but a resting SL exists — leaving the "
+                "position for reconcile to adopt (qty %s)", symbol, qty)
+            return
+
+        close_side = "SELL" if (pos.get("side") or "LONG") == "LONG" else "BUY"
+        try:
+            await self.binance.place_market_order(symbol, close_side, qty)
+            logger.error(
+                "[%s] Live flow failed with an UNPROTECTED %s %s on the exchange "
+                "— flattened at market", symbol, pos.get("side"), qty)
+        except Exception as exc:
+            logger.critical(
+                "[%s] FAILED to flatten naked %s %s after flow failure: %s — "
+                "manual intervention required", symbol, pos.get("side"), qty, exc)
 
     async def _close_position_row(self, position_id: Optional[int]) -> None:
         """Mark a just-created position row CLOSED after a failed live entry.
