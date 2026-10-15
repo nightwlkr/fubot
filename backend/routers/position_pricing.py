@@ -30,6 +30,18 @@ def get_engine_mode(request) -> str:
     return getattr(engine, "_mode", "paper") if engine is not None else "paper"
 
 
+def _get_binance(request):
+    """The engine's authenticated BinanceService (creds live in its instance,
+    loaded from the Account table at startup). A fresh service would 401 on
+    signed endpoints like positionRisk — only its public endpoints work."""
+    engine = getattr(request.app.state, "bot_engine", None)
+    binance = getattr(engine, "binance", None) if engine is not None else None
+    if binance is not None:
+        return binance
+    from backend.services.binance_service import BinanceService
+    return BinanceService()
+
+
 async def fetch_pricing(request, symbols: list[str]) -> dict[str, dict[str, Any]]:
     """Per-symbol pricing for open positions.
 
@@ -37,10 +49,8 @@ async def fetch_pricing(request, symbols: list[str]) -> dict[str, dict[str, Any]
     unrealized_pnl, live: bool}}. Live mode queries positionRisk once; any
     failure falls back to mark-price computation (live: False).
     """
-    from backend.services.binance_service import BinanceService
-
     out: dict[str, dict[str, Any]] = {}
-    binance = BinanceService()
+    binance = _get_binance(request)
 
     if get_engine_mode(request) == "live":
         try:
