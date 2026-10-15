@@ -8,7 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
-Status: 157 passing, 0 xfail (2026-10-15 — PnL/ROI-parity regressions: live-entry fill-record via get_order fallback, fill-fetch-failure survival, orphan-algo-order sweep on close; FakeBinance stub updated to the exchange-response contract)
+Status: 160 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile records exchange-only positions + adopts their resting SL/TP, close flattens a leftover exchange position, failed BE-trail reverts the DB stop, orphan-algo-order sweep, live-entry fill-record)
 
 ## Local Contracts
 
@@ -37,7 +37,7 @@ Status: 157 passing, 0 xfail (2026-10-15 — PnL/ROI-parity regressions: live-en
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 157 passed
+- `PYTHONPATH=. pytest tests/backend/ -q` — 160 passed
 - A failing test blocks completion of the change that broke it
 
 ## Child DOX Index
