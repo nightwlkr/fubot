@@ -39,7 +39,7 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 | `database.py` | Async engine, `AsyncSessionLocal`, `Base`, `get_db` dependency |
 | `encryption.py` | encrypt_value / decrypt_value for API credentials |
 | `models/` | 10 SQLAlchemy models: user, account, symbol, setting, signal, position, trade, order, equity_log, daily_summary |
-| `routers/` | 9 route modules (28 endpoints): auth, bot, dashboard, trades, signals, positions, orders, settings, performance |
+| `routers/` | 9 route modules (28 endpoints): auth, bot, dashboard, signals, positions, orders, settings, performance — plus `routers/position_pricing.py`, the shared open-position pricing helper (exchange-truth in live mode, mark price in paper) |
 | `schemas/` | Pydantic request/response models per router |
 | `services/` | auth_service, binance_service, binance_ws, order_service, risk_service, strategy_service, signal_service, alert_service |
 | `backtest.py` | Backtest harness — replays the scan pipeline over historical klines (no lookahead); CLI in `scripts/backtest.py` |
@@ -62,6 +62,11 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 - **Paper mode records everything**: simulated fills + OPEN Position rows + signal TRIGGERED. This deliberately deviates from PHASE3_STEP3's "no records in paper" because PHASE3_STEP7's 72h paper run and the dashboard need the data.
 - `AlertService` methods are async (they broadcast via `ws_manager`); the engine-side callers await them.
 - 2026-10-11 second-pass fixes: `/fapi` paths + depth endpoint + reduce-only closing orders, inverted R:R math in FVG/CHoCH/3-candle evaluators, FVG fill semantics + zone bounds, BotEngine/PositionManager wiring, `/ws` route + double-accept + receive-loop disconnects, async AlertService, `get_status` un-awaited coroutine. All covered by `tests/backend/`.
+- **Open-position pricing parity (2026-10-15)**: `routers/position_pricing.py` serves both position endpoints. LIVE mode uses the engine's authenticated Binance client (a fresh `BinanceService()` has no creds — it 401s signed endpoints) and reads `positionRisk` per symbol: exchange entryPrice/positionAmt/markPrice/unRealizedProfit/leverage replace the DB recomputation, plus `unrealized_pnl_pct` = PnL ÷ initial margin (Binance's ROI definition). PAPER mode computes from the **mark price** (`fapi/v1/premiumIndex` — the Binance app default; `fapi/v1/ticker/markPrice` never existed). Live entries record the exchange's executedQty + avgPrice on the position row (`get_order` fallback, strictly best-effort — a failed fill fetch must never abort an already-filled entry).
+- **Reconciliation runs BOTH directions** (`PositionManager._reconcile_exchange_positions`, every 5 min in live mode): exchange-only positions → recorded OPEN (existing); DB-OPEN rows with no exchange position → closed as `EXTERNAL_CLOSE` (a new exit_reason: resting SL/TP cancelled, NO redundant market close). Rows younger than 120s are skipped (positionRisk race). `get_position_income` is scoped to the position's open time so a close never sums an earlier same-symbol position's PnL.
+- **`_signed_request` code semantics**: algo endpoints return `{"code": 200, "msg": "success"}` on SUCCESS — only non-200 codes raise. Treating 200 as an error silently disabled every `cancel_algo_order` (orphan SL/TP never auto-cancelled) and BE-trailing's `_cancel_active_sl` since the 2026-10-15 algo fix.
+- `_round_qty`/`_round_price` are Decimal-based: `math.floor(qty/step)` mis-floors exact float multiples (89.3 → 89.2), leaving a 0.1-lot slice uncovered by reduce-only SL/TP.
+- `Position.opened_at` defaults to aware UTC now (was naive `utcnow()` → −2h skew that corrupted the reconcile age guard and income windows).
 
 ### Coding Rules
 - Use async/await for all I/O operations
@@ -72,7 +77,7 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 142 passing (also e2e trade flow, -3R hard stop, security audit, payload contracts, backtest)
+- `PYTHONPATH=. pytest tests/backend/ -q` — 156 passing (e2e trade flow, -3R hard stop, security audit, payload contracts, live-entry fill-record + fill-fetch-failure regressions included)
 - `PYTHONPATH=. python -c "import backend.main"` — app imports without errors
 - `python -m uvicorn backend.main:app --reload` — boots and serves; local dev currently on port 8001 (a stale process holds 8000)
 - No hardcoded credentials — everything from env vars

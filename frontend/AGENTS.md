@@ -31,7 +31,7 @@ Status: **PHASE5 complete** — builds clean; bot-control and live-data flows wi
 
 ### Pages
 1. **Login** (`/login`) — Form with validation, JWT auth, error display
-2. **Overview** (`/`) — BotStatusCard, PnLCard, PositionsTable, EquityCurve (LiveChart)
+2. **Overview** (`/`) — BotStatusCard, PnLCard, PositionsTable (PnL USD + ROI % — both exchange-truth in live mode, see backend `routers/position_pricing.py`), EquityCurve (LiveChart)
 3. **Trade Log** (`/trades`) — Filterable, paginated table + CSV export
 4. **Scanner** (`/scanner`) — Signal cards, filter tabs, auto-refresh
 5. **Performance** (`/performance`) — Equity chart, monthly returns, R distribution
