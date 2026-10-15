@@ -192,10 +192,10 @@ async def _scenario():
         assert trade.exit_reason == "TP_HIT"
         assert trade.strategy_type == "FVG"
         # entry 108, exit 124, qty 19.7723 → 16 * 19.7723 = 316.36
-        # paper mode now deducts estimated fees: (108*19.7723 + 124*19.7723) * 0.0005 = 2.30
-        # so PnL = 316.36 - 2.30 = 314.06
-        assert round(float(trade.pnl_usdt), 2) == 314.06
-        # pnl_r = pnl / (initial_risk 5.05758 * qty) = 314.06 / 100 = 3.14
+        # paper mode now deducts estimated fees: (108*19.7723 + 124*19.7723) * 0.00045 = 2.07
+        # so PnL = 316.36 - 2.07 = 314.29
+        assert round(float(trade.pnl_usdt), 2) == 314.29
+        # pnl_r = pnl / (initial_risk 5.05758 * qty) = 314.29 / 100 = 3.14
         assert round(float(trade.pnl_r), 2) == 3.14
         result["trade"] = {"pnl_usdt": float(trade.pnl_usdt), "pnl_r": float(trade.pnl_r),
                            "reason": trade.exit_reason}
@@ -231,6 +231,6 @@ def test_e2e_trade_flow_signal_to_pnl():
     from backend.services.signal_service import Signal  # noqa: F401  (import sanity)
     result = asyncio.run(_scenario())
     assert result["trade"]["reason"] == "TP_HIT"
-    assert result["trade"]["pnl_r"] == pytest.approx(3.1406, abs=0.01)
+    assert result["trade"]["pnl_r"] == pytest.approx(3.1429, abs=0.01)
     assert result["summary"]["trades_delta"] == 1
-    assert result["summary"]["pnl_r_delta"] == pytest.approx(3.1406, abs=0.01)
+    assert result["summary"]["pnl_r_delta"] == pytest.approx(3.1429, abs=0.01)

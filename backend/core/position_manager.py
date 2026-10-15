@@ -428,13 +428,14 @@ class PositionManager:
                     pnl_usdt = (exit_price - entry) * qty
                 else:
                     pnl_usdt = (entry - exit_price) * qty
-                
+
                 # Estimate fees for paper mode (realistic simulation)
-                # Binance taker fee: 0.05% per side (entry + exit)
+                # Binance taker fee with BNB discount: 0.045% per side (entry + exit)
+                # Standard rate is 0.05%, but BNB holders get 10% discount
                 if self._mode == "paper":
                     notional_entry = entry * qty
                     notional_exit = exit_price * qty
-                    fee_rate = 0.0005  # 0.05% taker fee
+                    fee_rate = 0.00045  # 0.045% taker fee (BNB discount)
                     fees = (notional_entry + notional_exit) * fee_rate
                     pnl_usdt -= fees
                     logger.debug(
