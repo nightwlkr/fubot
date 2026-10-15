@@ -229,6 +229,26 @@ class TestStrategyServiceEvaluateSignal:
         kinds = [c[0] for c in binance.calls]
         assert "STOP_MARKET" in kinds and "TAKE_PROFIT_MARKET" in kinds
 
+    async def test_live_skips_when_rr_collapsed_at_market_price(self):
+        """LIVE fills at MARKET, so the realised R:R is set by the fill price —
+        not the zone midpoint. XRP 2026-10-15 had a 3.25:1 plan at the midpoint
+        but filled 1% away (~1.1:1). Market price 102 vs zone 100-101/stop 90/
+        tp 132 => 2.5:1 at the live price, 3.0:1 at the midpoint."""
+        binance = FakeBinance(price=102.0)
+        decision = await make_strategy(binance, FakeOrderService()).evaluate_signal(
+            make_signal(), paper_mode=False)
+        assert decision.decision == "SKIP"
+        assert "live market price" in decision.skip_reason, decision.skip_reason
+
+    async def test_paper_mode_uses_midpoint_rr(self):
+        """Paper fills at the zone midpoint, so the live-price gate must NOT
+        apply — the same setup executes in paper mode."""
+        binance = FakeBinance(price=102.0)
+        decision = await make_strategy(binance, FakeOrderService()).evaluate_signal(
+            make_signal(), paper_mode=True)
+        assert decision.decision == "EXECUTE" and decision.paper is True
+        assert decision.plan["entry"] == 100.5
+
     async def test_skips_when_position_already_open(self):
         order_svc = FakeOrderService(open_position={"quantity": 1})
         decision = await make_strategy(order_svc=order_svc).evaluate_signal(make_signal(), paper_mode=True)
@@ -1136,6 +1156,136 @@ class TestLiveModeSafety:
         finally:
             async with Session() as s:
                 await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
+    @staticmethod
+    def _bos_candles():
+        """30 flat 5m candles with a BEARISH BOS at index 22.
+
+        Structure: pivot low A=100 at index 5 (needs 5 higher lows either side),
+        pivot low B=105 at index 16, then index 22 breaks below A (low 99) —
+        detect_bos reports that break as a BEARISH BOS formed at candle 22's
+        close_time. Highs stay flat so no pivot highs / bullish BOS exist.
+        """
+        base = 1_700_000_000_000
+        lows = {5: 100.0, 16: 105.0, 22: 99.0}
+        return [
+            {"open_time": base + i * 300_000,
+             "close_time": base + (i + 1) * 300_000,
+             "open": 105.0, "high": 110.0,
+             "low": lows.get(i, 110.0), "close": 105.0,
+             "volume": 1.0}
+            for i in range(30)
+        ]
+
+    def test_new_bos_after_entry_ignores_preexisting_breaks(self):
+        """BE-trailing must wait for a BOS formed AT/AFTER entry. The old check
+        used structural.last_bos, which for the setup that produced the entry is
+        a pre-existing break — so every stop moved to BE within ~30s (13/16
+        trades exited ~0R on 2026-10-15)."""
+        from backend.core.position_manager import _new_bos_after_entry
+        candles = self._bos_candles()
+        bos_ms = candles[22]["close_time"]
+        assert _new_bos_after_entry(candles, "SYN", "BEARISH", bos_ms + 1) is None, \
+            "a BOS formed BEFORE entry must not trigger BE-trailing"
+        assert _new_bos_after_entry(candles, "SYN", "BEARISH", bos_ms - 1) is not None, \
+            "a BOS formed AFTER entry must trigger BE-trailing"
+        assert _new_bos_after_entry(candles, "SYN", "BULLISH", bos_ms - 1) is None, \
+            "an opposite-direction BOS must not trigger BE-trailing"
+
+    async def test_be_trail_blocked_by_preexisting_bos(self):
+        """End-to-end: with only a pre-existing bearish BOS, a short's stop must
+        stay at its structural level (no DB change, no exchange re-placement)."""
+        from sqlalchemy import delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "BOSGATETST"
+        candles = self._bos_candles()
+        replaced = []
+        try:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                # entry happened AFTER the only BOS in the series
+                p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=1.0,
+                             stop_loss=105.0, take_profit=90.0, status="OPEN",
+                             opened_at=datetime.fromtimestamp(
+                                 (candles[22]["close_time"] + 60_000) / 1000, tz=timezone.utc))
+                s.add(p); await s.flush()
+                pos_id = p.id
+                await s.commit()
+
+            class RecBinance:
+                async def get_klines(self, symbol, interval="5m", limit=100):
+                    return candles
+                async def modify_position_stop(self, symbol, side, stop_price, qty):
+                    replaced.append(stop_price)
+                    return {"orderId": 2}
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            pos = {"id": pos_id, "symbol": SYM, "side": "SHORT", "quantity": 1.0,
+                   "entry_price": 100.0, "stop_loss": 105.0, "take_profit": 90.0,
+                   "opened_at": datetime.fromtimestamp(
+                       (candles[22]["close_time"] + 60_000) / 1000, tz=timezone.utc)}
+            await pm._check_be_trailing(pos, current_price=99.0)
+
+            assert replaced == [], f"BE stop placed off a pre-existing BOS: {replaced}"
+            async with Session() as s:
+                row = await s.get(Position, pos_id)
+                assert float(row.stop_loss) == 105.0, \
+                    f"DB stop moved to BE without a new BOS: {row.stop_loss}"
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
+    async def test_fill_update_recomputes_frozen_risk_distance(self):
+        """The frozen risk distance must follow the REAL entry — pnl_r is
+        measured against it at close (XRP read +1.26R off the planned midpoint
+        distance instead of +0.64R off the actual fill)."""
+        from sqlalchemy import delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.models.position import Position
+        from backend.services.strategy_service import StrategyService
+        from backend.services.risk_service import RiskService
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "FILLTST"
+        try:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=5.0,
+                             stop_loss=105.0, take_profit=90.0, status="OPEN",
+                             initial_risk_distance=5.0)
+                s.add(p); await s.flush()
+                pos_id = p.id
+                await s.commit()
+
+            svc = StrategyService(RiskService(), order_svc=None, binance=None,
+                                  session_factory=Session, settings={})
+            await svc._update_position_fill(pos_id, 102.0, 7.0)
+
+            async with Session() as s:
+                row = await s.get(Position, pos_id)
+                assert float(row.entry_price) == 102.0
+                assert float(row.quantity) == 7.0
+                assert float(row.initial_risk_distance) == 3.0, \
+                    f"risk distance not recomputed from the fill: {row.initial_risk_distance}"
+        finally:
+            async with Session() as s:
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()

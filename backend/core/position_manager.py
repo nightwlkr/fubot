@@ -13,13 +13,48 @@ from backend.models.position import Position
 from backend.models.trade import Trade
 from backend.models.signal import Signal
 from backend.services.binance_service import BinanceService
-from backend.indicators.structural import analyze_structure
-from backend.indicators.atr import calculate_atr
+from backend.indicators.bos import detect_bos
 from backend.core.daily_reset import DailyResetService
 from backend.core.websocket_manager import ws_manager
 from backend.services.alert_service import AlertService
 
 logger = logging.getLogger(__name__)
+
+
+def _to_epoch_ms(value) -> Optional[float]:
+    """Normalize an epoch-ms int (Binance klines) or datetime to epoch ms."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.timestamp() * 1000
+    return None
+
+
+def _new_bos_after_entry(candles: list, symbol: str, wanted_bos: str,
+                         entry_ms: Optional[float]):
+    """Newest same-direction BOS formed AT/AFTER the entry, else None.
+
+    BE-trailing must wait for the trade to break structure in its own favour.
+    Using structural.last_bos instead picked up whatever break produced the
+    entry, moving every stop to breakeven within ~30s (13/16 trades on
+    2026-10-15 exited ~0R).
+    """
+    if not candles or entry_ms is None:
+        return None
+    newest = None
+    newest_ms: Optional[float] = None
+    for bos in detect_bos(candles, symbol, "5m"):
+        if bos.direction != wanted_bos:
+            continue
+        formed_ms = _to_epoch_ms(getattr(bos, "formed_at", None))
+        if formed_ms is None or formed_ms < entry_ms:
+            continue
+        if newest_ms is None or formed_ms > newest_ms:
+            newest, newest_ms = bos, formed_ms
+    return newest
 
 
 class PositionManager:
@@ -357,10 +392,21 @@ class PositionManager:
             candles = await self.binance.get_klines(position["symbol"], "5m", 100)
             if not candles:
                 return
-            struct = analyze_structure(candles, position["symbol"], "5m", calculate_atr(candles))
-
-            if struct.last_bos and struct.last_bos.direction == wanted_bos:
-                await self._trail_stop_to_be(position["id"], be_price)
+            # Require a BOS formed AT/AFTER entry. The old check used
+            # struct.last_bos, which for any signal that produced the entry is
+            # a PRE-EXISTING break — so the stop jumped to BE on the first REST
+            # pass (~30s) and ordinary noise ended the trade (13/16 trades on
+            # 2026-10-15 exited ~0R). Now the trade must break structure in its
+            # own favour before the stop is moved.
+            entry_ms = _to_epoch_ms(position.get("opened_at"))
+            newest = _new_bos_after_entry(
+                candles, position["symbol"], wanted_bos, entry_ms)
+            if newest is None:
+                return
+            logger.info(
+                f"[{position['symbol']}] New {wanted_bos} BOS after entry "
+                f"(formed_at={newest.formed_at}) — trailing stop to BE")
+            await self._trail_stop_to_be(position["id"], be_price)
         except Exception as e:
             logger.debug(f"BE trailing check failed for {position['symbol']}: {e}")
 

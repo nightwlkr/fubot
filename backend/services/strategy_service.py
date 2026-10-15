@@ -155,6 +155,20 @@ class StrategyService:
             await self._mark_signal(signal.db_id, "SKIPPED", "R:R below minimum")
             return TradeDecision("SKIP", skip_reason="R:R below minimum")
 
+        # 5b. LIVE fills happen at MARKET price, so the realised R:R is set by
+        # the price we actually get, not by the zone midpoint. Re-validate at
+        # the live price and skip when the edge is gone — XRP 2026-10-15 had a
+        # zone of 1.3258-1.3275 (planned 3.25:1) but filled at 1.3131, leaving
+        # ~1.1:1 while stop/TP stayed at the planned levels.
+        if not paper_mode and not self.risk_svc.validate_rr_ratio(
+            Decimal(str(market_price)), signal.stop_loss, signal.take_profit, min_rr
+        ):
+            signal.status = "SKIPPED"
+            await self._mark_signal(
+                signal.db_id, "SKIPPED", "R:R below minimum at live price")
+            return TradeDecision(
+                "SKIP", skip_reason="R:R below minimum at live market price")
+
         # Min-risk guard: a degenerate entry-to-stop distance makes any normal
         # adverse move a huge |R| (this caused -2R paper losses when entry
         # filled ~at the stop). Require the risk to be at least 0.05% of the
@@ -373,27 +387,32 @@ class StrategyService:
         The initial _create_position stores the planned size and the signal's
         entry-zone midpoint, but Binance rounds qty to LOT_SIZE and fills at
         market. Recording the exchange's numbers keeps dashboard PnL/ROI in
-        sync with Binance.
+        sync with Binance, and the FROZEN risk distance is recomputed from the
+        real entry — pnl_r is measured against it at close, so a midpoint-based
+        distance misreports R whenever the fill drifts (XRP 2026-10-15: planned
+        0.0138 vs real 0.02735, i.e. the same trade read +1.26R instead of
+        +0.64R).
         """
         if self.session_factory is None or position_id is None:
             return
-        values = {}
-        if actual_price and actual_price > 0:
-            values["entry_price"] = actual_price
-        if actual_qty is not None and actual_qty > 0:
-            values["quantity"] = actual_qty
-        if not values:
+        if not ((actual_price and actual_price > 0)
+                or (actual_qty is not None and actual_qty > 0)):
             return
         try:
             async with self.session_factory() as session:
-                await session.execute(
-                    update(PositionModel)
-                    .where(PositionModel.id == position_id)
-                    .values(**values)
-                )
+                row = await session.get(PositionModel, position_id)
+                if row is None:
+                    return
+                if actual_price and actual_price > 0:
+                    row.entry_price = actual_price
+                    if row.stop_loss is not None:
+                        row.initial_risk_distance = abs(
+                            float(actual_price) - float(row.stop_loss))
+                if actual_qty is not None and actual_qty > 0:
+                    row.quantity = actual_qty
                 await session.commit()
         except Exception:
-            logger.exception("Failed to update position %s fill to %s", position_id, values)
+            logger.exception("Failed to update position %s fill", position_id)
 
     async def _mark_signal(self, db_id: Optional[int], status: str,
                            skip_reason: Optional[str] = None) -> None:
