@@ -8,7 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
-Status: 167 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile records exchange-only positions + adopts their resting SL/TP, close flattens a leftover exchange position, failed BE-trail reverts the DB stop, NEW-BOS-after-entry gate, live R:R gate at market price, fill recomputes the frozen risk distance, orphan-algo-order sweep, notional cap driven by setting, settings hot-reload reaches the engine)
+Status: 171 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile records exchange-only positions + adopts their resting SL/TP, close flattens a leftover exchange position, failed BE-trail reverts the DB stop, BE-trail trigger R (+ configurable) and one-way behaviour, LIMIT entry fill recorded from the order detail, unfilled-limit cancel+skip, breached-stop skip, side-aware R:R, flatten-if-unprotected, notional cap driven by setting, settings hot-reload)
 
 ## Local Contracts
 
@@ -33,11 +33,11 @@ Status: 167 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile 
 - Import backend modules inside test functions or after the `sys.path` fix in `conftest.py`
 - Expected values come from the definitions (SMA mean over the window, Wilder RSI/ATR, position-size math) — never snapshot the implementation's own output
 - Keep pure-unit tests DB-free; `test_signal_service.py` and `test_api_smoke.py` own the DB-touching cases (dedicated engines / fresh lifespans, self-cleaning)
-- Uncovered today: `position_manager` BE-trailing (needs live 5m BOS), `binance_ws`, routers' filter paths with data. Add per-module files as those get exercised (see backend/AGENTS.md Open Gaps)
+- Uncovered today: live exchange fills (LIMIT-entry path), `binance_ws`, routers' filter paths with data. Add per-module files as those get exercised (see backend/AGENTS.md Open Gaps)
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 167 passed
+- `PYTHONPATH=. pytest tests/backend/ -q` — 171 passed
 - A failing test blocks completion of the change that broke it
 
 ## Child DOX Index
