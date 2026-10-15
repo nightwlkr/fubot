@@ -13,48 +13,11 @@ from backend.models.position import Position
 from backend.models.trade import Trade
 from backend.models.signal import Signal
 from backend.services.binance_service import BinanceService
-from backend.indicators.bos import detect_bos
 from backend.core.daily_reset import DailyResetService
 from backend.core.websocket_manager import ws_manager
 from backend.services.alert_service import AlertService
 
 logger = logging.getLogger(__name__)
-
-
-def _to_epoch_ms(value) -> Optional[float]:
-    """Normalize an epoch-ms int (Binance klines) or datetime to epoch ms."""
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return dt.timestamp() * 1000
-    return None
-
-
-def _new_bos_after_entry(candles: list, symbol: str, wanted_bos: str,
-                         entry_ms: Optional[float]):
-    """Newest same-direction BOS formed AT/AFTER the entry, else None.
-
-    BE-trailing must wait for the trade to break structure in its own favour.
-    Using structural.last_bos instead picked up whatever break produced the
-    entry, moving every stop to breakeven within ~30s (13/16 trades on
-    2026-10-15 exited ~0R).
-    """
-    if not candles or entry_ms is None:
-        return None
-    newest = None
-    newest_ms: Optional[float] = None
-    for bos in detect_bos(candles, symbol, "5m"):
-        if bos.direction != wanted_bos:
-            continue
-        formed_ms = _to_epoch_ms(getattr(bos, "formed_at", None))
-        if formed_ms is None or formed_ms < entry_ms:
-            continue
-        if newest_ms is None or formed_ms > newest_ms:
-            newest, newest_ms = bos, formed_ms
-    return newest
 
 
 class PositionManager:
@@ -268,6 +231,9 @@ class PositionManager:
                     "take_profit": float(r["take_profit"]) if r["take_profit"] is not None else None,
                     "signal_id": r["signal_id"],
                     "opened_at": r["opened_at"],
+                    "initial_risk_distance": (
+                        float(r["initial_risk_distance"])
+                        if r["initial_risk_distance"] is not None else None),
                 }
                 for r in rows
             ]
@@ -366,49 +332,43 @@ class PositionManager:
                 await self._close_position(position, "SL_HIT", current_price)
 
     async def _check_be_trailing(self, position: dict, current_price: float):
-        """
-        If price has moved in favor enough to create a new BOS, move SL to BE.
+        """Move the stop to break-even once the trade is `be_trail_trigger_r` R
+        in profit (default +0.5R, price-based).
 
-        Rules:
-        - Only move SL to BE once (to entry price, one-way)
-        - Trigger: new BOS in trade's favor on 5m timeframe
+        Previously this required a "new BOS after entry" (a 5m structural break).
+        The 2026-10-15 audit showed that at the strategy's ~80% stop-out rate an
+        un-trailed structural stop costs a full -1R on every failure, flipping
+        expectancy negative (0.8×(-1R) + 0.2×3R = -0.2R/trade) — the BE stop was
+        what made the same entries profitable (~+0.6R/trade). A price-based
+        trigger is always reachable, unlike a structural break.
+
+        Rules: one-way (stop only moves toward BE), only after entry is in
+        profit by the trigger distance, and never before there is measurable
+        risk (initial_risk_distance).
         """
         be_price = position["entry_price"]
+        risk = position.get("initial_risk_distance")
+        if risk is None or float(risk) <= 0:
+            return  # cannot size the trigger without the frozen risk
+        trigger_r = float(self.settings.get("be_trail_trigger_r", 0.5))
+        trigger = float(risk) * trigger_r
+        side = position["side"]
 
-        if position["side"] == "LONG":
-            if current_price <= be_price:
-                return  # Not yet in profit
+        if side == "LONG":
+            if current_price < be_price + trigger:
+                return  # not yet +trigger_r in profit
             if position["stop_loss"] is not None and position["stop_loss"] >= be_price:
-                return  # Already at/beyond BE
-            wanted_bos = "BULLISH"
+                return  # already at/beyond BE
         else:  # SHORT
-            if current_price >= be_price:
+            if current_price > be_price - trigger:
                 return
             if position["stop_loss"] is not None and position["stop_loss"] <= be_price:
                 return
-            wanted_bos = "BEARISH"
 
-        try:
-            candles = await self.binance.get_klines(position["symbol"], "5m", 100)
-            if not candles:
-                return
-            # Require a BOS formed AT/AFTER entry. The old check used
-            # struct.last_bos, which for any signal that produced the entry is
-            # a PRE-EXISTING break — so the stop jumped to BE on the first REST
-            # pass (~30s) and ordinary noise ended the trade (13/16 trades on
-            # 2026-10-15 exited ~0R). Now the trade must break structure in its
-            # own favour before the stop is moved.
-            entry_ms = _to_epoch_ms(position.get("opened_at"))
-            newest = _new_bos_after_entry(
-                candles, position["symbol"], wanted_bos, entry_ms)
-            if newest is None:
-                return
-            logger.info(
-                f"[{position['symbol']}] New {wanted_bos} BOS after entry "
-                f"(formed_at={newest.formed_at}) — trailing stop to BE")
-            await self._trail_stop_to_be(position["id"], be_price)
-        except Exception as e:
-            logger.debug(f"BE trailing check failed for {position['symbol']}: {e}")
+        logger.info(
+            f"[{position['symbol']}] {side} is +{trigger_r}R in profit "
+            f"(price {current_price}, trigger {trigger:.6f}) — trailing stop to BE")
+        await self._trail_stop_to_be(position["id"], be_price)
 
     async def _trail_stop_to_be(self, position_id: int, new_stop: float):
         """Move stop loss to break-even (entry price). One-way, idempotent.

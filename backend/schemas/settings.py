@@ -24,6 +24,8 @@ class TradingSettingsResponse(BaseModel):
     # it binds it reduces the effective risk below risk_percent (with ~1% stops,
     # a 50% cap turns a 5% risk target into ~$1-2 per trade).
     max_position_notional_pct: float = 50.0
+    # Move the stop to break-even once the trade is this many R in profit.
+    be_trail_trigger_r: float = 0.5
 
 
 class TradingSettingsUpdate(BaseModel):
@@ -40,6 +42,7 @@ class TradingSettingsUpdate(BaseModel):
     max_daily_trades: int | None = None
     volume_filter_enabled: bool | None = None
     max_position_notional_pct: float | None = None
+    be_trail_trigger_r: float | None = None
 
 
 class SymbolConfigResponse(BaseModel):

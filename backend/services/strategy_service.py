@@ -10,7 +10,9 @@ order fills). FUBOT_STEPS PHASE3_STEP3 says paper creates no records, but
 PHASE3_STEP7's 72h paper run requires logged trades and the dashboard needs
 them — the STEP7 requirement wins.
 """
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -254,64 +256,55 @@ class StrategyService:
         }
 
         # 6. Execute — simulated fills in paper, real Binance orders in live.
-        # The Position row is created FIRST so live SL/TP order records can link
-        # to it (orders.position_id) — lets the position manager cancel the
-        # exchange SL/TP when the position closes.
-        position_id = await self._create_position(
-            signal, entry, size, paper_mode, initial_risk_distance=risk_distance)
+        #
+        # PAPER: the Position row is created first (simulated fill at the plan).
+        # LIVE: a LIMIT order is placed at the entry-zone midpoint and we wait
+        # briefly for the fill, so the position is recorded only once it exists
+        # — entries used to be MARKET and filled wherever price happened to be
+        # (up to 1% away, degrading the planned R:R and, when the market had
+        # already passed the stop, producing an invalid SL that Binance
+        # rejected and left the entry naked). The plan's SL/TP are only correct
+        # for the plan's price, hence "the planned price or no trade".
         if paper_mode:
+            position_id = await self._create_position(
+                signal, entry, size, True, initial_risk_distance=risk_distance)
             await self.order_svc.place_order(
                 symbol, side, "MARKET", size, price=Decimal(str(entry)),
                 stop_loss=signal.stop_loss, take_profit=signal.take_profit,
                 simulate=True,
             )
         else:
+            position_id = None
             try:
-                entry_res = await self.binance.place_market_order(symbol, side, float(size))
+                fill = await self._enter_with_limit(symbol, side, float(entry), float(size))
+                if fill is None:
+                    # The order may have filled without us confirming it (status
+                    # read failure) — never leave that unprotected.
+                    await self._flatten_if_unprotected(symbol)
+                    signal.status = "SKIPPED"
+                    await self._mark_signal(
+                        signal.db_id, "SKIPPED",
+                        "Limit entry not filled at the plan price")
+                    return TradeDecision(
+                        "SKIP", skip_reason="Limit entry not filled at the plan price")
 
-                # Exchange truth: Binance rounds qty to LOT_SIZE and fills at
-                # market, which drifts from the planned midpoint. Record BOTH
-                # the executed qty and the actual fill price on the position
-                # row — otherwise dashboard PnL/ROI can never match Binance
-                # (observed: DB 89.332934 vs exchange 89.3, entry 1.1515 vs
-                # 1.1518 fill).
-                #
-                # STRICTLY best-effort: the entry has ALREADY filled here — a
-                # failed detail fetch must never abort the flow (that would
-                # close the DB row while a live position exists on the
-                # exchange).
-                try:
-                    fill_qty = float(entry_res.get("executedQty", 0) or 0)
-                    fill_price = float(entry_res.get("avgPrice", 0) or 0)
-                    if fill_price <= 0 or fill_qty <= 0:
-                        # Response type may omit fills — fetch the order detail.
-                        order_id = entry_res.get("orderId")
-                        if order_id:
-                            det = await self.binance.get_order(symbol, int(order_id))
-                            fill_qty = float(det.get("executedQty", 0) or 0) or fill_qty
-                            fill_price = float(det.get("avgPrice", 0) or 0) or fill_price
-                    if fill_price > 0 or (0 < fill_qty != float(size)):
-                        await self._update_position_fill(
-                            position_id, fill_price or float(entry), fill_qty or float(size))
-                        if fill_price and abs(fill_price - float(entry)) / float(entry) > 0.001:
-                            logger.info(
-                                "[%s] Fill price drifted %.2f%%: planned=%.6f actual=%.6f",
-                                symbol, abs(fill_price - float(entry)) / float(entry) * 100,
-                                float(entry), fill_price)
-                except Exception as fill_exc:
-                    logger.warning(
-                        "[%s] Could not record exchange fill (entry still live): %s",
-                        symbol, fill_exc)
+                fill_price = fill["avgPrice"]
+                fill_qty = fill["executedQty"]
+                # The Position row is created AFTER the fill so its entry/qty
+                # are exchange truth from the start (the SL/TP records link to
+                # it via orders.position_id).
+                position_id = await self._create_position(
+                    signal, fill_price, size, False,
+                    initial_risk_distance=risk_distance)
+                await self._update_position_fill(position_id, fill_price, fill_qty)
 
-                # Log the order with the planned entry — the exchange's actual
-                # fill lands on the position row via _update_position_fill.
                 await self.order_svc.place_order(
-                    symbol, side, "MARKET", size, price=Decimal(str(entry)),
-                    simulate=False, binance_order_id=entry_res.get("orderId"),
+                    symbol, side, "LIMIT", size, price=Decimal(str(fill_price)),
+                    simulate=False, binance_order_id=fill["orderId"],
                     position_id=position_id,
                 )
                 sl_res = await self.binance.modify_position_stop(
-                    symbol, signal.direction, float(signal.stop_loss), float(size))
+                    symbol, signal.direction, float(signal.stop_loss), fill_qty)
                 await self.order_svc.place_order(
                     symbol, "SELL" if signal.direction == "LONG" else "BUY",
                     "STOP_MARKET", size, price=signal.stop_loss,
@@ -319,7 +312,7 @@ class StrategyService:
                     position_id=position_id,
                 )
                 tp_res = await self.binance.place_take_profit_order(
-                    symbol, signal.direction, float(signal.take_profit), float(size))
+                    symbol, signal.direction, float(signal.take_profit), fill_qty)
                 await self.order_svc.place_order(
                     symbol, "SELL" if signal.direction == "LONG" else "BUY",
                     "TAKE_PROFIT_MARKET", size, price=signal.take_profit,
@@ -328,9 +321,9 @@ class StrategyService:
                 )
             except Exception as exc:
                 logger.error("[%s] Live order flow failed: %s", symbol, exc)
-                # The MARKET entry may already have filled before the failure.
-                # Never leave an UNPROTECTED position behind (live 2026-10-15:
-                # a rejected SL left XRPUSDT and BTCUSDT open and naked for
+                # The entry may already have filled before the failure. Never
+                # leave an UNPROTECTED position behind (live 2026-10-15: a
+                # rejected SL left XRPUSDT and BTCUSDT open and naked for
                 # hours). If the exchange holds a position for this symbol with
                 # no resting stop, flatten it. If a stop IS resting, keep the
                 # position — the reconcile adopts it with its SL/TP.
@@ -482,6 +475,52 @@ class StrategyService:
                 await session.commit()
         except Exception:
             logger.exception("Failed to mark signal %s as %s", db_id, status)
+
+    async def _enter_with_limit(self, symbol: str, side: str, price: float,
+                                size: float,
+                                timeout_s: Optional[float] = None) -> Optional[dict]:
+        """Place a LIMIT at the planned zone price and wait briefly for the fill.
+
+        Returns {orderId, avgPrice, executedQty} when filled, else None after
+        cancelling the resting order — "the planned price or no trade". A limit
+        at the midpoint fills immediately when price is inside the zone (the
+        normal case, since the zone gate requires it) and otherwise leaves the
+        plan to be re-evaluated on a later scan instead of chasing the market.
+        """
+        res = await self.binance.place_limit_order(symbol, side, price, size)
+        order_id = res.get("orderId")
+        if not order_id:
+            return None
+
+        if timeout_s is None:
+            timeout_s = getattr(self, "limit_fill_timeout_s", 12.0)
+        poll_s = getattr(self, "limit_poll_interval_s", 2.0)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                det = await self.binance.get_order(symbol, int(order_id))
+            except Exception as exc:
+                logger.debug("[%s] limit order status check failed: %s", symbol, exc)
+                break
+            status = str(det.get("status", "")).upper()
+            if status == "FILLED":
+                return {
+                    "orderId": order_id,
+                    "avgPrice": float(det.get("avgPrice", 0) or 0) or float(price),
+                    "executedQty": float(det.get("executedQty", 0) or 0) or float(size),
+                }
+            if status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED"):
+                return None
+            await asyncio.sleep(poll_s)
+
+        try:
+            await self.binance.cancel_order(symbol, int(order_id))
+            logger.info("[%s] limit entry not filled in %.0fs — cancelled", symbol, timeout_s)
+        except Exception as exc:
+            logger.warning(
+                "[%s] limit entry not filled and cancel failed (%s) — order may "
+                "still be resting; it will be re-evaluated", symbol, exc)
+        return None
 
     async def _flatten_if_unprotected(self, symbol: str) -> None:
         """Close an exchange position left naked by a failed live order flow.

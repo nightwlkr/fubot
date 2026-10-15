@@ -98,10 +98,18 @@ class FakeBinance:
         return {"orderId": 101, "status": "FILLED",
                 "executedQty": str(quantity), "avgPrice": str(self.price)}
 
+    async def place_limit_order(self, symbol, side, price, quantity):
+        self.calls.append(("LIMIT", side, price))
+        self._limit_order_id = 101
+        return {"orderId": 101, "status": "NEW", "price": price, "quantity": quantity}
+
     async def get_order(self, symbol, order_id):
-        self.calls.append(("GET_ORDER", order_id))
         return {"orderId": order_id, "status": "FILLED",
                 "executedQty": "10", "avgPrice": str(self.price)}
+
+    async def cancel_order(self, symbol, order_id):
+        self.calls.append(("CANCEL", order_id))
+        return {"orderId": order_id, "status": "CANCELED"}
 
     async def modify_position_stop(self, symbol, side, stop_price, quantity):
         self.calls.append(("STOP_MARKET", stop_price, quantity))
@@ -187,47 +195,74 @@ class TestStrategyServiceEvaluateSignal:
         assert len(filled) == 1 and filled[0]["simulate"] is True
 
     async def test_live_mode_places_entry_stop_and_tp(self):
+        """Live entries are LIMIT orders at the entry-zone midpoint (user-approved
+        2026-10-15): MARKET fills landed up to 1% away, degrading the planned
+        R:R and — when the market had passed the stop — producing an invalid SL
+        that Binance rejected, leaving the entry naked."""
         binance = FakeBinance(price=100.5)
         order_svc = FakeOrderService()
         decision = await make_strategy(binance, order_svc).evaluate_signal(make_signal(), paper_mode=False)
         assert decision.decision == "EXECUTE" and decision.paper is False
         kinds = [c[0] for c in binance.calls]
-        assert kinds == ["MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"]
+        assert kinds == ["LIMIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"], kinds
+        # the limit sits at the planned midpoint (100.5), not the live price
+        assert binance.calls[0][2] == 100.5
         # live orders are recorded in-memory and marked non-simulated
         assert all(o["simulate"] is False for o in order_svc.pending.values())
 
-    async def test_live_mode_fetches_fill_via_get_order_when_response_lacks_it(self):
-        """place_market_order responses can omit avgPrice/executedQty (ACK type) —
-        the flow must fetch the order detail so the DB records the exchange's
-        fill instead of the signal midpoint (observed: entry 1.1515 planned vs
-        1.1518 filled on DOTUSDT)."""
+    async def test_live_limit_entry_records_the_fill(self):
+        """The position must carry the exchange's executed qty/price, fetched
+        from the order detail after the limit fills (observed: entry 1.1515
+        planned vs 1.1518 filled on DOTUSDT)."""
         binance = FakeBinance(price=100.5)
-        async def place_no_fill(symbol, side, quantity):
-            binance.calls.append(("MARKET", side, quantity))
-            return {"orderId": 101, "status": "FILLED"}  # no executedQty/avgPrice
-        binance.place_market_order = place_no_fill
-        decision = await make_strategy(binance, FakeOrderService()).evaluate_signal(
-            make_signal(), paper_mode=False)
-        assert decision.decision == "EXECUTE"
-        assert ("GET_ORDER", 101) in binance.calls
+        seen = {}
 
-    async def test_live_mode_survives_fill_fetch_failure(self):
-        """A failed fill-detail fetch must NOT abort the entry — by then the
-        MARKET order has already filled; closing the flow would mark the DB row
-        CLOSED while a live position exists on the exchange."""
-        binance = FakeBinance(price=100.5)
-        async def place_no_fill(symbol, side, quantity):
-            binance.calls.append(("MARKET", side, quantity))
-            return {"orderId": 101, "status": "FILLED"}
-        async def get_order_boom(symbol, order_id):
-            raise RuntimeError("timeout")
-        binance.place_market_order = place_no_fill
-        binance.get_order = get_order_boom
-        decision = await make_strategy(binance, FakeOrderService()).evaluate_signal(
-            make_signal(), paper_mode=False)
+        async def get_order(symbol, order_id):
+            return {"orderId": order_id, "status": "FILLED",
+                    "executedQty": "9.9", "avgPrice": "100.62"}
+
+        binance.get_order = get_order
+        strategy = make_strategy(binance, FakeOrderService())
+        # capture what the flow would write to the position row
+        async def capture(position_id, price, qty=None):
+            seen.update(price=price, qty=qty)
+        strategy._update_position_fill = capture
+
+        decision = await strategy.evaluate_signal(make_signal(), paper_mode=False)
         assert decision.decision == "EXECUTE"
+        assert seen.get("price") == 100.62 and seen.get("qty") == 9.9, seen
+
+    async def test_live_limit_entry_cancels_and_skips_when_unfilled(self):
+        """If the limit does not fill within the window the order is cancelled
+        and the signal skipped — 'the planned price or no trade', with no
+        resting order and no position row left behind."""
+        binance = FakeBinance(price=100.5)
+
+        async def get_order(symbol, order_id):
+            return {"orderId": order_id, "status": "NEW", "executedQty": "0", "avgPrice": "0"}
+
+        async def no_position(symbol):
+            return {}
+
+        cancelled = []
+
+        async def cancel(symbol, order_id):
+            cancelled.append(order_id)
+            return {"orderId": order_id, "status": "CANCELED"}
+
+        binance.get_order = get_order
+        binance.cancel_order = cancel
+        binance.get_position = no_position  # flatten check: nothing there
+
+        strategy = make_strategy(binance, FakeOrderService())
+        strategy.limit_fill_timeout_s = 0.05
+        strategy.limit_poll_interval_s = 0.01  # keep the test fast
+        decision = await strategy.evaluate_signal(make_signal(), paper_mode=False)
+        assert decision.decision == "SKIP"
+        assert "not filled" in decision.skip_reason, decision.skip_reason
+        assert cancelled == [101], f"resting limit not cancelled: {cancelled}"
         kinds = [c[0] for c in binance.calls]
-        assert "STOP_MARKET" in kinds and "TAKE_PROFIT_MARKET" in kinds
+        assert "STOP_MARKET" not in kinds, "SL placed for an unfilled entry"
 
     async def test_live_skips_when_rr_collapsed_at_market_price(self):
         """LIVE fills at MARKET, so the realised R:R is set by the fill price —
@@ -1294,44 +1329,14 @@ class TestLiveModeSafety:
                 await s.commit()
             await engine.dispose()
 
-    @staticmethod
-    def _bos_candles():
-        """30 flat 5m candles with a BEARISH BOS at index 22.
+    async def test_be_trail_requires_trigger_r_of_profit(self):
+        """BE-trailing is price-based: it waits for `be_trail_trigger_r` R of
+        profit (default +0.5R) instead of a structural BOS.
 
-        Structure: pivot low A=100 at index 5 (needs 5 higher lows either side),
-        pivot low B=105 at index 16, then index 22 breaks below A (low 99) —
-        detect_bos reports that break as a BEARISH BOS formed at candle 22's
-        close_time. Highs stay flat so no pivot highs / bullish BOS exist.
-        """
-        base = 1_700_000_000_000
-        lows = {5: 100.0, 16: 105.0, 22: 99.0}
-        return [
-            {"open_time": base + i * 300_000,
-             "close_time": base + (i + 1) * 300_000,
-             "open": 105.0, "high": 110.0,
-             "low": lows.get(i, 110.0), "close": 105.0,
-             "volume": 1.0}
-            for i in range(30)
-        ]
-
-    def test_new_bos_after_entry_ignores_preexisting_breaks(self):
-        """BE-trailing must wait for a BOS formed AT/AFTER entry. The old check
-        used structural.last_bos, which for the setup that produced the entry is
-        a pre-existing break — so every stop moved to BE within ~30s (13/16
-        trades exited ~0R on 2026-10-15)."""
-        from backend.core.position_manager import _new_bos_after_entry
-        candles = self._bos_candles()
-        bos_ms = candles[22]["close_time"]
-        assert _new_bos_after_entry(candles, "SYN", "BEARISH", bos_ms + 1) is None, \
-            "a BOS formed BEFORE entry must not trigger BE-trailing"
-        assert _new_bos_after_entry(candles, "SYN", "BEARISH", bos_ms - 1) is not None, \
-            "a BOS formed AFTER entry must trigger BE-trailing"
-        assert _new_bos_after_entry(candles, "SYN", "BULLISH", bos_ms - 1) is None, \
-            "an opposite-direction BOS must not trigger BE-trailing"
-
-    async def test_be_trail_blocked_by_preexisting_bos(self):
-        """End-to-end: with only a pre-existing bearish BOS, a short's stop must
-        stay at its structural level (no DB change, no exchange re-placement)."""
+        The 2026-10-15 audit showed that at the strategy's ~80% stop-out rate an
+        un-trailed structural stop makes expectancy negative (0.8×(-1R) +
+        0.2×3R = -0.2R) whereas the BE stop keeps the same entries profitable
+        (~+0.6R/trade)."""
         from sqlalchemy import delete
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
         from backend.config import settings as cfg
@@ -1339,24 +1344,19 @@ class TestLiveModeSafety:
         from backend.models.position import Position
         engine = create_async_engine(cfg.DATABASE_URL)
         Session = async_sessionmaker(engine, expire_on_commit=False)
-        SYM = "BOSGATETST"
-        candles = self._bos_candles()
+        SYM = "BETRGTST"
         replaced = []
         try:
             async with Session() as s:
                 await s.execute(delete(Position).where(Position.symbol == SYM))
-                # entry happened AFTER the only BOS in the series
                 p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=1.0,
-                             stop_loss=105.0, take_profit=90.0, status="OPEN",
-                             opened_at=datetime.fromtimestamp(
-                                 (candles[22]["close_time"] + 60_000) / 1000, tz=timezone.utc))
+                             stop_loss=110.0, take_profit=70.0, status="OPEN",
+                             initial_risk_distance=10.0)
                 s.add(p); await s.flush()
                 pos_id = p.id
                 await s.commit()
 
             class RecBinance:
-                async def get_klines(self, symbol, interval="5m", limit=100):
-                    return candles
                 async def modify_position_stop(self, symbol, side, stop_price, qty):
                     replaced.append(stop_price)
                     return {"orderId": 2}
@@ -1369,21 +1369,53 @@ class TestLiveModeSafety:
                                  settings={}, session_factory=Session)
             pm._mode = "live"
             pos = {"id": pos_id, "symbol": SYM, "side": "SHORT", "quantity": 1.0,
-                   "entry_price": 100.0, "stop_loss": 105.0, "take_profit": 90.0,
-                   "opened_at": datetime.fromtimestamp(
-                       (candles[22]["close_time"] + 60_000) / 1000, tz=timezone.utc)}
-            await pm._check_be_trailing(pos, current_price=99.0)
+                   "entry_price": 100.0, "stop_loss": 110.0, "take_profit": 70.0,
+                   "initial_risk_distance": 10.0}
 
-            assert replaced == [], f"BE stop placed off a pre-existing BOS: {replaced}"
+            # +0.4R only (price 96 vs trigger 95) -> no trail
+            await pm._check_be_trailing(pos, current_price=96.0)
+            assert replaced == [], f"trailed before +0.5R: {replaced}"
+
+            # +0.51R (price 94.9) -> trail to BE
+            await pm._check_be_trailing(pos, current_price=94.9)
+            assert replaced == [100.0], f"did not trail at +0.5R: {replaced}"
+
             async with Session() as s:
                 row = await s.get(Position, pos_id)
-                assert float(row.stop_loss) == 105.0, \
-                    f"DB stop moved to BE without a new BOS: {row.stop_loss}"
+                assert float(row.stop_loss) == 100.0
+
+            # one-way: already at BE -> no further action
+            replaced.clear()
+            await pm._check_be_trailing({**pos, "stop_loss": 100.0}, current_price=90.0)
+            assert replaced == [], f"trailed twice: {replaced}"
         finally:
             async with Session() as s:
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()
+
+    async def test_be_trail_trigger_is_configurable(self):
+        """The trigger distance comes from the be_trail_trigger_r setting."""
+        from backend.core.position_manager import PositionManager
+        async def _noop(*a, **k):
+            return None
+        alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+        daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+        pm = PositionManager(binance=None, order_service=None, daily_reset=daily,
+                             alert_service=alerts, settings={"be_trail_trigger_r": 1.0},
+                             session_factory=None)
+        pm._mode = "paper"
+        calls = []
+        async def fake_trail(pid, price):
+            calls.append((pid, price))
+        pm._trail_stop_to_be = fake_trail
+        pos = {"id": 1, "symbol": "X", "side": "LONG", "quantity": 1.0,
+               "entry_price": 100.0, "stop_loss": 90.0, "take_profit": 130.0,
+               "initial_risk_distance": 10.0}
+        await pm._check_be_trailing(pos, current_price=109.0)   # +0.9R
+        assert calls == [], "trailed below the configured 1.0R trigger"
+        await pm._check_be_trailing(pos, current_price=111.0)   # +1.1R
+        assert calls == [(1, 100.0)], f"did not trail at the configured trigger: {calls}"
 
     async def test_fill_update_recomputes_frozen_risk_distance(self):
         """The frozen risk distance must follow the REAL entry — pnl_r is

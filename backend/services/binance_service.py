@@ -301,19 +301,23 @@ class BinanceService:
     # ---- Order Placement ----
 
     async def place_limit_order(self, symbol: str, side: str, price: float, quantity: float) -> dict:
-        """POST /fapi/v1/order — LIMIT"""
+        """POST /fapi/v1/order — LIMIT (GTC). Rounds qty to LOT_SIZE and price
+        to the PRICE_FILTER tick — the raw values are rejected (400)."""
+        lot = await self.get_lot_size(symbol)
+        qty = self._round_qty(quantity, lot)
+        px = self._round_price(price, lot)
         data = await self._signed_request(
             "POST", "fapi/v1/order",
             {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
-             "quantity": quantity, "price": price},
+             "quantity": qty, "price": px},
             weight=2,
         )
         return {
             "orderId": data.get("orderId"),
             "symbol": symbol,
             "side": side,
-            "price": price,
-            "quantity": quantity,
+            "price": px,
+            "quantity": qty,
             "status": data.get("status", "NEW"),
         }
 

@@ -70,6 +70,7 @@ async def get_trading_settings(
         "trade_neutral_markets", "trade_min_trend_strength", "volume_filter_enabled",
         "symbol_cooldown_minutes", "max_daily_trades",
         "max_position_notional_pct",
+        "be_trail_trigger_r",
     ]
     defaults = {
         "risk_percent": 1.0,
@@ -90,6 +91,7 @@ async def get_trading_settings(
         "symbol_cooldown_minutes": 240,
         "max_daily_trades": 12,
         "max_position_notional_pct": 50.0,
+        "be_trail_trigger_r": 0.5,
     }
 
     settings = {}
@@ -119,6 +121,7 @@ async def get_trading_settings(
         max_daily_trades=int(settings.get("max_daily_trades", 12)),
         volume_filter_enabled=bool(settings.get("volume_filter_enabled", False)),
         max_position_notional_pct=float(settings.get("max_position_notional_pct", 50.0)),
+        be_trail_trigger_r=float(settings.get("be_trail_trigger_r", 0.5)),
     )
 
 
