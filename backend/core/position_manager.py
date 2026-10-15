@@ -135,24 +135,49 @@ class PositionManager:
             await self._close_position(p, "EXTERNAL_CLOSE", exit_price)
 
         for ep in exchange_positions or []:
-            amt = float(ep.get("positionAmt", 0) or 0)
-            if amt == 0:
-                continue
+            # get_all_positions() returns TRANSFORMED dicts (symbol/side/quantity/
+            # entryPrice/leverage) — NOT the raw positionRisk keys. Reading
+            # "positionAmt" here silently skipped every position, so an
+            # exchange-only position (e.g. one left naked by a rejected BE stop)
+            # was never recorded and stayed invisible to the dashboard.
             symbol = ep.get("symbol")
-            if symbol in db_open:
-                continue  # already tracked
-            side = "LONG" if amt > 0 else "SHORT"
-            qty = abs(amt)
+            qty = float(ep.get("quantity", 0) or 0)
+            if qty <= 0 or symbol in db_open:
+                continue  # nothing held, or already tracked
+            side = ep.get("side") or "LONG"
             entry = float(ep.get("entryPrice", 0) or 0)
+            leverage = int(ep.get("leverage", 1) or 1)
+
+            # Adopt the exchange's own resting SL/TP so the engine can monitor
+            # and manage the position instead of leaving it unmanaged.
+            stop_loss = None
+            take_profit = None
+            try:
+                for algo in await self.binance.get_open_algo_orders(symbol):
+                    trig = float(algo.get("triggerPrice") or 0)
+                    if trig <= 0:
+                        continue
+                    if algo.get("orderType") == "STOP_MARKET":
+                        stop_loss = trig
+                    elif algo.get("orderType") == "TAKE_PROFIT_MARKET":
+                        take_profit = trig
+            except Exception as e:
+                logger.debug(f"[{symbol}] Reconcile: could not read resting algo orders: {e}")
+
             logger.warning(
                 f"[{symbol}] Reconcile: exchange holds {side} {qty} @ {entry} "
-                f"but no DB position — recording as OPEN")
+                f"but no DB position — recording as OPEN "
+                f"(SL={stop_loss}, TP={take_profit})")
+            if stop_loss is None and take_profit is None:
+                logger.error(
+                    f"[{symbol}] Reconcile: untracked position has NO resting SL/TP "
+                    f"on the exchange — it is unprotected")
             try:
                 async with self.session_factory() as session:
                     session.add(Position(
                         symbol=symbol, side=side, entry_price=entry,
-                        quantity=qty, leverage=1,
-                        stop_loss=None, take_profit=None,
+                        quantity=qty, leverage=leverage,
+                        stop_loss=stop_loss, take_profit=take_profit,
                         initial_risk_distance=None, status="OPEN"))
                     await session.commit()
             except Exception:
@@ -368,17 +393,44 @@ class PositionManager:
 
         logger.info(f"[{symbol}] Trailing stop to BE: {old_stop} → {new_stop}")
 
-        # LIVE mode: cancel the old exchange stop, then place the new one (so
-        # the stop actually protects without leaving a duplicate active SL).
+        # LIVE mode: place the new stop FIRST, then cancel the old one — and if
+        # the placement fails (e.g. Binance -2021 "order would immediately
+        # trigger" when the BE level is already at market), REVERT the DB stop.
+        # The DB stop must never be tighter than the exchange's: otherwise the
+        # engine's own price check trips, "closes" the position in the DB, and
+        # leaves it open and unprotected on the exchange (observed live).
         if self._mode == "live" and symbol and qty:
-            await self._cancel_active_sl(position_id, symbol)
             try:
                 await self.binance.modify_position_stop(symbol, side, new_stop, qty)
             except Exception as e:
                 logger.error(f"[{symbol}] Failed to trail exchange stop to BE: {e}")
+                await self._restore_stop(position_id, old_stop)
+                return
+            await self._cancel_active_sl(position_id, symbol)
 
         if self.alerts:
             await self.alerts.be_trailing(symbol)
+
+    async def _restore_stop(self, position_id: int, old_stop) -> None:
+        """Revert a DB stop change after a failed exchange stop placement.
+
+        Keeps DB and exchange in agreement — a DB stop with no matching exchange
+        stop is what let the engine report an exit that never happened.
+        """
+        if self.session_factory is None or old_stop is None:
+            return
+        try:
+            async with self.session_factory() as session:
+                row = await session.get(Position, position_id)
+                if row and row.status == "OPEN":
+                    row.stop_loss = old_stop
+                    symbol = row.symbol
+                    await session.commit()
+                    logger.warning(
+                        f"[{symbol}] DB stop reverted to {old_stop} — exchange "
+                        f"stop unchanged (BE trail not applied)")
+        except Exception:
+            logger.exception("Failed to revert stop for position %s", position_id)
 
     async def _cancel_active_sl(self, position_id: int, symbol: str) -> None:
         """Cancel the position's active STOP_MARKET algo orders (before re-placing).
@@ -534,7 +586,15 @@ class PositionManager:
         #     resting orders suffices; a redundant market close would OPEN an
         #     opposite position. MANUAL_CLOSE/CLOSED_LOOP/force: we must
         #     actively close on the exchange).
-        if self._mode == "live" and reason in ("TP_HIT", "SL_HIT", "EXTERNAL_CLOSE"):
+        if self._mode == "live" and reason in ("TP_HIT", "SL_HIT"):
+            await self._cancel_exchange_orders(position["id"], position["symbol"])
+            # The engine's own price check can fire without the exchange's
+            # resting order having filled (observed live: the BE stop placement
+            # was rejected by Binance, yet the DB stop tripped the engine's
+            # check — the position stayed open and NAKED on the exchange).
+            # Verify and flatten instead of assuming the exchange closed it.
+            await self._ensure_flat(position["symbol"])
+        elif self._mode == "live" and reason == "EXTERNAL_CLOSE":
             await self._cancel_exchange_orders(position["id"], position["symbol"])
         elif self._mode == "live":
             await self._cancel_exchange_orders(position["id"], position["symbol"])
@@ -629,6 +689,27 @@ class PositionManager:
             logger.info(f"[{symbol}] Live market close placed: {close_side} {qty}")
         except Exception as e:
             logger.error(f"[{symbol}] Live market close failed: {e}")
+
+    async def _ensure_flat(self, symbol: str) -> None:
+        """Close any exchange position left after an engine-detected exit.
+
+        The engine detects TP/SL crosses from its own price feed; that does NOT
+        guarantee the exchange's resting order filled (a rejected BE stop, or a
+        wick the exchange trigger didn't see). Without this check the DB is
+        closed while the exchange keeps an unprotected position — observed live
+        on XRPUSDT (left naked from 11:40 to 13:09).
+        """
+        try:
+            pos = await self.binance.get_position(symbol)
+        except Exception as e:
+            logger.error(f"[{symbol}] Post-exit verification failed: {e}")
+            return
+        qty = float((pos or {}).get("quantity", 0) or 0)
+        if qty > 0:
+            logger.warning(
+                f"[{symbol}] Exchange still holds {pos.get('side')} {qty} after a "
+                f"detected exit — market-closing to avoid naked exposure")
+            await self._market_close(symbol, pos.get("side") or "LONG", qty)
 
     async def close_all_positions(self, reason: str = "MANUAL_CLOSE") -> int:
         """Close ALL open positions at market price (manual stop / kill switch).

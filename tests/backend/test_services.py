@@ -942,6 +942,151 @@ class TestLiveModeSafety:
                 await s.commit()
             await engine.dispose()
 
+    async def test_reconcile_records_exchange_only_position(self):
+        """get_all_positions() returns TRANSFORMED dicts (symbol/side/quantity/
+        entryPrice) — reading the raw 'positionAmt' key skipped every position,
+        so an exchange-only position was never recorded and stayed invisible
+        (observed live: a naked XRPUSDT short the DB believed was closed)."""
+        from sqlalchemy import delete, select
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "RECONTST"
+        try:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+
+            class RecBinance:
+                async def get_all_positions(self):
+                    return [{"symbol": SYM, "side": "SHORT", "quantity": 5.0,
+                             "entryPrice": 100.0, "markPrice": 99.0,
+                             "unrealizedPnl": 5.0, "leverage": 5}]
+                async def get_open_algo_orders(self, symbol):
+                    return [{"algoId": 1, "orderType": "STOP_MARKET", "triggerPrice": "105.0"},
+                            {"algoId": 2, "orderType": "TAKE_PROFIT_MARKET", "triggerPrice": "90.0"}]
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            await pm._reconcile_exchange_positions()
+
+            async with Session() as s:
+                row = (await s.execute(
+                    select(Position).where(Position.symbol == SYM))).scalars().first()
+            assert row is not None, "exchange-only position was not recorded"
+            assert row.status == "OPEN" and row.side == "SHORT"
+            assert float(row.quantity) == 5.0 and float(row.entry_price) == 100.0
+            # the exchange's own resting SL/TP are adopted so it can be managed
+            assert float(row.stop_loss) == 105.0 and float(row.take_profit) == 90.0
+            assert row.leverage == 5
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
+    async def test_close_flattens_leftover_exchange_position(self):
+        """An engine-detected TP/SL exit must verify the exchange is actually
+        flat — a rejected BE stop left XRPUSDT open and NAKED while the DB
+        recorded it closed."""
+        from sqlalchemy import delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "FLATTST"
+        market_closed = []
+        try:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=5.0,
+                             stop_loss=105.0, take_profit=90.0, status="OPEN")
+                s.add(p); await s.flush()
+                pos_id = p.id
+                await s.commit()
+
+            class RecBinance:
+                async def get_position(self, symbol):
+                    # exchange still holds the position the engine thinks it closed
+                    return {"symbol": symbol, "side": "SHORT", "quantity": 5.0}
+                async def place_market_order(self, symbol, side, qty):
+                    market_closed.append((symbol, side, qty))
+                    return {"orderId": 9}
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            pos = {"id": pos_id, "symbol": SYM, "side": "SHORT", "quantity": 5.0,
+                   "entry_price": 100.0, "stop_loss": 105.0, "take_profit": 90.0}
+            await pm._close_position(pos, "SL_HIT", 105.0)
+
+            # a SHORT is closed by a BUY market order
+            assert market_closed == [(SYM, "BUY", 5.0)], \
+                f"leftover exchange position not flattened: {market_closed}"
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
+    async def test_failed_be_trail_reverts_db_stop(self):
+        """If the exchange BE stop cannot be placed (e.g. -2021 'would trigger
+        immediately'), the DB stop must be reverted — a DB stop with no matching
+        exchange stop makes the engine report an exit that never happened."""
+        from sqlalchemy import delete
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from backend.config import settings as cfg
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        engine = create_async_engine(cfg.DATABASE_URL)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        SYM = "BERVTST"
+        try:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=1.0,
+                             stop_loss=105.0, take_profit=90.0, status="OPEN")
+                s.add(p); await s.flush()
+                pos_id = p.id
+                await s.commit()
+
+            class RecBinance:
+                async def modify_position_stop(self, symbol, side, stop_price, qty):
+                    raise RuntimeError("Binance API Error -2021: Order would immediately trigger")
+            async def _noop(*a, **k):
+                return None
+            alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+            daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+            pm = PositionManager(binance=RecBinance(), order_service=None,
+                                 daily_reset=daily, alert_service=alerts,
+                                 settings={}, session_factory=Session)
+            pm._mode = "live"
+            await pm._trail_stop_to_be(pos_id, 100.0)
+
+            async with Session() as s:
+                row = await s.get(Position, pos_id)
+                assert float(row.stop_loss) == 105.0, \
+                    f"DB stop not reverted after failed placement: {row.stop_loss}"
+        finally:
+            async with Session() as s:
+                await s.execute(delete(Position).where(Position.symbol == SYM))
+                await s.commit()
+            await engine.dispose()
+
     async def test_trail_stop_cancels_old_sl_before_placing_new(self):
         """BE-trailing must cancel the old exchange SL before placing the new
         one — otherwise two active SLs remain (observed live on 3 positions)."""
