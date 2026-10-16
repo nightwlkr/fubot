@@ -121,6 +121,30 @@ def test_settings_trading_roundtrip(client, test_user):
     assert res.json()["max_positions"] == original["max_positions"]
 
 
+def test_strategy_toggles_roundtrip(client, test_user):
+    """The strategy_*_enabled fields were served by GET but MISSING from the
+    update schema — a PUT with them was silently dropped (Pydantic exclude_unset),
+    so FVG could never actually be disabled from the Settings UI/API (DECISION.md
+    D1). They must round-trip AND reach the running engine via hot-reload."""
+    from backend.main import app
+
+    _login(client, test_user)
+    original = client.get("/api/settings/trading").json()
+    try:
+        res = client.put("/api/settings/trading", json={"strategy_fvg_enabled": False})
+        assert res.status_code == 200
+        assert res.json()["strategy_fvg_enabled"] is False, \
+            "PUT dropped strategy_fvg_enabled (field missing from the update schema)"
+
+        engine = getattr(app.state, "bot_engine", None)
+        assert engine is not None
+        assert bool(engine.settings.get("strategy_fvg_enabled")) is False, \
+            "running engine did not pick up the toggle"
+    finally:
+        client.put("/api/settings/trading", json={
+            "strategy_fvg_enabled": original["strategy_fvg_enabled"]})
+
+
 def test_trading_settings_hot_reload_engine(client, test_user):
     """A slider change must reach the RUNNING engine, not just the DB.
 

@@ -34,6 +34,9 @@ class TradingSettingsUpdate(BaseModel):
     daily_loss_limit_r: float | None = None
     rr_min: float | None = None
     check_interval_seconds: int | None = None
+    strategy_fvg_enabled: bool | None = None
+    strategy_3candle_enabled: bool | None = None
+    strategy_choch_enabled: bool | None = None
     paper_use_real_balance: bool | None = None
     paper_balance_usdt: float | None = None
     trade_neutral_markets: bool | None = None

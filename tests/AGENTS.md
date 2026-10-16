@@ -8,7 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
-Status: 172 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile records exchange-only positions + adopts their resting SL/TP, close flattens a leftover exchange position, failed BE-trail reverts the DB stop, BE-trail trigger R (+ configurable) and one-way behaviour, LIMIT entry fill recorded from the order detail, unfilled-limit cancel+skip, breached-stop skip, side-aware R:R, flatten-if-unprotected, notional cap driven by setting, settings hot-reload, strategy-toggle gates the scan)
+Status: 173 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile records exchange-only positions + adopts their resting SL/TP, close flattens a leftover exchange position, failed BE-trail reverts the DB stop, BE-trail trigger R (+ configurable) and one-way behaviour, LIMIT entry fill recorded from the order detail, unfilled-limit cancel+skip, breached-stop skip, side-aware R:R, flatten-if-unprotected, notional cap driven by setting, settings hot-reload, strategy-toggle gates the scan)
 
 ## Local Contracts
 
@@ -37,7 +37,7 @@ Status: 172 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile 
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 172 passed
+- `PYTHONPATH=. pytest tests/backend/ -q` — 173 passed
 - A failing test blocks completion of the change that broke it
 
 ## Child DOX Index

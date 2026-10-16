@@ -87,7 +87,7 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 172 passing (e2e trade flow, -3R hard stop, security audit, payload contracts, orphan-sweep, reconcile-adopts-SL/TP, close-flattens-leftover, BE-trail trigger/revert, limit-entry fill+cancel, breached-stop skip, side-aware R:R, notional-cap-setting, settings-hot-reload regressions included)
+- `PYTHONPATH=. pytest tests/backend/ -q` — 173 passing (e2e trade flow, -3R hard stop, security audit, payload contracts, orphan-sweep, reconcile-adopts-SL/TP, close-flattens-leftover, BE-trail trigger/revert, limit-entry fill+cancel, breached-stop skip, side-aware R:R, notional-cap-setting, settings-hot-reload regressions included)
 - `PYTHONPATH=. python -c "import backend.main"` — app imports without errors
 - `python -m uvicorn backend.main:app --reload` — boots and serves; local dev currently on port 8001 (a stale process holds 8000)
 - No hardcoded credentials — everything from env vars
