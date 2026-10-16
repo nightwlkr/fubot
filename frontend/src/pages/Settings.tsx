@@ -177,6 +177,9 @@ function TradingParamsSection() {
   const [maxDailyTrades, setMaxDailyTrades] = useState(12)
   const [maxPositionNotionalPct, setMaxPositionNotionalPct] = useState(50)
   const [beTrailTriggerR, setBeTrailTriggerR] = useState(0.5)
+  const [profitLockTriggerR, setProfitLockTriggerR] = useState(1.0)
+  const [profitLockTrailR, setProfitLockTrailR] = useState(0.5)
+  const [staleTradeHours, setStaleTradeHours] = useState(24)
 
   useEffect(() => {
     api.get<TradingSettings>(ENDPOINTS.settingsTrading)
@@ -196,6 +199,9 @@ function TradingParamsSection() {
         setMaxDailyTrades(s.max_daily_trades ?? 12)
         setMaxPositionNotionalPct(s.max_position_notional_pct ?? 50)
         setBeTrailTriggerR(s.be_trail_trigger_r ?? 0.5)
+        setProfitLockTriggerR(s.profit_lock_trigger_r ?? 1.0)
+        setProfitLockTrailR(s.profit_lock_trail_r ?? 0.5)
+        setStaleTradeHours(s.stale_trade_hours ?? 24)
         setIsLoading(false)
       })
       .catch(() => setIsLoading(false))
@@ -219,6 +225,9 @@ function TradingParamsSection() {
         max_daily_trades: maxDailyTrades,
         max_position_notional_pct: maxPositionNotionalPct,
         be_trail_trigger_r: beTrailTriggerR,
+        profit_lock_trigger_r: profitLockTriggerR,
+        profit_lock_trail_r: profitLockTrailR,
+        stale_trade_hours: staleTradeHours,
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
@@ -245,6 +254,9 @@ function TradingParamsSection() {
           { label: 'Risk Per Trade', value: riskPercent, setValue: setRiskPercent, min: 0.5, max: 20, step: 0.5, suffix: '%', desc: 'Percentage of balance risked per trade (high risk = larger swings)' },
           { label: 'Max Position Notional', value: maxPositionNotionalPct, setValue: setMaxPositionNotionalPct, min: 50, max: 1000, step: 50, suffix: '%', desc: 'Hard cap on position notional as % of balance. This CAP overrides Risk Per Trade when it binds: with ~1% stops, 50% caps risk at ~$1-2 per $200 balance (raise to ~500% to actually risk 5%)' },
           { label: 'BE Trail Trigger', value: beTrailTriggerR, setValue: setBeTrailTriggerR, min: 0, max: 3, step: 0.25, suffix: 'R', desc: 'Move the stop to break-even once the trade is this far in profit. 0 = immediately (many scratches), 0.5 = let it prove itself first' },
+          { label: 'Profit Lock Trigger', value: profitLockTriggerR, setValue: setProfitLockTriggerR, min: 0.5, max: 3, step: 0.25, suffix: 'R', desc: 'At this profit level, start trailing the stop to lock in gains. 1.0 = lock once trade is +1R deep' },
+          { label: 'Profit Lock Trail', value: profitLockTrailR, setValue: setProfitLockTrailR, min: 0.1, max: 2, step: 0.1, suffix: 'R', desc: 'How far behind price (in R) the profit-lock stop sits. 0.5 = locks in at least half the current profit' },
+          { label: 'Stale Trade Exit', value: staleTradeHours, setValue: setStaleTradeHours, min: 0, max: 72, step: 1, suffix: 'h', desc: 'Close profitable trades after this many hours if they haven\'t hit TP. 0 = disabled. Prevents stale trades from tying up margin' },
           { label: 'Max Open Positions', value: maxPositions, setValue: setMaxPositions, min: 1, max: 10, step: 1, suffix: '', desc: 'Maximum concurrent positions' },
           { label: 'Daily Loss Limit', value: dailyLossLimit, setValue: setDailyLossLimit, min: 1, max: 10, step: 0.5, suffix: 'R', desc: 'Bot stops trading after this loss (in R)' },
           { label: 'Min R:R Ratio', value: rrMin, setValue: setRrMin, min: 1.5, max: 5, step: 0.5, suffix: ':1', desc: 'Minimum risk:reward to execute a trade' },

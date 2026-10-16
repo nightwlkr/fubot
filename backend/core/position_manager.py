@@ -326,6 +326,12 @@ class PositionManager:
             # Check BE trailing (REST-only; needs klines)
             await self._check_be_trailing(position, current_price)
 
+            # Check profit lock trailing (locks in gains on deep-profit trades)
+            await self._check_profit_trailing(position, current_price)
+
+            # Check stale trades (close profitable trades that aren't reaching TP)
+            await self._check_stale_trade(position)
+
             # Check if TP or SL was hit
             tp_hit, sl_hit = self._check_tp_sl_hit(position, current_price)
             if tp_hit:
@@ -371,6 +377,102 @@ class PositionManager:
             f"[{position['symbol']}] {side} is +{trigger_r}R in profit "
             f"(price {current_price}, trigger {trigger:.6f}) — trailing stop to BE")
         await self._trail_stop_to_be(position["id"], be_price)
+
+    async def _check_profit_trailing(self, position: dict, current_price: float):
+        """Trail the stop to lock in profit once the trade is deep enough in profit.
+
+        Unlike BE-trailing (which just moves to entry), this trails the stop
+        AHEAD of entry so a reversal locks in a real gain. Trigger and trail
+        distance are configurable (profit_lock_trigger_r, profit_lock_trail_r).
+
+        Rules: one-way (stop only moves in the profitable direction), only after
+        the trigger threshold, never before measurable risk.
+        """
+        risk = position.get("initial_risk_distance")
+        if risk is None or float(risk) <= 0:
+            return
+        trigger_r = float(self.settings.get("profit_lock_trigger_r", 1.0))
+        trail_r = float(self.settings.get("profit_lock_trail_r", 0.5))
+        trigger = float(risk) * trigger_r
+        trail = float(risk) * trail_r
+        side = position["side"]
+        entry = float(position["entry_price"])
+
+        if side == "LONG":
+            profit = current_price - entry
+            if profit < trigger:
+                return  # not yet at the profit-lock threshold
+            new_stop = current_price - trail
+            # One-way: only move stop UP for a LONG
+            if position["stop_loss"] is not None and float(position["stop_loss"]) >= new_stop:
+                return
+        else:  # SHORT
+            profit = entry - current_price
+            if profit < trigger:
+                return
+            new_stop = current_price + trail
+            # One-way: only move stop DOWN for a SHORT
+            if position["stop_loss"] is not None and float(position["stop_loss"]) <= new_stop:
+                return
+
+        locked_r = (new_stop - entry) / float(risk) if side == "LONG" else (entry - new_stop) / float(risk)
+        logger.info(
+            f"[{position['symbol']}] {side} profit lock: +{profit/float(risk):.2f}R, "
+            f"trailing stop to {new_stop:.6f} (locks +{locked_r:.2f}R)")
+        await self._trail_stop_to_be(position["id"], new_stop)
+
+    async def _check_stale_trade(self, position: dict):
+        """Close stale profitable trades that aren't reaching TP.
+
+        A trade sitting at +0.3R for hours is just tying up margin and a
+        position slot. If the trade is in profit but hasn't hit TP after
+        `stale_trade_hours`, close it and bank whatever profit exists.
+        """
+        stale_hours = float(self.settings.get("stale_trade_hours", 24.0))
+        if stale_hours <= 0:
+            return  # disabled
+
+        opened_at = position.get("opened_at")
+        if opened_at is None:
+            return
+        if opened_at.tzinfo is None:
+            from datetime import timezone as tz
+            opened_at = opened_at.replace(tzinfo=tz.utc)
+
+        from datetime import datetime, timezone
+        age_hours = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
+        if age_hours < stale_hours:
+            return
+
+        # Only close if in profit (don't close losers early — they should hit their SL)
+        entry = float(position["entry_price"])
+        side = position["side"]
+        risk = position.get("initial_risk_distance")
+
+        # Get current price
+        current_price = None
+        if self.binance is not None:
+            try:
+                ticker = await self.binance.get_ticker(position["symbol"])
+                current_price = float(ticker.get("price", 0))
+            except Exception:
+                return
+
+        if current_price is None or current_price <= 0:
+            return
+
+        if side == "LONG":
+            in_profit = current_price > entry
+        else:
+            in_profit = current_price < entry
+
+        if not in_profit:
+            return  # let losers run to their SL
+
+        logger.info(
+            f"[{position['symbol']}] {side} stale {age_hours:.1f}h in profit — "
+            f"closing to bank gains (price {current_price}, entry {entry})")
+        await self._close_position(position, "STALE_EXIT", current_price)
 
     async def _trail_stop_to_be(self, position_id: int, new_stop: float):
         """Move stop loss to break-even (entry price). One-way, idempotent.

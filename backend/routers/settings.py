@@ -71,6 +71,7 @@ async def get_trading_settings(
         "symbol_cooldown_minutes", "max_daily_trades",
         "max_position_notional_pct",
         "be_trail_trigger_r",
+        "profit_lock_trigger_r", "profit_lock_trail_r", "stale_trade_hours",
     ]
     defaults = {
         "risk_percent": 1.0,
@@ -92,6 +93,9 @@ async def get_trading_settings(
         "max_daily_trades": 12,
         "max_position_notional_pct": 50.0,
         "be_trail_trigger_r": 0.5,
+        "profit_lock_trigger_r": 1.0,
+        "profit_lock_trail_r": 0.5,
+        "stale_trade_hours": 24.0,
     }
 
     settings = {}
@@ -122,6 +126,9 @@ async def get_trading_settings(
         volume_filter_enabled=bool(settings.get("volume_filter_enabled", False)),
         max_position_notional_pct=float(settings.get("max_position_notional_pct", 50.0)),
         be_trail_trigger_r=float(settings.get("be_trail_trigger_r", 0.5)),
+        profit_lock_trigger_r=float(settings.get("profit_lock_trigger_r", 1.0)),
+        profit_lock_trail_r=float(settings.get("profit_lock_trail_r", 0.5)),
+        stale_trade_hours=float(settings.get("stale_trade_hours", 24.0)),
     )
 
 

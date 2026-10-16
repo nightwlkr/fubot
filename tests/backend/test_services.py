@@ -1455,3 +1455,96 @@ class TestLiveModeSafety:
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()
+
+    async def test_profit_lock_trails_stop_at_trigger(self):
+        """Profit lock: at `profit_lock_trigger_r` R in profit, trail the stop
+        at `profit_lock_trail_r` R behind price — locking in real gains instead
+        of just break-even."""
+        from backend.core.position_manager import PositionManager
+        async def _noop(*a, **k):
+            return None
+        alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+        daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+        pm = PositionManager(binance=None, order_service=None, daily_reset=daily,
+                             alert_service=alerts, settings={}, session_factory=None)
+        pm._mode = "paper"
+        calls = []
+        async def fake_trail(pid, price):
+            calls.append((pid, price))
+        pm._trail_stop_to_be = fake_trail
+
+        # LONG: entry 100, risk 10, trigger 1R, trail 0.5R
+        pos = {"id": 1, "symbol": "X", "side": "LONG", "quantity": 1.0,
+               "entry_price": 100.0, "stop_loss": 90.0, "take_profit": 130.0,
+               "initial_risk_distance": 10.0}
+
+        # +0.8R (price 108) -> below trigger, no trail
+        await pm._check_profit_trailing(pos, current_price=108.0)
+        assert calls == [], f"trailed below +1R trigger: {calls}"
+
+        # +1.2R (price 112) -> trail to 112 - 5 = 107 (locks +0.7R)
+        await pm._check_profit_trailing(pos, current_price=112.0)
+        assert calls == [(1, 107.0)], f"did not trail at +1R: {calls}"
+
+        # One-way: stop already at 107, price drops to 106 -> no backward trail
+        calls.clear()
+        await pm._check_profit_trailing({**pos, "stop_loss": 107.0}, current_price=106.0)
+        assert calls == [], f"trailed stop backward: {calls}"
+
+    async def test_profit_lock_trails_short(self):
+        """Profit lock works for SHORT positions too."""
+        from backend.core.position_manager import PositionManager
+        async def _noop(*a, **k):
+            return None
+        alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+        daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+        pm = PositionManager(binance=None, order_service=None, daily_reset=daily,
+                             alert_service=alerts, settings={}, session_factory=None)
+        pm._mode = "paper"
+        calls = []
+        async def fake_trail(pid, price):
+            calls.append((pid, price))
+        pm._trail_stop_to_be = fake_trail
+
+        # SHORT: entry 100, risk 10
+        pos = {"id": 2, "symbol": "X", "side": "SHORT", "quantity": 1.0,
+               "entry_price": 100.0, "stop_loss": 110.0, "take_profit": 70.0,
+               "initial_risk_distance": 10.0}
+
+        # +1.2R (price 88) -> trail to 88 + 5 = 93 (locks +0.7R)
+        await pm._check_profit_trailing(pos, current_price=88.0)
+        assert calls == [(2, 93.0)], f"did not trail SHORT at +1R: {calls}"
+
+        # One-way: stop already at 93, price rises to 94 -> no backward trail
+        calls.clear()
+        await pm._check_profit_trailing({**pos, "stop_loss": 93.0}, current_price=94.0)
+        assert calls == [], f"trailed SHORT stop backward: {calls}"
+
+    async def test_profit_lock_trigger_is_configurable(self):
+        """The profit-lock trigger and trail distance come from settings."""
+        from backend.core.position_manager import PositionManager
+        async def _noop(*a, **k):
+            return None
+        alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+        daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+        pm = PositionManager(binance=None, order_service=None, daily_reset=daily,
+                             alert_service=alerts,
+                             settings={"profit_lock_trigger_r": 2.0, "profit_lock_trail_r": 1.0},
+                             session_factory=None)
+        pm._mode = "paper"
+        calls = []
+        async def fake_trail(pid, price):
+            calls.append((pid, price))
+        pm._trail_stop_to_be = fake_trail
+
+        pos = {"id": 3, "symbol": "X", "side": "LONG", "quantity": 1.0,
+               "entry_price": 100.0, "stop_loss": 90.0, "take_profit": 130.0,
+               "initial_risk_distance": 10.0}
+
+        # +1.5R (price 115) -> below 2R trigger, no trail
+        await pm._check_profit_trailing(pos, current_price=115.0)
+        assert calls == [], f"trailed below configured 2R trigger: {calls}"
+
+        # +2.1R (price 121) -> trail to 121 - 10 = 111 (locks +1.1R)
+        await pm._check_profit_trailing(pos, current_price=121.0)
+        assert calls == [(3, 111.0)], f"did not trail at configured trigger: {calls}"

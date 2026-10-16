@@ -26,6 +26,12 @@ class TradingSettingsResponse(BaseModel):
     max_position_notional_pct: float = 50.0
     # Move the stop to break-even once the trade is this many R in profit.
     be_trail_trigger_r: float = 0.5
+    # Profit lock: at this many R in profit, start trailing the stop to lock in gains.
+    profit_lock_trigger_r: float = 1.0
+    # How far behind price (in R) the profit-lock trail sits.
+    profit_lock_trail_r: float = 0.5
+    # Close stale profitable trades after this many hours (0 = disabled).
+    stale_trade_hours: float = 24.0
 
 
 class TradingSettingsUpdate(BaseModel):
@@ -46,6 +52,9 @@ class TradingSettingsUpdate(BaseModel):
     volume_filter_enabled: bool | None = None
     max_position_notional_pct: float | None = None
     be_trail_trigger_r: float | None = None
+    profit_lock_trigger_r: float | None = None
+    profit_lock_trail_r: float | None = None
+    stale_trade_hours: float | None = None
 
 
 class SymbolConfigResponse(BaseModel):
