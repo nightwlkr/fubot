@@ -115,7 +115,7 @@ Default section order:
   - STEP4 WebSocket load ✅ — `scripts/ws_load_test.py`: 50/50 distinct-user clients received both broadcasts; worst latency 5ms; handshake max 21ms. (ConnectionManager is one socket per user by design — the test fans out across N users.)
 - **Deployment (STEP5)**: `/opt/fubot` on `contabo01` (system user `fubot`, venv, read-only GitHub deploy key), Postgres 16 role/db with FRESH secrets (the leaked ones are dead), `fubot.service` enabled, nginx site + Let's Encrypt cert (HSTS on, WS upgrade on `/api/`). Deploy = `git pull` + `npm run build` + `systemctl restart fubot`.
 - **Frontend (PHASE5)**: built and served; Vite dev proxy upgrades WS (`ws: true`).
-- **Tests**: 173 passing.
+- **Tests**: 174 passing.
 - **README.md** (STEP6) covers setup, configuration, operation, troubleshooting.
 
 ### Open items
@@ -177,7 +177,7 @@ Monitor the 72h paper run (scheduled checks). On pass: go-live decision (user), 
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 173 passing (e2e trade flow, -3R stop, security audit, payload contracts included)
+- `PYTHONPATH=. pytest tests/backend/ -q` — 174 passing (e2e trade flow, -3R stop, security audit, payload contracts included)
 - `PYTHONPATH=. python -c "import backend.main"` — backend imports cleanly
 - `cd frontend && npm run build` — dashboard builds to `frontend/dist/`
 - `cd frontend && npm run lint` — oxlint; warnings tolerated, errors block

@@ -37,9 +37,17 @@ def test_health_and_root(client):
 
 
 def test_no_double_prefix(client, test_user):
-    """Regression: routers used to be double-prefixed (/api/auth/auth/login)."""
+    """Regression: routers used to be double-prefixed (/api/auth/auth/login).
+
+    The SPA catch-all (added 2026-10-16) claims unmatched paths for the
+    index.html fallback, so an unknown path under /api is now 405/200-shaped
+    rather than 404 — what must never happen is a DOUBLE-PREFIXED login route
+    actually resolving (that was the original bug)."""
     res = client.post("/api/auth/auth/login", json={"username": test_user.username, "password": TEST_PASSWORD})
-    assert res.status_code == 404
+    assert res.status_code in (404, 405), res.status_code
+    # the real single-prefix route still answers correctly
+    res = client.post("/api/auth/login", json={"username": test_user.username, "password": TEST_PASSWORD})
+    assert res.status_code == 200
 
 
 def test_me_requires_auth(client):
@@ -169,6 +177,26 @@ def test_trading_settings_hot_reload_engine(client, test_user):
     finally:
         client.put("/api/settings/trading", json={
             "max_position_notional_pct": original["max_position_notional_pct"]})
+
+
+def test_spa_served_and_api_still_wins(client, test_user):
+    """The NPM cut-over (2026-10-16) moved SPA hosting out of nginx into the
+    backend: NPM is a dumb reverse proxy, so FastAPI serves frontend/dist with
+    an index.html catch-all. The catch-all must NEVER swallow API/WS routes."""
+    # SPA fallback: any non-API path returns index.html (client-side routing)
+    res = client.get("/some/deep/route")
+    assert res.status_code == 200, res.status_code
+    assert "text/html" in res.headers.get("content-type", "")
+    assert "<div id=\"root\"" in res.text or "<!DOCTYPE html>" in res.text
+
+    # API routes must keep winning over the catch-all (registration order)
+    _login(client, test_user)
+    res = client.get("/api/auth/me")
+    assert res.status_code == 200 and res.json().get("username"), res.text
+    res = client.get("/health")
+    assert res.status_code == 200 and res.json() == {"status": "ok"}
+    res = client.get("/api/bot/status")
+    assert res.status_code == 200
 
 
 def test_bot_engine_wired(client, test_user, monkeypatch):

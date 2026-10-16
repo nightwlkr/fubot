@@ -1,7 +1,11 @@
 from contextlib import asynccontextmanager
 import logging
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
@@ -215,3 +219,27 @@ async def health():
 @app.get("/")
 async def root():
     return {"message": "FUBOT API — Automated Binance Futures Trading Bot"}
+
+
+# ---- Static SPA hosting (added 2026-10-16 for the Nginx Proxy Manager cut-over) ----
+# The tier ABOVE us (NPM) is a dumb reverse proxy: it cannot serve files or do
+# SPA try_files fallback, so the backend owns the built frontend instead.
+#   - assets under /assets/*  -> exact files (cacheable, immutable)
+#   - anything else           -> index.html (client-side routing)
+# API/WS routes are registered ABOVE this catch-all and win by registration order.
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        # API/WS never reach here (routers/websocket routes registered first);
+        # guard anyway so a future route reorder cannot swallow the API.
+        if full_path.startswith(("api/", "ws", "health", "docs", "openapi")):
+            return {"message": "FUBOT API — Automated Binance Futures Trading Bot"}
+        idx = _FRONTEND_DIST / "index.html"
+        if idx.is_file():
+            return FileResponse(idx)
+        return {"message": "FUBOT API — Automated Binance Futures Trading Bot"}
+else:
+    logger.warning("frontend/dist not found at %s — SPA will not be served", _FRONTEND_DIST)
