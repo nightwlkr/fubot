@@ -616,12 +616,20 @@ class PositionManager:
                         start_ms = int(opened_at.timestamp() * 1000) - 60_000
                     income = await self.binance.get_position_income(
                         row.symbol, start_time=start_ms)
-                    pnl_usdt = income.get("totalPnl", 0)
-                    if pnl_usdt is not None:
+                    # Only trust the exchange PnL if income events were found.
+                    # A manual close queries immediately — Binance may not have
+                    # recorded the income yet, returning totalPnl=0 with 0 events.
+                    # Previously that 0 was treated as valid, recording $0 profit
+                    # on profitable manual closes.
+                    if income.get("events", 0) > 0:
+                        pnl_usdt = income.get("totalPnl", 0)
                         logger.info(
                             "[%s] Using exchange PnL: %.4f USDT (fees included)",
                             row.symbol, pnl_usdt
                         )
+                    else:
+                        logger.debug(
+                            "[%s] No income events yet — using synthetic PnL", row.symbol)
                 except Exception as exc:
                     logger.debug("get_position_income failed, using synthetic PnL: %s", exc)
             
