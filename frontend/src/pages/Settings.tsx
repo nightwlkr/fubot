@@ -27,6 +27,9 @@ interface TradingSettings {
   max_daily_trades: number
   max_position_notional_pct: number
   be_trail_trigger_r: number
+  profit_lock_trigger_r: number
+  profit_lock_trail_r: number
+  stale_trade_hours: number
 }
 
 interface SymbolConfig {
