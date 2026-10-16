@@ -95,7 +95,7 @@ Default section order:
 ## Project Overview
 
 **FUBOT** — Binance Futures automated trading bot with React dashboard.
-**URL:** https://fubot.bedikian.cc
+**URL:** https://fubot.bedikian.cc (via Nginx Proxy Manager; backend serves SPA + API + WSS)
 **Repo:** https://github.com/nightwlkr/fubot (private; `origin`, branch `main`)
 **Stack:** FastAPI (Python) · PostgreSQL · React + Vite + TypeScript + Tailwind CSS + Zustand · Binance Futures USDS-M · Nginx
 **Strategy:** Crypto Banter 6-pillars (50 SMA filter, FVG entries, structural stops, 3:1+ R:R, -3R daily loss limit)
@@ -115,7 +115,7 @@ Default section order:
   - STEP4 WebSocket load ✅ — `scripts/ws_load_test.py`: 50/50 distinct-user clients received both broadcasts; worst latency 5ms; handshake max 21ms. (ConnectionManager is one socket per user by design — the test fans out across N users.)
 - **Deployment (STEP5)**: `/opt/fubot` on `contabo01` (system user `fubot`, venv, read-only GitHub deploy key), Postgres 16 role/db with FRESH secrets (the leaked ones are dead), `fubot.service` enabled, nginx site + Let's Encrypt cert (HSTS on, WS upgrade on `/api/`). Deploy = `git pull` + `npm run build` + `systemctl restart fubot`.
 - **Frontend (PHASE5)**: built and served; Vite dev proxy upgrades WS (`ws: true`).
-- **Tests**: 174 passing.
+- **Tests**: 174 passing. **Web tier**: Nginx Proxy Manager (jc21/nginx-proxy-manager, /opt/stacks/nginx) — owns 80/443; system nginx disabled.
 - **README.md** (STEP6) covers setup, configuration, operation, troubleshooting.
 
 ### Open items
@@ -171,6 +171,7 @@ Default section order:
 - BE-trailing has automated coverage (trigger R, one-way, configurable, failed-placement revert) but is only exercised with stubs; 11 `class Config` → `ConfigDict`; per-router duplicated cookie auth → shared dependency; login rate limiter locks the whole source IP; old dev DB (`fubot` on localhost) still holds pre-audit data — the production DB is the VPS. Exit detection misses some stop crosses (5 of 6 losses on 2026-10-15 closed as EXTERNAL_CLOSE via the 5-min reconcile) — the money is exchange-sourced so it is correct, but the engine's TP/SL tick detection deserves a review.
 - Old Binance/DB/JWT credentials leaked in the old public repo history must stay rotated — never reuse the values from the pre-2026-10-12 `.env`.
 
+- **NPM cut-over (2026-10-16)**: replaced the system nginx reverse proxy with Nginx Proxy Manager (jc21/nginx-proxy-manager, /opt/stacks/nginx, network_mode: host, letsencrypt/ mounted at /etc/letsencrypt, admin: admin@bedikian.cc). Bbot is OFF as requested (proxy host id=2 disabled). Fubot (proxy host id=1) forwards to 127.0.0.1:8000 with HSTS, HTTP/2, websockets, Let's Encrypt cert (npm-1) — all proxied requests 200. The backend now also serves the SPA (FastAPI StaticFiles on /assets/* + index.html catch-all on /{full_path:path}) because NPM cannot do try_files; API/WS routes still win by registration order and the handler hard-guards api/|ws|health|docs|openapi. System nginx.service is disabled; deploys no longer need `cp nginx/fubot.conf ...` — instead: `cd /opt/stacks/nginx && docker compose restart` after a UI change, or `docker exec nginx-app-1 /usr/sbin/nginx -s reload` for conf-only tweaks. 174 tests.
 ### Next
 
 Monitor the 72h paper run (scheduled checks). On pass: go-live decision (user), then PHASE4_STEP4's go-live checklist. Backlog: ConfigDict migration, shared auth dependency, smarter login rate limiting.
