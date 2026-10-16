@@ -19,17 +19,37 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 # ── Default trading symbols ──────────────────────────────────────────
+# Migration 008_add_more_symbols adds 15 more pairs (DOGE, NEAR, SUI,
+# ADA, ALGO, UNI, AAVE, GRT, ARB, OP, FIL, INJ, STX, TIA, APE).
+# Keep the full list here so a fresh `alembic upgrade head` seeds everything.
 DEFAULT_SYMBOLS: list[tuple[str, int, float]] = [
-    ("BTCUSDT", 100, 100000.0),
-    ("ETHUSDT", 50, 50000.0),
-    ("SOLUSDT", 20, 10000.0),
-    ("BNBUSDT", 20, 15000.0),
-    ("AVAXUSDT", 20, 10000.0),
-    ("LINKUSDT", 20, 10000.0),
-    ("MATICUSDT", 20, 10000.0),
-    ("DOTUSDT", 20, 10000.0),
-    ("XRPUSDT", 20, 10000.0),
-    ("APTUSDT", 20, 10000.0),
+    # Original seed (002)
+    ("BTCUSDT",  100, 100000.0),
+    ("ETHUSDT",   50,  50000.0),
+    ("SOLUSDT",   20,  10000.0),
+    ("BNBUSDT",   20,  15000.0),
+    ("AVAXUSDT",  20,  10000.0),
+    ("LINKUSDT",  20,  10000.0),
+    ("MATICUSDT", 20,  10000.0),
+    ("DOTUSDT",   20,  10000.0),
+    ("XRPUSDT",   20,  10000.0),
+    ("APTUSDT",   20,  10000.0),
+    # Added by 008_add_more_symbols
+    ("DOGEUSDT",  20,  10000.0),
+    ("NEARUSDT",  20,  10000.0),
+    ("SUIUSDT",   20,  10000.0),
+    ("ADAUSDT",   20,  10000.0),
+    ("ALGOUSDT",  20,  10000.0),
+    ("UNIUSDT",   20,  10000.0),
+    ("AAVEUSDT",  10,  10000.0),
+    ("GRTUSDT",   20,  10000.0),
+    ("ARBUSDT",   20,  10000.0),
+    ("OPUSDT",    20,  10000.0),
+    ("FILUSDT",   20,  10000.0),
+    ("INJUSDT",   20,  10000.0),
+    ("STXUSDT",   20,  10000.0),
+    ("TIAUSDT",   20,  10000.0),
+    ("APEUSDT",   20,  10000.0),
 ]
 
 
