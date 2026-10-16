@@ -54,7 +54,7 @@ class BotEngine:
         self.position_manager = None  # set by main.py after construction
 
         self._running = False
-        self._mode: str = "paper"
+        self._mode: str = settings.get("bot_mode", "paper")
         self._task: Optional[asyncio.Task] = None
         self._last_scan: Optional[datetime] = None
         self._scan_count = 0

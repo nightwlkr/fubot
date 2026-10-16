@@ -129,6 +129,13 @@ async def init_bot(app: FastAPI) -> None:
 
     async with AsyncSessionLocal() as db:
         bot_settings = await load_bot_settings(db)
+        # Restore the last-used mode so a restart doesn't revert to paper
+        from backend.models.setting import Setting
+        from sqlalchemy import select
+        result = await db.execute(select(Setting).where(Setting.key == "bot_mode"))
+        saved_mode = result.scalar_one_or_none()
+        if saved_mode and saved_mode.value in ("paper", "live"):
+            bot_settings["bot_mode"] = saved_mode.value
 
     signal_service = SignalService(
         session_factory=AsyncSessionLocal, binance=binance, settings=bot_settings

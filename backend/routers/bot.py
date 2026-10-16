@@ -42,10 +42,28 @@ async def start_bot(
     if _bot_engine is None:
         raise HTTPException(status_code=503, detail="Bot engine not initialized")
     user = await get_current_user_from_cookie(request, db)
-    mode = body.mode.lower()
+    if body.mode is not None:
+        mode = body.mode.lower()
+    else:
+        # Use the saved mode from settings (survives restarts)
+        from backend.models.setting import Setting
+        from sqlalchemy import select
+        result = await db.execute(select(Setting).where(Setting.key == "bot_mode"))
+        saved = result.scalar_one_or_none()
+        mode = (saved.value if saved and saved.value in ("paper", "live") else "paper")
     if mode not in ("paper", "live"):
         raise HTTPException(status_code=400, detail="Mode must be 'paper' or 'live'")
     await _bot_engine.start(mode=mode)
+    # Persist the mode so a restart doesn't revert to paper
+    from backend.models.setting import Setting
+    from sqlalchemy import select
+    result = await db.execute(select(Setting).where(Setting.key == "bot_mode"))
+    setting = result.scalar_one_or_none()
+    if setting:
+        setting.value = mode
+    else:
+        db.add(Setting(key="bot_mode", value=mode))
+    await db.commit()
     logger.info(f"Bot started in {mode} mode by user '{user.username}'")
     return {"ok": True, "status": "running", "mode": mode}
 

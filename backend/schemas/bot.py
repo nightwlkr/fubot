@@ -15,4 +15,4 @@ class BotStatusResponse(BaseModel):
 
 
 class BotStartRequest(BaseModel):
-    mode: str = "paper"  # "paper" or "live"
+    mode: str | None = None  # "paper" or "live"; None = use saved mode
