@@ -176,7 +176,9 @@ class PositionManager:
                         symbol=symbol, side=side, entry_price=entry,
                         quantity=qty, leverage=leverage,
                         stop_loss=stop_loss, take_profit=take_profit,
-                        initial_risk_distance=None, status="OPEN"))
+                        initial_risk_distance=None, status="OPEN",
+                        mode=self._mode,
+                    ))
                     await session.commit()
             except Exception:
                 logger.exception(f"[{symbol}] Reconcile: failed to record position")
@@ -571,6 +573,7 @@ class PositionManager:
                 pnl_r=pnl_r,
                 exit_reason=reason,
                 strategy_type=strategy_type,
+                mode=self._mode,
                 closed_at=datetime.now(timezone.utc),
             )
             session.add(trade)

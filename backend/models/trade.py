@@ -18,5 +18,8 @@ class Trade(Base):
     pnl_r: Mapped[float] = mapped_column(Numeric, nullable=False)
     exit_reason: Mapped[str] = mapped_column(String(30), nullable=False)
     strategy_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 'live' or 'paper'. Set from BotEngine._mode at the time the trade is recorded.
+    # Existing trades default to 'live' via DB server_default.
+    mode: Mapped[str] = mapped_column(String(10), default="live")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

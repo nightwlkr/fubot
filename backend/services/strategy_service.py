@@ -417,6 +417,7 @@ class StrategyService:
                 take_profit=float(signal.take_profit),
                 initial_risk_distance=initial_risk_distance,
                 status="OPEN",
+                mode="paper" if paper_mode else "live",
             )
             session.add(position)
             await session.flush()
