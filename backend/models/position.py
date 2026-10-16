@@ -21,6 +21,11 @@ class Position(Base):
     # the denominator and inflate |R| on a later close.
     initial_risk_distance: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     strategy_type: Mapped[str] = mapped_column(String(20), default="UNKNOWN")  # FVG, 3CANDLE, CHOC, etc.
+    # Best favourable price since entry — the runner-trail (DECISION.md D3)
+    # trails TRAIL_R behind this peak, one-way. Persisted so a restart never
+    # lowers a live stop below the exchange's resting order.
+    peak_favorable_price: Mapped[float | None] = mapped_column(
+        Numeric(30, 12), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
     # timezone-aware UTC now — the old naive datetime.utcnow() default made
     # Postgres interpret the wall time as session-TZ (+02), skewing every
