@@ -5,7 +5,7 @@ import { Card, CardHeader, CardTitle } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
 import { clsx } from 'clsx'
-import { Save, Eye, EyeOff, ShieldCheck, AlertTriangle } from 'lucide-react'
+import { Save, Eye, EyeOff, ShieldCheck, AlertTriangle, RefreshCw } from 'lucide-react'
 
 interface APIKeyStatus {
   has_key: boolean
@@ -150,7 +150,8 @@ function APIKeySection() {
           <p className="text-success text-sm bg-success/10 border border-success/30 rounded px-3 py-2">API key saved successfully!</p>
         )}
 
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between">
+          <ExchangeSyncButton />
           <Button onClick={handleSave} isLoading={isSaving} disabled={isSaving || !apiKey || !apiSecret}>
             <Save className="w-4 h-4" />
             Save API Key
@@ -158,6 +159,41 @@ function APIKeySection() {
         </div>
       </div>
     </Card>
+  )
+}
+
+function ExchangeSyncButton() {
+  const [isSyncing, setIsSyncing] = useState(false)
+  const [syncResult, setSyncResult] = useState<string | null>(null)
+
+  const handleSync = async () => {
+    setIsSyncing(true)
+    setSyncResult(null)
+    try {
+      const res = await api.post('/settings/exchange-sync')
+      const { checked, fixed } = res.data
+      setSyncResult(`Synced: ${checked} trades checked, ${fixed} fixed`)
+      setTimeout(() => setSyncResult(null), 8000)
+    } catch (err: any) {
+      setSyncResult(`Error: ${err.response?.data?.detail || 'Sync failed'}`)
+      setTimeout(() => setSyncResult(null), 8000)
+    } finally {
+      setIsSyncing(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <Button variant="secondary" onClick={handleSync} isLoading={isSyncing} disabled={isSyncing}>
+        <RefreshCw className="w-4 h-4" />
+        Exchange Sync
+      </Button>
+      {syncResult && (
+        <span className={`text-sm ${syncResult.startsWith('Error') ? 'text-danger' : 'text-success'}`}>
+          {syncResult}
+        </span>
+      )}
+    </div>
   )
 }
 

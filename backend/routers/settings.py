@@ -285,3 +285,102 @@ async def save_api_key(
     logger.info(f"{env} API key updated by user '{user.username}' (masked: {mask_key(body.api_key)})")
 
     return {"ok": True, "masked_key": mask_key(body.api_key)}
+
+
+@router.post("/exchange-sync")
+async def exchange_sync(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reconcile trade history, PnL, and performance with Binance's actual data.
+
+    Fetches realized PnL from Binance's income API for each recent trade and
+    corrects any DB trades where the PnL drifted (e.g. recorded as $0 because
+    the income event hadn't been recorded yet at close time).
+    """
+    user = await get_current_user_from_cookie(request, db)
+
+    from backend.models.trade import Trade
+    from backend.models.position import Position
+    from backend.models.account import Account
+    from backend.encryption import decrypt
+
+    # Get Binance credentials
+    result = await db.execute(select(Account).where(
+        Account.is_active == True, Account.testnet == False))
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=400, detail="No active Binance account configured")
+
+    api_key = decrypt(account.api_key_encrypted)
+    api_secret = decrypt(account.api_secret_encrypted)
+
+    # Build a Binance client
+    from backend.services.binance_service import BinanceService
+    binance = BinanceService(api_key=api_key, api_secret=api_secret)
+
+    # Get recent trades (last 48h)
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+    result = await db.execute(
+        select(Trade).where(Trade.closed_at >= cutoff).order_by(Trade.closed_at))
+    trades = result.scalars().all()
+
+    fixed = 0
+    checked = 0
+    for trade in trades:
+        checked += 1
+        try:
+            opened_at = trade.closed_at - timedelta(minutes=5)  # approximate open time
+            start_ms = int(opened_at.timestamp() * 1000)
+            income = await binance.get_position_income(trade.symbol, start_time=start_ms)
+
+            if income.get("events", 0) == 0:
+                continue  # no income events — keep synthetic PnL
+
+            exchange_pnl = income.get("totalPnl", 0)
+            db_pnl = float(trade.pnl_usdt)
+
+            # Only fix if significantly different (> $0.01)
+            if abs(exchange_pnl - db_pnl) > 0.01:
+                # Recalculate R from the position's frozen risk distance
+                pnl_r = float(trade.pnl_r)
+                if trade.position_id:
+                    pos = await db.get(Position, trade.position_id)
+                    if pos and pos.initial_risk_distance and float(pos.initial_risk_distance) > 0:
+                        risk_amt = float(pos.initial_risk_distance) * float(trade.quantity)
+                        if risk_amt > 0:
+                            pnl_r = exchange_pnl / risk_amt
+
+                await db.execute(
+                    update(Trade).where(Trade.id == trade.id)
+                    .values(pnl_usdt=round(exchange_pnl, 4), pnl_r=round(pnl_r, 4))
+                )
+                fixed += 1
+                logger.info(f"Exchange sync: {trade.symbol} {db_pnl} -> {exchange_pnl} USDT")
+        except Exception as exc:
+            logger.warning(f"Exchange sync: failed to check {trade.symbol}: {exc}")
+
+    await db.commit()
+
+    # Recalculate daily summaries for affected dates
+    from sqlalchemy import text
+    await db.execute(text("""
+        UPDATE daily_summary SET
+            total_trades = t.cnt, wins = t.wins, losses = t.losses, breakeven = t.bes,
+            total_pnl_r = t.total_r, total_pnl_usdt = t.total_usdt,
+            worst_trade_r = t.worst_r, best_trade_r = t.best_r,
+            daily_loss_limit_hit = (t.total_r <= -3.0)
+        FROM (SELECT DATE(closed_at) as d, COUNT(*) as cnt,
+            COUNT(*) FILTER (WHERE pnl_r > 0) as wins,
+            COUNT(*) FILTER (WHERE pnl_r < 0) as losses,
+            COUNT(*) FILTER (WHERE pnl_r = 0) as bes,
+            COALESCE(SUM(pnl_r),0) as total_r, COALESCE(SUM(pnl_usdt),0) as total_usdt,
+            COALESCE(MIN(pnl_r),0) as worst_r, COALESCE(MAX(pnl_r),0) as best_r
+            FROM trades WHERE closed_at >= :cutoff GROUP BY DATE(closed_at)) t
+        WHERE daily_summary.date = t.d
+    """), {"cutoff": cutoff})
+    await db.commit()
+
+    logger.info(f"Exchange sync by user '{user.username}': checked {checked}, fixed {fixed}")
+    return {"ok": True, "checked": checked, "fixed": fixed}
