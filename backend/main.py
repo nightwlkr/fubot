@@ -229,12 +229,22 @@ _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _FRONTEND_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
 
+    # SPA catch-all: matches any GET that wasn't claimed by an earlier
+    # route. We MUST not swallow real /api/* requests — many endpoints
+    # (`/api/signals`, `/api/trades`, `/api/positions`, …) are registered
+    # with a trailing slash and rely on FastAPI's redirect_slashes to
+    # 307 `/api/foo` -> `/api/foo/`. Starlette's `path` converter is
+    # greedy, so this catch-all is reached for `/api/foo` too; we
+    # forward the 307 manually and 404 for unknown `/api/*` paths so
+    # axios treats them as real misses instead of HTML responses.
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
-        # API/WS never reach here (routers/websocket routes registered first);
-        # guard anyway so a future route reorder cannot swallow the API.
+        from fastapi import HTTPException
+        from fastapi.responses import RedirectResponse
         if full_path.startswith(("api/", "ws", "health", "docs", "openapi")):
-            return {"message": "FUBOT API — Automated Binance Futures Trading Bot"}
+            if full_path.startswith("api/") and not full_path.endswith("/"):
+                return RedirectResponse(url=f"/{full_path}/", status_code=307)
+            raise HTTPException(status_code=404, detail="Not Found")
         idx = _FRONTEND_DIST / "index.html"
         if idx.is_file():
             return FileResponse(idx)
