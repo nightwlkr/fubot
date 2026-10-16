@@ -216,11 +216,9 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/")
-async def root():
-    return {"message": "FUBOT API — Automated Binance Futures Trading Bot"}
-
-
+# Root now serves the SPA via the catch-all below (the old JSON root handler
+# was a leftover that blocked "/"; the catch-all serves index.html for both
+# "/" and any client-side route).
 # ---- Static SPA hosting (added 2026-10-16 for the Nginx Proxy Manager cut-over) ----
 # The tier ABOVE us (NPM) is a dumb reverse proxy: it cannot serve files or do
 # SPA try_files fallback, so the backend owns the built frontend instead.

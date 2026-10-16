@@ -33,7 +33,9 @@ def test_login_sets_cookie_and_returns_token(client, test_user):
 
 def test_health_and_root(client):
     assert client.get("/health").json() == {"status": "ok"}
-    assert "FUBOT" in client.get("/").json()["message"]
+    # Root now serves the SPA (was JSON before the NPM cut-over)
+    res = client.get("/")
+    assert res.status_code == 200 and "text/html" in res.headers.get("content-type", "")
 
 
 def test_no_double_prefix(client, test_user):
@@ -182,12 +184,18 @@ def test_trading_settings_hot_reload_engine(client, test_user):
 def test_spa_served_and_api_still_wins(client, test_user):
     """The NPM cut-over (2026-10-16) moved SPA hosting out of nginx into the
     backend: NPM is a dumb reverse proxy, so FastAPI serves frontend/dist with
-    an index.html catch-all. The catch-all must NEVER swallow API/WS routes."""
+    an index.html catch-all. The catch-all must NEVER swallow API/WS routes,
+    and the ROOT must serve the SPA (not the legacy JSON root message)."""
+    # Root serves the SPA, not the JSON API message
+    res = client.get("/")
+    assert res.status_code == 200, res.status_code
+    assert "text/html" in res.headers.get("content-type", ""), res.text
+    assert "<div id=\"root\"" in res.text or "<!DOCTYPE html>" in res.text
+
     # SPA fallback: any non-API path returns index.html (client-side routing)
     res = client.get("/some/deep/route")
     assert res.status_code == 200, res.status_code
     assert "text/html" in res.headers.get("content-type", "")
-    assert "<div id=\"root\"" in res.text or "<!DOCTYPE html>" in res.text
 
     # API routes must keep winning over the catch-all (registration order)
     _login(client, test_user)
