@@ -1,6 +1,6 @@
 """Trade log router — list, stats, filters, pagination."""
 import logging
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from math import ceil
 from typing import Optional
 
@@ -63,7 +63,10 @@ async def list_trades(
     if to_date:
         try:
             td = datetime.fromisoformat(to_date)
-            query = query.where(Trade.closed_at <= td)
+            # Include the full end day (fromisoformat gives midnight at start)
+            if len(to_date) == 10:  # YYYY-MM-DD format
+                td = td + timedelta(days=1)
+            query = query.where(Trade.closed_at < td)
         except ValueError:
             pass
 
@@ -88,7 +91,9 @@ async def list_trades(
     if to_date:
         try:
             td = datetime.fromisoformat(to_date)
-            count_query = count_query.where(Trade.closed_at <= td)
+            if len(to_date) == 10:
+                td = td + timedelta(days=1)
+            count_query = count_query.where(Trade.closed_at < td)
         except ValueError:
             pass
 

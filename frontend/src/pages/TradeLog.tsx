@@ -69,8 +69,8 @@ export default function TradeLog() {
       if (symbol) params.symbol = symbol
       if (side) params.side = side
       if (outcome) params.outcome = outcome
-      if (fromDate) params.from = fromDate
-      if (toDate) params.to = toDate
+      if (fromDate) params.from_date = fromDate
+      if (toDate) params.to_date = toDate
 
       const [tradesRes, statsRes] = await Promise.all([
         api.get<TradeResponse>(ENDPOINTS.trades, { params }),
