@@ -93,27 +93,36 @@ class SignalService:
 
         # 3. Detect patterns
         candidates: list[tuple[str, str, float, float, float, float, float]] = []
-        # FVG runs on 1h: a true 3-candle gap (c2.low > c1.high) essentially
-        # never forms on liquid 5m crypto (ranges always overlap) — 0 detections
-        # there. On 1h, gaps do occur, making this a real second strategy.
-        for f in detect_fvg(k1h, symbol):
-            e = evaluate_fvg_entry(f, atr_1h, rr_min)
-            if e["is_valid"]:
-                direction = "LONG" if f.direction == "BULLISH" else "SHORT"
-                candidates.append(("FVG", direction, f.zone_min, f.zone_max,
-                                   e["stop_loss"], e["take_profit"], e["rr_ratio"]))
-        for p in detect_three_candles(k5m, symbol):
-            e = evaluate_three_candle_entry(p, atr_1h, rr_min)
-            if e["is_valid"]:
-                direction = "LONG" if p.direction == "BULLISH" else "SHORT"
-                candidates.append(("3CANDLE", direction, p.entry_zone_min, p.entry_zone_max,
-                                   e["stop_loss"], e["take_profit"], e["rr_ratio"]))
-        for ch in detect_choch(k15m, symbol, "15m", atr_1h, rr_min):
-            if ch.is_valid:
-                direction = "LONG" if ch.direction == "BULLISH" else "SHORT"
-                candidates.append(("CHOC", direction,
-                                   ch.pullback_entry_zone[0], ch.pullback_entry_zone[1],
-                                   ch.stop_loss, ch.take_profit, ch.rr_ratio))
+        # Strategy toggles (Settings UI). DECISION.md D1 (2026-10-16): FVG is
+        # disabled in production — its stop geometry (zone_min - atr_1h with a
+        # 3R target) produced 15.6% targets and -0.397R/trade live (0/5). The
+        # flags existed in the settings API but were never consumed; without
+        # this gate a "disabled" strategy kept firing. Default True preserves
+        # prior behaviour when the keys are absent.
+        if bool(self.settings.get("strategy_fvg_enabled", True)):
+            # FVG runs on 1h: a true 3-candle gap (c2.low > c1.high) essentially
+            # never forms on liquid 5m crypto (ranges always overlap) — 0
+            # detections there. On 1h, gaps do occur.
+            for f in detect_fvg(k1h, symbol):
+                e = evaluate_fvg_entry(f, atr_1h, rr_min)
+                if e["is_valid"]:
+                    direction = "LONG" if f.direction == "BULLISH" else "SHORT"
+                    candidates.append(("FVG", direction, f.zone_min, f.zone_max,
+                                       e["stop_loss"], e["take_profit"], e["rr_ratio"]))
+        if bool(self.settings.get("strategy_3candle_enabled", True)):
+            for p in detect_three_candles(k5m, symbol):
+                e = evaluate_three_candle_entry(p, atr_1h, rr_min)
+                if e["is_valid"]:
+                    direction = "LONG" if p.direction == "BULLISH" else "SHORT"
+                    candidates.append(("3CANDLE", direction, p.entry_zone_min, p.entry_zone_max,
+                                       e["stop_loss"], e["take_profit"], e["rr_ratio"]))
+        if bool(self.settings.get("strategy_choch_enabled", True)):
+            for ch in detect_choch(k15m, symbol, "15m", atr_1h, rr_min):
+                if ch.is_valid:
+                    direction = "LONG" if ch.direction == "BULLISH" else "SHORT"
+                    candidates.append(("CHOC", direction,
+                                       ch.pullback_entry_zone[0], ch.pullback_entry_zone[1],
+                                       ch.stop_loss, ch.take_profit, ch.rr_ratio))
 
         if not candidates:
             return []

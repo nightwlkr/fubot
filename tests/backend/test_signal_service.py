@@ -151,6 +151,41 @@ def _run(coro):
         loop.close()
 
 
+def test_strategy_toggle_gates_the_scan():
+    """The strategy_*_enabled settings existed in the Settings API but were
+    never consumed — a 'disabled' strategy kept firing (DECISION.md D1:
+    FVG produced 15.6% targets and -0.397R/trade live). Disabling a strategy
+    must remove its candidates entirely."""
+    async def scenario():
+        # FVG off: the flat fixture's FVG tail must NOT yield a candidate
+        signals, persisted = await _scan_and_fetch(
+            "flat", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
+                                  "trade_min_trend_strength": "WEAK",
+                                  "strategy_fvg_enabled": False})
+        try:
+            assert not [s for s in signals if s.strategy_type == "FVG"], \
+                "FVG fired while strategy_fvg_enabled=false"
+            assert not [r for r in persisted if r["strategy_type"] == "FVG"]
+        finally:
+            await _cleanup()
+    _run(scenario())
+
+    async def scenario_all_off():
+        # all three off: no candidates at all
+        signals, persisted = await _scan_and_fetch(
+            "flat", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
+                                  "trade_min_trend_strength": "WEAK",
+                                  "strategy_fvg_enabled": False,
+                                  "strategy_3candle_enabled": False,
+                                  "strategy_choch_enabled": False})
+        try:
+            assert signals == [] and persisted == [], \
+                f"strategies disabled but candidates still generated: {[s.strategy_type for s in signals]}"
+        finally:
+            await _cleanup()
+    _run(scenario_all_off())
+
+
 def test_scan_persists_pending_fvg_signal():
     async def scenario():
         # The fvg_tail pattern on 1h tips the SMA → BULLISH/WEAK; allow neutral

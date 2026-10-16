@@ -68,4 +68,5 @@ conservative ordering, one-way ratchet). n≈2,270 filled trades per config, 45 
   (maker exits vs taker), (c) NOT exit-geometry tinkering.
 
 ## Monitoring log
+- 2026-10-16 04:48 +04: engine OK (running/live, 732 scans), 3 OPEN positions all protected **at the exchange** (BTC SL 81841.4/TP 84670.4, XRP SL 1.3486/TP 1.2913, BNB SL 731.01 BE/TP 711.76 — verified via openAlgoOrders; orders-table links absent for the two reconcile-adopted rows as expected). 0 trades in 4h — max_positions=3 reached by the open positions, so no new entries (expected, not a fault). 6,214 signals expired in 4h (pipeline generating, execution capped). LIMIT-entry fill rate still unmeasured (no attempts). Journal: 138 error lines = transient Postgres-restart blips in the bookTicker callback ("Connection refused"/"shutting down/starting up"), self-recovered — no code fault; note for backlog: make the tick handler resilient to brief DB outages.
 - 2026-10-16 01:24 +04: engine OK (`{"status":"ok"}`), 3 OPEN positions all protected (BNB SL 736.41, XRP SL 1.3486, BTC SL 81841.4), 0 trades/2h, 0 journal errors, no naked/unprotected events, no LIMIT-fill cancellations logged yet.
