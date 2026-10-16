@@ -170,7 +170,7 @@ function ExchangeSyncButton() {
     setIsSyncing(true)
     setSyncResult(null)
     try {
-      const res = await api.post('/settings/exchange-sync')
+      const res = await api.post<{ checked: number; fixed: number }>('/settings/exchange-sync')
       const { checked, fixed } = res.data
       setSyncResult(`Synced: ${checked} trades checked, ${fixed} fixed`)
       setTimeout(() => setSyncResult(null), 8000)
