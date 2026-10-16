@@ -323,6 +323,19 @@ class PositionManager:
             if current_price <= 0:
                 continue
 
+            # For TP/SL checks, use MARK PRICE — Binance triggers stops on
+            # CONTRACT_PRICE (mark price for perpetuals). Checking against
+            # last-trade price means the exchange fills the stop before our
+            # price check sees the crossing, leaving the engine to discover
+            # the close via the 5-min reconcile (EXTERNAL_CLOSE).
+            try:
+                mark_data = await self.binance.get_mark_price(symbol)
+                mark_price = float(mark_data.get("markPrice", 0) or 0)
+            except Exception:
+                mark_price = current_price
+            if mark_price <= 0:
+                mark_price = current_price
+
             # Check BE trailing (REST-only; needs klines)
             await self._check_be_trailing(position, current_price)
 
@@ -332,8 +345,8 @@ class PositionManager:
             # Check stale trades (close profitable trades that aren't reaching TP)
             await self._check_stale_trade(position)
 
-            # Check if TP or SL was hit
-            tp_hit, sl_hit = self._check_tp_sl_hit(position, current_price)
+            # Check if TP or SL was hit — use MARK PRICE to match Binance's trigger
+            tp_hit, sl_hit = self._check_tp_sl_hit(position, mark_price)
             if tp_hit:
                 await self._close_position(position, "TP_HIT", current_price)
             elif sl_hit:
