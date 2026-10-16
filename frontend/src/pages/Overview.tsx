@@ -291,6 +291,8 @@ export default function Overview() {
                 <TableHeadCell className="text-right">PnL (USD)</TableHeadCell>
                 <TableHeadCell className="text-right">ROI</TableHeadCell>
                 <TableHeadCell className="text-right">Lev</TableHeadCell>
+                <TableHeadCell className="text-right">Liq Price</TableHeadCell>
+                <TableHeadCell className="text-right">Margin at Risk</TableHeadCell>
                 <TableHeadCell className="text-right">Action</TableHeadCell>
               </TableRow>
             </TableHead>
@@ -321,6 +323,14 @@ export default function Overview() {
                     </span>
                   </TableCell>
                   <TableCell className="text-right font-mono text-sm">{pos.leverage}x</TableCell>
+                  {/* Liquidation price — approximate (cross margin, no maintenance buffer) */}
+                  <TableCell className="text-right font-mono text-sm text-warning">
+                    {formatPrice(pos.liquidation_price)}
+                  </TableCell>
+                  {/* Initial margin = collateral posted = USD lost on liquidation */}
+                  <TableCell className="text-right font-mono text-sm text-danger">
+                    ${pos.margin_usd.toFixed(2)}
+                  </TableCell>
                   <TableCell className="text-right">
                     <Button
                       variant="danger"

@@ -11,6 +11,8 @@ export interface Position {
   mark_price: number
   unrealized_pnl: number
   unrealized_pnl_pct: number
+  liquidation_price: number
+  margin_usd: number
   stop_loss: number | null
   take_profit: number | null
   leverage: number

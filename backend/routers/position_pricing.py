@@ -98,6 +98,19 @@ def apply_pricing(pos, pricing: dict[str, dict[str, Any]]) -> dict[str, float]:
         direction = 1.0 if side == "LONG" else -1.0
         pnl = (mark - entry) * qty * direction if mark > 0 else 0.0
 
+    # Initial margin = collateral posted = USD lost on liquidation
+    notional = entry * qty
+    margin_usd = notional / leverage if leverage > 0 else notional
+
+    # Approximate liquidation price (cross margin, no maintenance margin buffer)
+    if leverage > 0:
+        if side == "LONG":
+            liq_price = entry * (1 - 1.0 / leverage)
+        else:
+            liq_price = entry * (1 + 1.0 / leverage)
+    else:
+        liq_price = 0.0
+
     return {
         "entry_price": entry,
         "quantity": qty,
@@ -105,4 +118,6 @@ def apply_pricing(pos, pricing: dict[str, dict[str, Any]]) -> dict[str, float]:
         "mark_price": mark,
         "unrealized_pnl": pnl,
         "unrealized_pnl_pct": _roi_pct(pnl, entry, qty, leverage),
+        "liquidation_price": round(liq_price, 6),
+        "margin_usd": round(margin_usd, 2),
     }
