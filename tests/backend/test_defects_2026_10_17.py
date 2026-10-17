@@ -525,3 +525,179 @@ class TestFlattenNotifiesTheDailyAccumulator:
         assert "daily_reset=daily_reset" in strategy_block
         assert "daily_reset.bot = engine" in src, \
             "the -3R stop must still be able to stop the engine"
+
+
+# ---------------------------------------------------------------------------
+# 3. /bot/status hardcoded open_positions: []
+# ---------------------------------------------------------------------------
+
+BOT_SYMBOL_A = "ZZBOTAAAUSDT"
+BOT_SYMBOL_B = "ZZBOTBBBUSDT"
+
+
+def _fake_engine(session_factory):
+    """A BotEngine with everything stubbed except what get_status touches."""
+    from backend.core.bot_engine import BotEngine
+    from backend.core.daily_reset import DailyResetService
+
+    engine = BotEngine(
+        settings={}, binance=None, signal_service=None, strategy_service=None,
+        risk_service=None, order_service=None, alert_service=None,
+        daily_reset=DailyResetService(
+            session_factory=session_factory, settings={"daily_loss_limit_r": -3.0}),
+        session_factory=session_factory,
+    )
+    return engine
+
+
+class _StaticPM:
+    """PositionManager stand-in exposing only the snapshot cache."""
+
+    def __init__(self, cached):
+        self._cached = cached
+        self.db_reads = 0
+
+    def _cached_open_positions(self):
+        return self._cached
+
+
+class TestBotStatusReportsRealOpenPositions:
+    """`BotEngine.get_status` returned a literal `"open_positions": []`. Observed
+    live: the endpoint reported zero while three positions were open, so every
+    consumer that is not the dashboard was told the account was flat."""
+
+    async def test_status_reports_the_real_open_positions(self):
+        from backend.models.position import Position as Pos
+        from sqlalchemy import delete, select
+
+        Session, engine = _own_session_factory()
+        try:
+            async with Session() as session:
+                await session.execute(delete(Pos).where(
+                    Pos.symbol.in_([BOT_SYMBOL_A, BOT_SYMBOL_B])))
+                session.add_all([
+                    Pos(symbol=BOT_SYMBOL_A, side="LONG", entry_price=Decimal("100"),
+                        quantity=Decimal("1"), leverage=10,
+                        stop_loss=Decimal("95"), take_profit=Decimal("118"),
+                        initial_risk_distance=Decimal("5"),
+                        strategy_type="3CANDLE", status="OPEN", mode="live"),
+                    Pos(symbol=BOT_SYMBOL_B, side="SHORT", entry_price=Decimal("200"),
+                        quantity=Decimal("2"), leverage=10,
+                        stop_loss=Decimal("210"), take_profit=Decimal("170"),
+                        initial_risk_distance=Decimal("10"),
+                        strategy_type="FVG", status="OPEN", mode="live"),
+                    # CLOSED rows must not be reported.
+                    Pos(symbol=BOT_SYMBOL_B, side="SHORT", entry_price=Decimal("210"),
+                        quantity=Decimal("2"), leverage=10,
+                        strategy_type="FVG", status="CLOSED", mode="live",
+                        closed_at=datetime.now(timezone.utc)),
+                ])
+                await session.commit()
+
+            bot = _fake_engine(Session)
+            status = await bot.get_status()
+
+            reported = status["open_positions"]
+            assert {p["symbol"] for p in reported} == {BOT_SYMBOL_A, BOT_SYMBOL_B}, \
+                f"status must report the real OPEN positions, got {reported}"
+            assert len(reported) == 2, "a CLOSED row must not be reported"
+            sides = {p["symbol"]: p["side"] for p in reported}
+            assert sides == {BOT_SYMBOL_A: "LONG", BOT_SYMBOL_B: "SHORT"}
+
+            # JSON-serialisable — FastAPI must not 500 on a Decimal or datetime.
+            import json
+            json.dumps(status)
+        finally:
+            async with Session() as session:
+                await session.execute(delete(Pos).where(
+                    Pos.symbol.in_([BOT_SYMBOL_A, BOT_SYMBOL_B])))
+                await session.commit()
+            await engine.dispose()
+
+    async def test_status_is_empty_only_when_nothing_is_open(self):
+        from backend.models.position import Position as Pos
+        from sqlalchemy import delete
+
+        Session, engine = _own_session_factory()
+        try:
+            async with Session() as session:
+                await session.execute(delete(Pos).where(
+                    Pos.symbol.in_([BOT_SYMBOL_A, BOT_SYMBOL_B])))
+                await session.commit()
+            status = await _fake_engine(Session).get_status()
+            assert status["open_positions"] == []
+        finally:
+            await engine.dispose()
+
+    async def test_status_prefers_the_snapshot_cache_over_a_db_read(self):
+        """The tick path must read a snapshot, not the database — and
+        `get_status` is reachable from a request handler, so it should not add
+        a query per call when the cache already answers it."""
+        from backend.models.position import Position as Pos
+        from sqlalchemy import delete, func, select
+
+        Session, engine = _own_session_factory()
+        try:
+            async with Session() as session:
+                await session.execute(delete(Pos).where(
+                    Pos.symbol.in_([BOT_SYMBOL_A, BOT_SYMBOL_B])))
+                session.add(Pos(
+                    symbol=BOT_SYMBOL_A, side="LONG", entry_price=Decimal("100"),
+                    quantity=Decimal("1"), leverage=10,
+                    strategy_type="3CANDLE", status="OPEN", mode="live"))
+                await session.commit()
+
+            bot = _fake_engine(Session)
+            # A populated cache must be used verbatim — including for a symbol
+            # the cache and the DB can disagree about.
+            bot.position_manager = _StaticPM([
+                {"id": 999, "symbol": BOT_SYMBOL_A, "side": "LONG",
+                 "entry_price": 100.0, "quantity": 1.0,
+                 "stop_loss": 95.0, "take_profit": 118.0, "signal_id": None,
+                 "opened_at": None, "initial_risk_distance": 5.0},
+            ])
+            status = await bot.get_status()
+            assert [p["symbol"] for p in status["open_positions"]] == [BOT_SYMBOL_A]
+            assert status["open_positions"][0]["id"] == 999
+
+            # An empty cache falls back to the DB (the cache is only populated
+            # after the first 30s pass, and `_cached_open_positions` cannot tell
+            # "never refreshed" from "genuinely flat").
+            bot.position_manager = _StaticPM([])
+            status = await bot.get_status()
+            assert [p["symbol"] for p in status["open_positions"]] == [BOT_SYMBOL_A]
+        finally:
+            async with Session() as session:
+                await session.execute(delete(Pos).where(
+                    Pos.symbol.in_([BOT_SYMBOL_A, BOT_SYMBOL_B])))
+                await session.commit()
+            await engine.dispose()
+
+    def test_get_status_no_longer_hardcodes_an_empty_list(self):
+        """Source-contract: the literal that made the endpoint lie."""
+        from backend.core.bot_engine import BotEngine
+        src = inspect.getsource(BotEngine.get_status)
+        assert '"open_positions": []' not in src, \
+            "get_status must report the real open positions, not a literal []"
+        assert "open_positions" in src
+
+    def test_the_fallback_is_conditional_on_the_cache(self):
+        """Structural: the DB read must be the FALLBACK, not the only path —
+        otherwise `get_status` adds a query per request."""
+        from backend.core.bot_engine import BotEngine
+        src = inspect.getsource(BotEngine.get_status)
+        assert "_open_position_summaries()" in src, \
+            "get_status must build the list from the real position source"
+        summaries = inspect.getsource(BotEngine._open_position_summaries)
+        assert "_cached_open_positions()" in summaries, \
+            "the PositionManager snapshot cache must be preferred (no query per call)"
+        assert "_open_positions_from_db()" in summaries, \
+            "an empty cache must fall back to a query (documented, not silent)"
+        # The cache branch must come FIRST: only an empty/unavailable cache
+        # justifies the query.
+        assert summaries.index("_cached_open_positions()") < \
+            summaries.index("_open_positions_from_db()")
+        helper = inspect.getsource(BotEngine._open_positions_from_db)
+        assert 'Position.status == "OPEN"' in helper, \
+            "the fallback must filter on status OPEN"
+        assert "float(" in helper, "rows must be coerced to JSON-serialisable floats"

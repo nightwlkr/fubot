@@ -15,6 +15,7 @@ from sqlalchemy import select
 from backend.models.symbol import Symbol
 from backend.models.equity_log import EquityLog
 from backend.models.trade import Trade
+from backend.models.position import Position
 from backend.services.signal_service import SignalService
 from backend.services.strategy_service import StrategyService
 from backend.services.risk_service import RiskService
@@ -299,6 +300,84 @@ class BotEngine:
         except Exception as e:
             logger.debug(f"Equity snapshot failed: {e}")
 
+    async def _open_positions_from_db(self) -> list[dict]:
+        """OPEN positions straight from the database, as plain JSON types.
+
+        The fallback for `_open_position_summaries` — see its docstring for why
+        the cache alone cannot answer.
+        """
+        if self.session_factory is None:
+            return []
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    select(Position).where(Position.status == "OPEN"))
+                rows = result.scalars().all()
+        except Exception as exc:
+            # Never fail the status endpoint over a reporting nicety; an empty
+            # list is the pre-existing shape and the dashboard has its own
+            # source of truth for positions.
+            logger.warning("get_status could not read open positions: %s", exc)
+            return []
+        return [
+            {
+                "id": r.id,
+                "symbol": r.symbol,
+                "side": r.side,
+                "entry_price": float(r.entry_price) if r.entry_price is not None else None,
+                "quantity": float(r.quantity) if r.quantity is not None else None,
+                "stop_loss": float(r.stop_loss) if r.stop_loss is not None else None,
+                "take_profit": float(r.take_profit) if r.take_profit is not None else None,
+                "opened_at": r.opened_at.isoformat() if r.opened_at else None,
+            }
+            for r in rows
+        ]
+
+    async def _open_position_summaries(self) -> list[dict]:
+        """The engine's real OPEN positions, for `/bot/status`.
+
+        This key was a literal `[]`, so the endpoint reported a flat account
+        while three positions were open — observed live. Nothing in the
+        dashboard reads it (that page uses `/dashboard/overview`), so the lie
+        only ever misled other consumers and an operator with curl.
+
+        Prefers the `PositionManager` snapshot cache (refreshed by the 30s REST
+        pass), for the same reason the bookTicker tick path does: no query per
+        call. The cache CANNOT be trusted alone — `_cached_open_positions()`
+        returns `[]` both when the account is genuinely flat and when the first
+        pass has not run yet (the engine only populates it once
+        `PositionManager.start()` is running), and an operator asking "what is
+        open?" must not be told "nothing" in the second case. So an empty cache
+        falls back to a single indexed `status='OPEN'` query. `/bot/status` is
+        not polled by the frontend (the dashboard reads
+        `/dashboard/overview`), so that fallback is a low-rate operator call, not
+        a hot path.
+        """
+        rows = None
+        pm = self.position_manager
+        if pm is not None:
+            try:
+                rows = pm._cached_open_positions()
+            except Exception as exc:
+                logger.debug("get_status could not read the position cache: %s", exc)
+                rows = None
+        if rows:
+            return [
+                {
+                    "id": r.get("id"),
+                    "symbol": r.get("symbol"),
+                    "side": r.get("side"),
+                    "entry_price": r.get("entry_price"),
+                    "quantity": r.get("quantity"),
+                    "stop_loss": r.get("stop_loss"),
+                    "take_profit": r.get("take_profit"),
+                    "opened_at": r.opened_at.isoformat()
+                    if isinstance(getattr(r, "opened_at", None), datetime) else None,
+                }
+                for r in rows
+            ]
+        return await self._open_positions_from_db()
+
     async def get_status(self) -> dict:
         """Current bot status for dashboard."""
         daily_stats = await self.daily_reset.get_daily_stats()
@@ -310,6 +389,6 @@ class BotEngine:
             "scan_count": self._scan_count,
             "last_scan": self._last_scan.isoformat() if self._last_scan else None,
             "daily_stats": daily_stats,
-            "open_positions": [],
+            "open_positions": await self._open_position_summaries(),
             "enabled_symbols": await self._get_enabled_symbols(),
         }
