@@ -278,3 +278,46 @@ Start → Live in the dashboard.
 **Journal:** 23 errors + 1 exchangeInfo 404 in 70m. The 404 is from the **old process** (PID 1632771, before the 05:45 restart). The current process (PID 1735383, started 05:45 after the e34e90b fix) has **0 exchangeInfo 404s**. Rate-limit events: **0** in 70m. The 23 errors are pre-restart from the old process.
 
 **Status:** All clean. The exchangeInfo 404 (v2→v1) was already fixed in `e34e90b` and deployed. Current process is healthy, trading profitably, no rate-limit pressure.
+
+## Performance page — full widget audit (2026-10-17)
+
+The user reported the dashboard's Equity Curve showing ~23.90 while Binance showed
+Margin Balance 233.92. Root cause: `equity_log.balance_usdt` recorded the **USDT
+row** of `/fapi/v2/balance`, which is not the account.
+
+    BNB   0.04233810     ← cross-margin collateral, never recorded
+    BTC   0.00220000     ← cross-margin collateral, never recorded
+    USDT  23.90029461    ← all the equity curve ever captured
+
+Real Margin Balance was $223.72 — the curve understated the account by **~$200
+(90%)**. Summing `balance` across assets does not work either: those values are
+denominated per asset (0.0022 BTC), not USD. Fixed by reading
+`totalMarginBalance` from `GET /fapi/v2/account` (weight 5), which is the
+account-level USD total Binance's own UI labels "Margin Balance".
+
+Verified live: fresh snapshot wrote **224.08** against an exchange Margin Balance
+of 224.24 (difference is live P&L movement).
+
+### The equity field has now been wrong twice, differently
+
+1. `availableBalance` — free margin, dips on every entry (fixed in `c8f6f18`).
+2. The per-asset USDT `balance` — excludes non-USDT collateral (fixed in `d07305f`).
+
+Lesson: "the USDT balance" is not a safe proxy for account equity on an account
+that holds other assets as collateral. Only an account-level endpoint is.
+
+### Other widget defects found in the same audit
+
+- **Stat cards ignored the range.** `/trades/stats` had no `days`, so Total Trades
+  / Win Rate / Avg R / Best / Worst were all-time while every chart beside them
+  honoured 7d/30d/90d/365d — "Win Rate 40%" sat above a 7-day chart describing a
+  different sample. Now takes `days`.
+- **Overview "Equity Curve (7D)" showed ~75 minutes.** It took the newest 30 ROWS
+  of `equity_log`; snapshots land every ~2.5 min at a 30s interval. Now filtered by
+  time to match the title, and ordered ASCENDING (it previously shipped DESCENDING
+  and relied on the frontend to re-sort before `setData`).
+- Monthly Returns stays all-time by design (months are too coarse to slice, current
+  month is partial) and is now labelled as such. Chart titles carry their range.
+
+Verified after deploy: at 7d/30d/365d the stat cards, P&L points and R-distribution
+all report the identical sample (45 trades at each).
