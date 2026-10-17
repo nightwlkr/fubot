@@ -18,6 +18,8 @@ from backend.schemas.performance import (
     PnLResponse,
     MonthlyReturn,
     MonthlyResponse,
+    StrategyBreakdown,
+    StrategyBreakdownResponse,
     RBucket,
     StrategyResponse,
 )
@@ -209,3 +211,82 @@ async def strategy_performance(
     data = [RBucket(bucket=label, count=sum(1 for r in trades if match(r)))
             for label, match in edges]
     return StrategyResponse(data=data)
+
+
+@router.get("/strategies/breakdown", response_model=StrategyBreakdownResponse)
+async def strategy_breakdown(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    days: Optional[int] = Query(None, ge=1, le=730),
+    mode: Optional[str] = Query("live", pattern="^(live|paper|all)$"),
+):
+    """Per-strategy realised performance — which strategy actually makes money.
+
+    `/strategies` (above) buckets every trade by R for the histogram and
+    deliberately carries no per-strategy data, so there was no way to attribute
+    the P&L to a strategy. That mattered: the live book reported +$17.02 and
+    -10.3R simultaneously, and only a per-strategy split shows why (at
+    risk_percent=5 the notional cap bound on tight stops, so winners carried
+    1.70x the risk of losers). 3-candle is the best performer in dollars and
+    break-even in R — the opposite of what the blended R column suggested.
+
+    Aggregated in Python rather than SQL so the R and USD totals, the win/loss
+    counts and the profit factor all come from ONE pass over the same rows —
+    a per-strategy GROUP BY with conditional aggregates is easy to get subtly
+    inconsistent, and these numbers drive a decision about which strategies
+    to keep trading.
+
+    `profit_factor` is None when a strategy has no losing trade: gross win /
+    gross loss is undefined there, and 0.0 would rank a flawless strategy last.
+
+    Ordered worst avg_r first so the strategies needing attention lead.
+    """
+    user = await get_current_user_from_cookie(request, db)
+
+    query = _mode_filter(select(Trade), mode)
+    if days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = query.where(Trade.closed_at >= cutoff)
+    result = await db.execute(query)
+
+    buckets: dict[str, dict] = {}
+    for t in result.scalars().all():
+        name = t.strategy_type or "UNKNOWN"
+        # Both columns are Numeric -> Decimal; coerce before any arithmetic.
+        r = float(t.pnl_r or 0)
+        usd = float(t.pnl_usdt or 0)
+        b = buckets.setdefault(name, {
+            "n": 0, "wc": 0, "lc": 0, "be": 0,
+            "r": 0.0, "usd": 0.0, "gross_win": 0.0, "gross_loss": 0.0,
+        })
+        b["n"] += 1
+        b["r"] += r
+        b["usd"] += usd
+        if r > 0:
+            b["wc"] += 1
+            b["gross_win"] += usd
+        elif r < 0:
+            b["lc"] += 1
+            b["gross_loss"] += usd
+        else:
+            b["be"] += 1
+
+    data: list[StrategyBreakdown] = []
+    for name, b in buckets.items():
+        n = b["n"]
+        data.append(StrategyBreakdown(
+            strategy=name,
+            total_trades=n,
+            wins=b["wc"],
+            losses=b["lc"],
+            breakevens=b["be"],
+            win_rate=round(b["wc"] / n * 100, 2) if n else 0.0,
+            sum_r=round(b["r"], 4),
+            avg_r=round(b["r"] / n, 4) if n else 0.0,
+            profit_factor=(round(b["gross_win"] / abs(b["gross_loss"]), 4)
+                           if b["gross_loss"] else None),
+            total_pnl_usdt=round(b["usd"], 2),
+        ))
+    # Worst expectancy first — the strategies that need attention lead the table.
+    data.sort(key=lambda d: d.avg_r)
+    return StrategyBreakdownResponse(data=data)

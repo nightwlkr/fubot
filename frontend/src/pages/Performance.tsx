@@ -5,6 +5,7 @@ import { ENDPOINTS } from '../api/endpoints'
 import { Card, CardHeader, CardTitle } from '../components/ui/Card'
 import { BarChart3 } from 'lucide-react'
 import { clsx } from 'clsx'
+import type { StrategyBreakdown } from '../types'
 
 interface Stats {
   total_trades: number
@@ -320,6 +321,25 @@ export default function Performance() {
   // charts that respected the buttons.
   const [range, setRange] = useState<Range>('30d')
 
+  // Per-strategy attribution. `/performance/strategies` buckets every trade by
+  // R for the histogram and carries no per-strategy data, so there was no way
+  // to see which strategy actually produces the P&L. It matters because R and
+  // USD can disagree: the book once read +$17.02 while reporting -10.3R, and
+  // only a per-strategy split showed why.
+  const [breakdown, setBreakdown] = useState<StrategyBreakdown[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    api.get<{ data: StrategyBreakdown[] }>(ENDPOINTS.performanceStrategyBreakdown, {
+      days: RANGE_DAYS[range],
+    })
+      .then(res => {
+        if (!cancelled) setBreakdown(Array.isArray(res.data?.data) ? res.data.data : [])
+      })
+      .catch(console.error)
+    return () => { cancelled = true }
+  }, [range])
+
   useEffect(() => {
     // Stats are live-trading numbers — poll so they don't go stale while the
     // operator watches the charts update. They also honour the range: without
@@ -368,6 +388,62 @@ export default function Performance() {
 
       <EquityChart range={range} onRangeChange={setRange} />
       <PnLChart range={range} onRangeChange={setRange} />
+
+      {/* Per-strategy attribution. Worst avg_r first (the backend sorts it) so
+          the strategies needing attention lead. */}
+      <Card>
+        <CardHeader>
+          <CardTitle>By Strategy</CardTitle>
+        </CardHeader>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-muted uppercase tracking-wide">
+                <th className="text-left py-2 pr-3">Strategy</th>
+                <th className="text-right px-2">Trades</th>
+                <th className="text-right px-2">W / L / BE</th>
+                <th className="text-right px-2">Win %</th>
+                <th className="text-right px-2">PF</th>
+                <th className="text-right px-2">Avg R</th>
+                <th className="text-right pl-3">Net $</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono">
+              {breakdown.length === 0 && (
+                <tr><td colSpan={7} className="py-4 text-center text-muted">No closed trades in this range</td></tr>
+              )}
+              {breakdown.map(s => (
+                <tr key={s.strategy} className="border-t border-border">
+                  <td className="text-left py-2 pr-3 font-sans">{s.strategy}</td>
+                  <td className="text-right px-2">{s.total_trades}</td>
+                  <td className="text-right px-2">
+                    <span className="text-success">{s.wins}</span>
+                    <span className="text-muted"> / </span>
+                    <span className="text-danger">{s.losses}</span>
+                    <span className="text-muted"> / </span>
+                    <span className="text-muted">{s.breakevens}</span>
+                  </td>
+                  <td className="text-right px-2">{s.win_rate.toFixed(1)}%</td>
+                  {/* null = no losing trade; show it as such rather than 0.00 */}
+                  <td className="text-right px-2">{s.profit_factor === null ? '—' : s.profit_factor.toFixed(2)}</td>
+                  <td className={clsx('text-right px-2', s.avg_r >= 0 ? 'text-success' : 'text-danger')}>
+                    {s.avg_r >= 0 ? '+' : ''}{s.avg_r.toFixed(2)}R
+                  </td>
+                  <td className={clsx('text-right pl-3', s.total_pnl_usdt >= 0 ? 'text-success' : 'text-danger')}>
+                    {s.total_pnl_usdt >= 0 ? '+' : '-'}${Math.abs(s.total_pnl_usdt).toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-xs text-muted mt-2">
+          Avg R and Net $ are both shown because they can disagree — a notional cap
+          makes winners larger than losers, so a strategy can be positive in dollars
+          and negative in R. PF is — when the strategy has no losing trade.
+        </p>
+      </Card>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
           <CardHeader>

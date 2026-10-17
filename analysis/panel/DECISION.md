@@ -553,3 +553,51 @@ requesting would have found all four faster.
 **Exchange balance:** available ~$33.5 USDT (flat, all margin freed).
 
 **Status:** All healthy. Best day yet: **+5.99R / +$35.18** on 25 trades (14W/10L/1BE, 56% win). Flat going into the evening. No issues, no naked positions, 0 errors.
+
+### Monitoring check — 2026-10-17 21:48 (+04:00)
+
+**Engine:** was STOPPED — service restarted at 19:43 CEST (17:43 UTC) but engine not auto-started (known behaviour: systemd restart leaves the engine stopped; must call POST /api/bot/start). **Restarted the engine** via API — running/live again. **Daily:** 25 trades, 14W/10L/1BE, +5.99R, +$35.18 (unchanged — engine was down, no new trades). **Limit:** not hit.
+
+**Positions:** 0 open (flat). Exchange flat, 0 algo orders. No naked positions.
+
+**Trades 70m:** 0 closed (engine was down most of the hour).
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors. Service restart at 19:43 was a clean systemd stop/start (no crash, no OOM). **Note:** an internet scanner probed the public URL at 18:00 (/.env, /.git/config, etc.) — all returned the SPA catch-all HTML (200 OK but not real files; the FastAPI catch-all serves index.html for any unmatched GET). No actual secrets exposed, but worth noting the scanner activity.
+
+**Status:** Engine restarted and running. Flat, no exposure, no errors. Daily unchanged at +5.99R / +$35.18.
+
+### Monitoring check — 2026-10-17 22:48 (+04:00)
+
+**Engine:** RUNNING/live, 13 scans (restarted 18:43 UTC), last 18:48 UTC. **Daily:** 25 trades, 14W/10L/1BE, +5.99R, +$35.18. **Limit:** not hit.
+
+**Positions:** 3 open, all SHORT, all protected with STOP_MARKET + TAKE_PROFIT_MARKET algo orders (6 algo orders total). Exchange matches DB exactly (qty + entry + mark). No naked positions.
+- BTCUSDT SHORT — entry 81490.00, SL 81670.09, TP 80662.72, **pnl -$0.04**
+- LINKUSDT SHORT — entry 11.983, SL 12.091, TP 11.645, **pnl -$1.19**
+- AVAXUSDT SHORT — entry 9.794, SL 9.901, TP 9.468, **pnl -$5.32**
+
+**Trades 70m:** 0 closed. Engine was restarted ~1h ago; positions opened after restart.
+
+**Signals:** 0 new PENDING (engine restarting).
+
+**Journal:** 0 errors. No "naked"/"unprotected"/"Live order flow failed". Clean.
+
+**Status:** All healthy. Engine running. 3 positions open, all protected. Exchange and DB in sync. Daily +5.99R / +$35.18. No issues.
+
+### Monitoring check — 2026-10-17 23:48 (+04:00)
+
+**Engine:** RUNNING/live, 24 scans, last 19:48 UTC. **Daily:** 25 trades, 14W/10L/1BE, +5.99R, +$35.18. **Limit:** not hit.
+
+**Positions:** 3 open, all SHORT, all protected with STOP_MARKET + TAKE_PROFIT_MARKET algo orders (6 algo orders). Exchange matches DB exactly. No naked positions. All slightly underwater (market drifting up against shorts):
+- BTCUSDT SHORT — entry 81490.00, SL 81670.09, TP 80662.72, **pnl -$0.09**
+- LINKUSDT SHORT — entry 11.983, SL 12.091, TP 11.645, **pnl -$2.11**
+- AVAXUSDT SHORT — entry 9.794, SL 9.901, TP 9.468, **pnl -$6.22**
+
+**Trades 70m:** 0 closed.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors. No "naked"/"unprotected"/"Live order flow failed". Clean.
+
+**Status:** All healthy. Engine running. 3 positions open, all protected. Exchange and DB in sync. Daily +5.99R / +$35.18. No issues.

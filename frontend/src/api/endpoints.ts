@@ -59,4 +59,5 @@ export const ENDPOINTS = {
   performancePnL: '/performance/pnl',
   performanceMonthly: '/performance/monthly',
   performanceStrategies: '/performance/strategies',
+  performanceStrategyBreakdown: '/performance/strategies/breakdown',
 } as const

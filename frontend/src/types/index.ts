@@ -44,6 +44,21 @@ export interface TradeStats {
   total_pnl_usdt: number
 }
 
+export interface StrategyBreakdown {
+  strategy: string
+  total_trades: number
+  wins: number
+  losses: number
+  breakevens: number
+  win_rate: number
+  sum_r: number
+  avg_r: number
+  /** Gross win / gross loss. null when the strategy has no losing trade —
+   *  undefined arithmetic, so NOT 0.0 (which would rank it last). */
+  profit_factor: number | null
+  total_pnl_usdt: number
+}
+
 export interface MonthlyReturn {
   month: string
   pnl_r: number
