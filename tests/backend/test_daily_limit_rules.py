@@ -779,3 +779,33 @@ class TestExchangeSyncLatch:
         sql = _sync_sql()
         assert "+ t." not in sql, "the sync must SET aggregates, never add to them"
         assert "t.total_r" in sql and "SUM(pnl_r)" in sql, sql
+
+
+# ------------------------------------------------- re-duplication guard
+
+class TestTheRulesExistInExactlyOnePlace:
+    def test_the_used_r_formula_is_written_once_in_the_repo(self):
+        """The whole point of the change. A second inline copy is free to drift
+        back out of sync with the breaker, which is the defect this removes."""
+        import pathlib
+        hits = [p for p in (REPO_ROOT / "backend").rglob("*.py")
+                if "max(0.0, -float(" in p.read_text()]
+        # daily_reset.used_r_from is the single legitimate home.
+        assert [p.name for p in hits] == ["daily_reset.py"], \
+            f"used_r is re-implemented in {[str(p) for p in hits]}"
+
+    def test_no_module_calls_date_today(self):
+        """AST, not substring, and that is deliberate: the docstrings introduced
+        by this very change NAME `date.today()` in order to warn against it (see
+        `today_utc`'s docstring and routers/settings.py). A text ban would fail on
+        the documentation of the fix. Walking for a zero-arg `.today()` attribute
+        call distinguishes a call from the phrase."""
+        import ast
+        offenders = []
+        for p in (REPO_ROOT / "backend").rglob("*.py"):
+            tree = ast.parse(p.read_text())
+            for n in ast.walk(tree):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and n.func.attr == "today" and not n.args):
+                    offenders.append(f"{p}:{n.lineno}")
+        assert offenders == [], f"local-day resolution at {offenders}"
