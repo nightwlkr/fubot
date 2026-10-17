@@ -90,6 +90,11 @@ class FakeBinance:
     async def get_ticker(self, symbol):
         return {"symbol": symbol, "price": self.price}
 
+    async def get_mark_price(self, symbol):
+        # Binance triggers conditional (SL/TP) orders on the MARK price, so the
+        # post-fill side check reads this, not the last trade price.
+        return {"symbol": symbol, "markPrice": self.price}
+
     async def get_account_balance(self):
         return [{"asset": "USDT", "availableBalance": "10000"}]
 

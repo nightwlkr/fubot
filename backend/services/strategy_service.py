@@ -42,6 +42,13 @@ class StrategyService:
         self.binance = binance
         self.session_factory = session_factory
         self.settings = settings or {}
+        # Mirrors PositionManager: every row this service writes is tagged with
+        # the mode it was opened in. It MUST exist — `_close_position_row` reads
+        # it when recording a FLATTENED trade, and the attribute was never
+        # initialised, so the AttributeError was swallowed by that method's
+        # broad `except Exception`: no Trade row AND an orphaned OPEN Position
+        # for a position that had already been flattened on the exchange.
+        self._mode: str = "paper"
 
     # ---- pure planning (kept from the earlier refactor, unit-tested) ----
 
@@ -95,6 +102,9 @@ class StrategyService:
     async def evaluate_signal(self, signal, paper_mode: bool = False) -> TradeDecision:
         symbol = signal.symbol
         side = "BUY" if signal.direction == "LONG" else "SELL"
+        # Keep `_mode` in step with the mode this evaluation runs in — the
+        # flatten/close helpers tag every row they write with it.
+        self._mode = "paper" if paper_mode else "live"
 
         # 0. Only fresh PENDING signals are actionable
         if signal.status != "PENDING":
@@ -298,6 +308,63 @@ class StrategyService:
                     initial_risk_distance=risk_distance)
                 await self._update_position_fill(position_id, fill_price, fill_qty)
 
+                # 5d. The plan's SL/TP are only placeable while the market is
+                # on the correct side of them. Gate 4b checked that against the
+                # ZONE, before the limit was sent; between the fill and this
+                # line (~1s live) the market can cross the stop, and Binance
+                # then rejects the already-in-the-money conditional order with
+                # 400 — leaving the fill naked until `_flatten_if_unprotected`
+                # force-closes it. Live 2026-10-17: APEUSDT LONG filled at
+                # 0.14860 with the stop at 0.1484, SELL STOP rejected 400 one
+                # second later, 1592 APE flattened.
+                #
+                # Where in the sequence: AFTER `_create_position` +
+                # `_update_position_fill` so the row carries exchange-truth
+                # entry/qty and a risk distance measured from the real fill —
+                # the flatten then records the realised Trade against it (the
+                # alternative, validating before the row exists, cannot record
+                # a Trade at all and loses the P&L, which is exactly what
+                # commit 130f16e fixed); and BEFORE any protective order, so a
+                # rejected SL/TP is never attempted.
+                #
+                # Re-anchoring the stop to the new market (widening the risk
+                # beyond the plan) and cancelling/refilling at market were both
+                # considered and rejected — this is the only option that cannot
+                # leave a position with mis-sized risk, and it is the same rule
+                # as the entry itself: the planned price or no trade.
+                mark_px = await self._mark_price(symbol)
+                stop_px, tp_px = float(signal.stop_loss), float(signal.take_profit)
+                violation = self._side_violation(signal.direction, stop_px, tp_px, mark_px)
+                if violation:
+                    logger.error(
+                        "[%s] %s filled at %.8f but %s (mark %s, stop %s, target %s)"
+                        " — the protective orders would be rejected with 400, so "
+                        "flattening at market instead of leaving the fill naked",
+                        symbol, signal.direction, float(fill_price), violation,
+                        mark_px, stop_px, tp_px)
+                    flattened = await self._flatten_if_unprotected(symbol)
+                    if flattened:
+                        # Nothing is open on the exchange for this symbol — close
+                        # the row AND record the realised Trade. The ~1s flatten
+                        # is a real loss: it must reach `trades` (which every
+                        # performance endpoint reads) and, via the 48h
+                        # exchange-sync recompute, the daily R accumulator.
+                        await self._close_position_row(position_id)
+                    else:
+                        # Exchange state unknown or deliberately left open: the
+                        # row MUST stay OPEN so the reconcile adopts a TRACKED
+                        # position.
+                        logger.error(
+                            "[%s] Post-fill side violation (%s) but the exchange "
+                            "position was NOT flattened — leaving the row OPEN for "
+                            "reconcile", symbol, violation)
+                    signal.status = "SKIPPED"
+                    await self._mark_signal(
+                        signal.db_id, "SKIPPED",
+                        f"Setup void after fill: {violation}")
+                    return TradeDecision(
+                        "SKIP", skip_reason=f"Setup void after fill: {violation}")
+
                 await self.order_svc.place_order(
                     symbol, side, "LIMIT", size, price=Decimal(str(fill_price)),
                     simulate=False, binance_order_id=fill["orderId"],
@@ -391,6 +458,57 @@ class StrategyService:
             logger.debug("get_ticker(%s) failed: %s", symbol, exc)
             return None
 
+    async def _mark_price(self, symbol: str) -> Optional[float]:
+        """The MARK price (`fapi/v1/premiumIndex`) or None when unreadable.
+
+        Binance triggers conditional (STOP_MARKET / TAKE_PROFIT_MARKET) orders
+        against the CONTRACT_PRICE — the mark price for perpetuals — which is
+        why `PositionManager._check_positions` already compares TP/SL against
+        the mark and not the last trade. Gating a protection order on the last
+        price would authorise exactly the order the exchange then rejects.
+
+        NO fallback to `_current_price` here (unlike the TP/SL hit check, where
+        a stale last price only affects when a close is noticed): a last price
+        on the correct side with a mark beyond the stop re-authorises the
+        rejected SL. An unreadable mark is UNKNOWN, and per this codebase's
+        fail-closed rule unknown is never "fine to proceed".
+        """
+        if self.binance is None:
+            return None
+        try:
+            data = await self.binance.get_mark_price(symbol)
+            return float((data or {}).get("markPrice", 0) or 0) or None
+        except Exception as exc:
+            logger.debug("[%s] get_mark_price failed: %s", symbol, exc)
+            return None
+
+    def _side_violation(self, direction: str, stop_px: float, tp_px: float,
+                        market_px: Optional[float]) -> Optional[str]:
+        """Why the planned SL/TP cannot be placed at `market_px`, else None.
+
+        Binance rejects a conditional order whose trigger condition is already
+        satisfied at submission ("would immediately trigger"). For a SELL
+        STOP_MARKET that condition is `mark >= triggerPrice`, so the stop must
+        be STRICTLY below the mark — and symmetrically a BUY stop strictly
+        above it, a LONG target strictly above, a SHORT target strictly below.
+        EQUALITY is therefore INVALID, not a tight-but-valid level: the trigger
+        is already met, so the order would be rejected (and, if it somehow
+        rested, would fill instantly with zero risk attached).
+        """
+        if not market_px or market_px <= 0:
+            return "could not read the market price"
+        if direction == "LONG":
+            if stop_px >= market_px:
+                return "stop is no longer below the market"
+            if tp_px <= market_px:
+                return "target is no longer above the market"
+        else:
+            if stop_px <= market_px:
+                return "stop is no longer above the market"
+            if tp_px >= market_px:
+                return "target is no longer below the market"
+        return None
+
     async def _account_balance(self, paper_mode: bool) -> Optional[Decimal]:
         if paper_mode:
             # paper_use_real_balance (default true): size paper trades against
@@ -434,6 +552,7 @@ class StrategyService:
                 stop_loss=float(signal.stop_loss),
                 take_profit=float(signal.take_profit),
                 initial_risk_distance=initial_risk_distance,
+                strategy_type=getattr(signal, "strategy_type", None) or "UNKNOWN",
                 status="OPEN",
                 mode="paper" if paper_mode else "live",
             )
@@ -695,8 +814,14 @@ class StrategyService:
                     quantity=row.quantity,
                     pnl_usdt=pnl_usdt,
                     pnl_r=pnl_r,
+                    # NOT NULL in the schema with no server default — omitting it
+                    # made the insert fail, so no FLATTENED trade was ever
+                    # recorded and the broad except below swallowed it.
+                    strategy_type=row.strategy_type or "UNKNOWN",
                     exit_reason="FLATTENED",
-                    opened_at=row.opened_at,
+                    # `trades` has no opened_at column (only created_at /
+                    # closed_at) — passing it raised TypeError before the flush,
+                    # so the whole insert below was dead code.
                     closed_at=row.closed_at,
                 )
                 session.add(trade)
