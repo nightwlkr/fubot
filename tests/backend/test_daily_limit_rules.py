@@ -140,30 +140,144 @@ class TestTodayUtc:
 # --------------------------------------------------------- DailyResetService
 
 class TestServiceDelegatesToHelpers:
-    def test_get_limit_r_returns_exactly_what_limit_r_from_returns(self):
-        """The service must not keep its own copy of the clamping rule. If both
-        exist, they can drift -- which is the bug this whole change removes."""
+    """These must fail if the delegation is reverted.
+
+    The previous version of these tests was vacuous: `session_factory=None`
+    makes `get_daily_stats` return early via `_zero_stats`, which hardcodes
+    `used_r = 0.0` and never reaches `used_r_from`, so the assertion was
+    `0.0 == 0.0`. And `"limit_r_from" in getsource(...)` was satisfied by a
+    docstring mention rather than the code. Both defects were confirmed by
+    mutation: reverting either delegation left the suite fully green.
+    """
+
+    def test_get_limit_r_delegates_to_the_shared_clamp(self):
+        """Behavioural: the service's answer must be the helper's answer across
+        the whole input domain, not just at one convenient value. A duplicated
+        body would drift on exactly the malformed inputs this guards."""
         import inspect
-        from backend.core.daily_reset import DailyResetService, limit_r_from
-        src = inspect.getsource(DailyResetService.get_limit_r)
-        assert "limit_r_from" in src, "get_limit_r must delegate to limit_r_from"
-        svc = DailyResetService(settings={"daily_loss_limit_r": 9999})
-        assert svc.get_limit_r() == pytest.approx(limit_r_from({"daily_loss_limit_r": 9999}))
+        from backend.core.daily_reset import (DailyResetService, limit_r_from,
+                                              MAX_DAILY_LOSS_LIMIT_R)
+        # The CODE delegates, not merely a docstring mentioning the name: strip
+        # the docstring before checking, or the mention satisfies the assertion.
+        body = inspect.getsource(DailyResetService.get_limit_r).split('"""')[-1]
+        assert "limit_r_from" in body, \
+            "get_limit_r must call limit_r_from in its body, not just name it"
 
-    def test_get_daily_stats_agrees_with_used_r_from(self):
-        # get_daily_stats is a coroutine, so the scenario runs on a fresh loop
-        # (the pattern test_daily_reset.py uses).
+        for raw in (-3.0, -5.0, -MAX_DAILY_LOSS_LIMIT_R, 0, -0.0, 9999, -20.1,
+                    "abc", None, float("nan"), float("inf")):
+            svc = DailyResetService(settings={"daily_loss_limit_r": raw})
+            assert svc.get_limit_r() == pytest.approx(limit_r_from(
+                {"daily_loss_limit_r": raw})), f"raw={raw!r}"
+
+    def test_get_daily_stats_uses_used_r_from_and_today_utc(self):
+        """Source-contract: with no session factory the value path is never
+        reached, so assert the code delegates rather than asserting a tautology.
+        The AST walk ignores docstrings for the same reason."""
+        import ast
+        import inspect
+        import textwrap
+        from backend.core.daily_reset import DailyResetService
+
+        # textwrap.dedent, not inspect.cleandoc: getsource returns an indented
+        # `def`, and cleandoc treats the first line as already-dedented, which
+        # leaves the rest of the body misaligned and unparseable.
+        src = textwrap.dedent(inspect.getsource(DailyResetService.get_daily_stats))
+        called = {n.func.id for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "used_r_from" in called, "get_daily_stats must CALL used_r_from"
+        assert "today_utc" in called, "get_daily_stats must CALL today_utc"
+        assert "datetime" not in called, \
+            "get_daily_stats must not resolve the day inline — use today_utc()"
+
+    def test_a_winning_day_reports_zero_through_the_real_summary_path(self):
+        """Closes the gap the tautology left: exercise `get_daily_stats` with an
+        actual summary row so `used_r_from` is reached for real. A winning day
+        must report 0.0 — the property that stops a winning day tripping the
+        breaker."""
         import asyncio
-        from backend.core.daily_reset import DailyResetService, today_utc, used_r_from
-        svc = DailyResetService(session_factory=None, settings={})
+        from types import SimpleNamespace
+        from backend.core.daily_reset import DailyResetService, used_r_from
 
-        async def scenario():
-            # No session factory -> the zero-stats path.
+        class _FakeSession:
+            """Exposes exactly the attributes `get_daily_stats` reads off the
+            `DailySummary` row it selects — no more, so adding a read to the
+            method without extending this fake fails the test."""
+
+            def __init__(self, summary):
+                self._summary = summary
+
+            async def execute(self, *a, **k):
+                return SimpleNamespace(scalar_one_or_none=lambda: self._summary)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        def _row(total_pnl_r):
+            return SimpleNamespace(date=None, total_trades=4, wins=2, losses=2,
+                                   total_pnl_r=total_pnl_r, total_pnl_usdt=1.0,
+                                   daily_loss_limit_hit=False)
+
+        async def scenario(total_pnl_r):
+            svc = DailyResetService(
+                session_factory=lambda: _FakeSession(_row(total_pnl_r)),
+                settings={})
             return await svc.get_daily_stats()
 
-        stats = asyncio.run(scenario())
-        assert stats["used_r"] == pytest.approx(used_r_from(None))
-        assert stats["date"] == today_utc().isoformat()
+        for total in (4.5, 0.0, -2.9):
+            stats = asyncio.run(scenario(total))
+            assert stats["used_r"] == pytest.approx(used_r_from(
+                SimpleNamespace(total_pnl_r=total))), f"total={total!r}"
+            # The rest of the row is passed through untouched.
+            assert stats["total_trades"] == 4
+            assert stats["wins"] == 2 and stats["losses"] == 2
+            assert stats["remaining_r"] == pytest.approx(
+                stats["limit_r"] - stats["used_r"])
+
+        # And the load-bearing property, stated directly.
+        assert asyncio.run(scenario(4.5))["used_r"] == pytest.approx(0.0), \
+            "a winning day must never consume R"
+        assert asyncio.run(scenario(-2.9))["used_r"] == pytest.approx(2.9)
+
+    def test_a_null_total_pnl_r_still_raises_in_the_display_field(self):
+        """Pins what the delegation did and did NOT change.
+
+        `used_r_from` tolerates a NULL `total_pnl_r` (returns 0.0) where the old
+        inline `max(0.0, -float(...))` raised — but `get_daily_stats` is not
+        rescued by that: the display field `float(summary.total_pnl_r)` on the
+        next line raises first, and it is outside this de-duplication's scope.
+        Asserted explicitly so nobody reads this class as evidence that a NULL
+        summary row is now survivable."""
+        import asyncio
+        from types import SimpleNamespace
+        from backend.core.daily_reset import DailyResetService
+
+        class _FakeSession:
+            def __init__(self, summary):
+                self._summary = summary
+
+            async def execute(self, *a, **k):
+                return SimpleNamespace(scalar_one_or_none=lambda: self._summary)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        row = SimpleNamespace(date=None, total_trades=0, wins=0, losses=0,
+                              total_pnl_r=None, total_pnl_usdt=0.0,
+                              daily_loss_limit_hit=False)
+
+        async def scenario():
+            svc = DailyResetService(
+                session_factory=lambda: _FakeSession(row), settings={})
+            return await svc.get_daily_stats()
+
+        with pytest.raises(TypeError):
+            asyncio.run(scenario())
 
     def test_the_module_resolves_the_day_in_exactly_one_place(self):
         """Every breaker decision reads the same trading day. Each call site
@@ -173,10 +287,21 @@ class TestServiceDelegatesToHelpers:
         from pathlib import Path
         src = (Path(__file__).resolve().parents[2]
                / "backend/core/daily_reset.py").read_text()
-        inline = [ast.unparse(n) for n in ast.walk(ast.parse(src))
+        tree = ast.parse(src)
+        # Only `.date()` calls: a legitimate future `datetime.now(timezone.utc)`
+        # TIMESTAMP elsewhere in the module is not a duplicate day resolution.
+        inline = [n for n in ast.walk(tree)
                   if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                      and n.func.attr == "now"
-                      and isinstance(n.func.value, ast.Name)
-                      and n.func.value.id == "datetime")]
-        # today_utc() itself is the single remaining site.
-        assert len(inline) == 1, f"day resolved inline elsewhere: {inline}"
+                      and n.func.attr == "date"
+                      and isinstance(n.func.value, ast.Call)
+                      and isinstance(n.func.value.func, ast.Attribute)
+                      and n.func.value.func.attr == "now")]
+        assert len(inline) == 1, \
+            f"day resolved inline elsewhere: {[ast.unparse(n) for n in inline]}"
+
+        # ...and the one remaining site must BE today_utc, so deleting the call
+        # from today_utc and adding one elsewhere cannot pass.
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "today_utc")
+        assert fn.lineno <= inline[0].lineno <= fn.end_lineno, \
+            "the only inline day resolution must be inside today_utc itself"
