@@ -405,3 +405,19 @@ an equity field recording the wrong account, a stat block over a different range
 and finally the table never receiving its query string at all. In each case the
 detail widget looked correct in isolation. Checking what each panel is actually
 requesting would have found all four faster.
+
+### Monitoring check — 2026-10-17 08:48 (+04:00)
+
+**Engine:** WAS STOPPED (0 scans, last=None). Service restarted at 06:40 (systemd) but bot engine not auto-started. **Restarted via API — now RUNNING/live, 1 scan.**
+
+**Daily:** 6 trades, 5W/1L, +5.32R, +$26.04. **Limit:** not hit.
+
+**Positions:** 0 open (flat). No unprotected positions.
+
+**Trades 70m:** 3 closed (all SL_HIT), +2.19R / +$9.99.
+
+**Signals:** 0 PENDING, 0 LIMIT unfilled.
+
+**Journal:** 0 errors, 0 exchangeInfo 404s, 1 rate-limit event (isolated). Clean.
+
+**Note:** The service restart at 06:40 left the bot engine stopped — the engine only starts via `POST /bot/start`, not on service restart. This is by design (documented in AGENTS.md) but means every service restart requires a manual engine start. Consider adding a `Restart=on-failure` + engine auto-start on boot if this becomes recurring.

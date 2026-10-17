@@ -79,7 +79,7 @@ function EquityChart({ range, onRangeChange }: { range: Range; onRangeChange: (r
   }, [])
 
   useEffect(() => {
-    api.get<{ data: EquityData[] }>(ENDPOINTS.performanceEquity, { params: { days: RANGE_DAYS[range] } })
+    api.get<{ data: EquityData[] }>(ENDPOINTS.performanceEquity, { days: RANGE_DAYS[range] })
       .then(res => {
         const series = seriesRef.current
         if (!series || !chartRef.current) return
@@ -140,7 +140,7 @@ function PnLChart({ range, onRangeChange }: { range: Range; onRangeChange: (r: R
   }, [])
 
   useEffect(() => {
-    api.get<{ data: PnLData[] }>(ENDPOINTS.performancePnL, { params: { days: RANGE_DAYS[range] } })
+    api.get<{ data: PnLData[] }>(ENDPOINTS.performancePnL, { days: RANGE_DAYS[range] })
       .then(res => {
         const series = seriesRef.current
         if (!series || !chartRef.current) return
@@ -279,7 +279,7 @@ function RDistributionChart({ range }: { range: Range }) {
     // The endpoint had no `days` param, so this chart ignored the range buttons
     // and always showed all-time while the charts beside it respected 7d/30d/…
     api.get<{ data: RDatum[] }>(ENDPOINTS.performanceStrategies, {
-      params: { days: RANGE_DAYS[range] },
+      days: RANGE_DAYS[range],
     })
       .then(res => {
         const rows = Array.isArray(res.data.data) ? res.data.data : []
@@ -327,7 +327,7 @@ export default function Performance() {
     // selected window, so the headline numbers described a different sample.
     let cancelled = false
     const fetchStats = () => {
-      api.get<Stats>(ENDPOINTS.tradeStats, { params: { days: RANGE_DAYS[range] } })
+      api.get<Stats>(ENDPOINTS.tradeStats, { days: RANGE_DAYS[range] })
         .then(res => { if (!cancelled) setStats(res.data) })
         .catch(console.error)
     }

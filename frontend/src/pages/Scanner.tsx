@@ -115,7 +115,7 @@ export default function Scanner() {
     try {
       const params: Record<string, string> = {}
       if (filter !== 'ALL') params.status = filter
-      const res = await api.get<{ signals: Signal[] }>(ENDPOINTS.signals, { params })
+      const res = await api.get<{ signals: Signal[] }>(ENDPOINTS.signals, params)
       setSignals(Array.isArray(res.data.signals) ? res.data.signals : [])
       setLastRefresh(new Date())
     } catch (err) {

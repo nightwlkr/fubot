@@ -271,9 +271,12 @@ class TestTradeLogFiltersReachBothEndpoints:
         tsx = (Path(__file__).resolve().parents[2]
                / "frontend/src/pages/TradeLog.tsx").read_text()
         idx = tsx.index("ENDPOINTS.tradeStats")
-        assert "{ params }" in tsx[idx:idx + 120], (
-            "the summary cards must request /trades/stats with the same params "
-            "as /trades, or the table and the cards describe different samples")
+        # Params must be passed DIRECTLY. Wrapping them as { params } makes
+        # axios serialise `params[side]=SHORT`, which the backend ignores —
+        # that was the actual root cause of "the filters don't work".
+        assert "ENDPOINTS.tradeStats, params)" in tsx[idx:idx + 80], (
+            "the summary cards must request /trades/stats with the same filter "
+            "params as /trades, passed directly (not wrapped in { params })")
 
     def test_to_date_includes_the_whole_end_day(self):
         """`datetime.fromisoformat('2026-10-17')` is midnight at the START of
@@ -314,6 +317,8 @@ class TestRangeButtonsAndStatCardsShareARange:
         idx = tsx.index("ENDPOINTS.tradeStats")
         assert "days: RANGE_DAYS[range]" in tsx[idx:idx + 200], \
             "the stat-card request must pass the selected range"
+        assert "ENDPOINTS.tradeStats, { days:" in tsx[idx:idx + 200], \
+            "range must be passed directly, not wrapped in { params: ... }"
         assert "[range]" in tsx, \
             "the stats effect must re-run when the range changes"
 

@@ -77,12 +77,12 @@ export default function TradeLog() {
       if (toDate) params.to_date = toDate
 
       const [tradesRes, statsRes] = await Promise.all([
-        api.get<TradeResponse>(ENDPOINTS.trades, { params }),
+        api.get<TradeResponse>(ENDPOINTS.trades, params),
         // The summary cards MUST receive the same filters. They used to be
         // fetched unfiltered, so narrowing the table to one symbol left
         // "45 trades / 40% win rate" sitting directly above a 5-row table —
         // which reads as "the filters are broken".
-        api.get<TradeStats>(ENDPOINTS.tradeStats, { params }),
+        api.get<TradeStats>(ENDPOINTS.tradeStats, params),
       ])
 
       // A 200-with-HTML response (the SPA catch-all can answer an /api/... path)
@@ -128,7 +128,7 @@ export default function TradeLog() {
         if (fromDate) params.from_date = fromDate
         if (toDate) params.to_date = toDate
 
-        const res = await api.get<TradeResponse>(ENDPOINTS.trades, { params })
+        const res = await api.get<TradeResponse>(ENDPOINTS.trades, params)
         if (Array.isArray(res.data.trades)) collected.push(...res.data.trades)
         exportTotal = Number(res.data.total) || exportTotal
         exportPages = Number(res.data.pages) || 1

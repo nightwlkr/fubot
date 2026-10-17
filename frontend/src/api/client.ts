@@ -40,10 +40,33 @@ apiClient.interceptors.response.use(
   }
 )
 
-// Typed helpers
+// Typed helpers.
+//
+// `get` takes the QUERY PARAMS DIRECTLY — not an axios config.
+//     api.get(ENDPOINTS.trades, { side: 'SHORT' })   ✅ → ?side=SHORT
+//     api.get(ENDPOINTS.trades, { params: {...} })   ❌ → ?params[side]=SHORT
+//
+// The second form is the mistake that silently broke every filter on the Trade
+// Log, Scanner and Performance pages: axios serialises the nested object into
+// `params[key]=value`, the backend sees no `side` at all, and the page quietly
+// returns every row with a 200. Guard against a regression because it is
+// invisible at runtime — the request succeeds, it just asks the wrong question.
+function queryParams(params?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!params) return undefined
+  if (Object.keys(params).length === 1 && 'params' in params) {
+    console.error(
+      `[api.get] ${JSON.stringify(params)} looks like an axios config, not query ` +
+      `params. Pass the params directly — api.get(url, { side: 'SHORT' }). ` +
+      `Wrapping them in { params } sends "params[side]=SHORT" and every filter ` +
+      `is silently ignored.`)
+    return params.params as Record<string, unknown>
+  }
+  return params
+}
+
 export const api = {
   get: <T>(url: string, params?: Record<string, unknown>) =>
-    apiClient.get<T>(url, { params }),
+    apiClient.get<T>(url, { params: queryParams(params) }),
 
   post: <T>(url: string, data?: unknown) =>
     apiClient.post<T>(url, data),
