@@ -278,8 +278,12 @@ def test_overview_ok_after_scan_sets_last_scan(client, test_user, monkeypatch):
     async def no_position(self, symbol):
         return None
 
+    async def no_positions(self):
+        return {}
+
     monkeypatch.setattr("backend.services.binance_service.BinanceService.get_klines", empty_klines)
     monkeypatch.setattr("backend.services.binance_service.BinanceService.get_position", no_position)
+    monkeypatch.setattr("backend.services.binance_service.BinanceService.get_all_positions", no_positions)
 
     assert client.post("/api/bot/start", json={"mode": "paper"}).status_code == 200
     import time

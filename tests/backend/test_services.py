@@ -1548,3 +1548,71 @@ class TestLiveModeSafety:
         # +2.1R (price 121) -> trail to 121 - 10 = 111 (locks +1.1R)
         await pm._check_profit_trailing(pos, current_price=121.0)
         assert calls == [(3, 111.0)], f"did not trail at configured trigger: {calls}"
+
+
+class TestScanRateLimitGuard:
+    """Regression: the scan loop must fetch open positions ONCE per pass, not
+    once per symbol. The per-symbol get_current_position call made ~24 signed
+    positionRisk requests per scan and tripped Binance's IP rate limit
+    (-1003 -> HTTP 400/429), which blanked every signed call for ~60s and made
+    the bot look dead."""
+
+    async def test_scan_uses_one_position_fetch_not_per_symbol(self, monkeypatch):
+        from backend.core.bot_engine import BotEngine
+
+        calls = {"get_all_positions": 0, "get_position": 0}
+        symbols = [f"SYM{i}USDT" for i in range(24)]
+
+        async def fake_get_all_positions(self):
+            calls["get_all_positions"] += 1
+            return {}  # flat
+
+        async def fake_get_position(self, symbol):
+            calls["get_position"] += 1
+            return None
+
+        monkeypatch.setattr(
+            "backend.services.binance_service.BinanceService.get_all_positions",
+            fake_get_all_positions)
+        monkeypatch.setattr(
+            "backend.services.binance_service.BinanceService.get_position",
+            fake_get_position)
+
+        engine = BotEngine.__new__(BotEngine)
+        engine._running = True
+        engine._mode = "paper"
+        engine.settings = {}
+        engine.orders = type("O", (), {"get_all_open_positions": fake_get_all_positions,
+                                       "get_current_position": fake_get_position})()
+        engine.signals = type("S", (), {"scan_symbol": lambda self, s: _empty_async()})()
+        engine.strategy = type("T", (), {"evaluate_signal": lambda self, sig, paper_mode=False: _empty_async()})()
+        engine.daily_reset = type("D", (), {
+            "get_daily_stats": lambda self: _stats_async(),
+            "check_and_enforce_limit": lambda self: _true_async(),
+        })()
+        engine.alerts = type("A", (), {})()
+        engine.session_factory = None
+
+        async def fake_enabled():
+            return symbols
+        engine._get_enabled_symbols = fake_enabled
+
+        await engine._scan_and_evaluate()
+
+        # ONE bulk fetch for 24 symbols, ZERO per-symbol positionRisk calls
+        assert calls["get_all_positions"] == 1, (
+            f"expected 1 bulk position fetch per pass, got {calls['get_all_positions']}")
+        assert calls["get_position"] == 0, (
+            f"expected 0 per-symbol position calls, got {calls['get_position']}")
+
+
+async def _empty_async():
+    return []
+
+
+async def _stats_async():
+    return {"total_trades": 0, "used_r": 0.0, "limit_r": 3.0}
+
+
+async def _true_async():
+    return True

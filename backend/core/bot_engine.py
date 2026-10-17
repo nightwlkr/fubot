@@ -144,13 +144,24 @@ class BotEngine:
             logger.info(f"Daily trade cap reached ({daily_stats['total_trades']}/{max_daily})")
             return
 
+        # Fetch ALL open positions ONCE per pass (single positionRisk call that
+        # returns every position) instead of one call per symbol — the old loop
+        # made ~24 signed requests/scan and tripped Binance's IP rate limit
+        # (-1003 → HTTP 400/429), which blanked every signed call for ~60s and
+        # made the bot look dead.
+        open_positions: dict[str, dict] = {}
+        try:
+            open_positions = await self.orders.get_all_open_positions()
+        except Exception as exc:
+            logger.warning("Could not fetch open positions for the scan: %s", exc)
+
         for symbol in symbols:
             if not self._running:
                 break
 
             try:
-                # Skip if already have open position
-                existing = await self.orders.get_current_position(symbol)
+                # Skip if already have open position (from the once-per-pass fetch)
+                existing = open_positions.get(symbol)
                 if existing and existing.get("quantity", 0) > 0:
                     continue
 

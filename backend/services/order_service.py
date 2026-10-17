@@ -28,6 +28,27 @@ class OrderService:
             return None
         return pos or None
 
+    async def get_all_open_positions(self) -> dict[str, dict]:
+        """Every open position on the account, keyed by symbol.
+
+        Uses the single positionRisk call that returns ALL positions instead of
+        one call per symbol — the scan loop runs this once per pass over all
+        enabled symbols, which is the difference between ~1 and ~24 signed
+        requests per scan. Binance rate-limits the IP (2400/min, -1003 → HTTP
+        400/429) and the per-symbol loop was tripping it every pass.
+        """
+        if self.binance is None:
+            return {}
+        try:
+            positions = await self.binance.get_all_positions()
+        except Exception as exc:
+            logger.debug("get_all_open_positions failed: %s", exc)
+            return {}
+        return {
+            p["symbol"]: p for p in positions
+            if p.get("symbol") and p.get("quantity", 0) > 0
+        }
+
     async def place_order(
         self,
         symbol: str,
