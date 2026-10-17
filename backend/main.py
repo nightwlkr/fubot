@@ -140,15 +140,18 @@ async def init_bot(app: FastAPI) -> None:
     signal_service = SignalService(
         session_factory=AsyncSessionLocal, binance=binance, settings=bot_settings
     )
-    strategy_service = StrategyService(
-        risk_service, order_service, binance=binance,
-        session_factory=AsyncSessionLocal, settings=bot_settings,
-    )
-    set_strategy_service(strategy_service)
-
+    # Built before StrategyService so the flatten path can notify it (a FLATTENED
+    # trade is a real loss and must reach the -3R accumulator immediately).
     daily_reset = DailyResetService(
         session_factory=AsyncSessionLocal, settings=bot_settings, alert_service=alert_service
     )
+    strategy_service = StrategyService(
+        risk_service, order_service, binance=binance,
+        session_factory=AsyncSessionLocal, settings=bot_settings,
+        daily_reset=daily_reset,
+    )
+    set_strategy_service(strategy_service)
+
     engine = BotEngine(
         settings=bot_settings,
         binance=binance,

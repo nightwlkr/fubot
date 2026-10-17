@@ -36,12 +36,27 @@ class TradeDecision:
 
 class StrategyService:
     def __init__(self, risk_svc, order_svc, binance=None,
-                 session_factory=None, settings: Optional[dict] = None) -> None:
+                 session_factory=None, settings: Optional[dict] = None,
+                 daily_reset=None) -> None:
         self.risk_svc = risk_svc
         self.order_svc = order_svc
         self.binance = binance
         self.session_factory = session_factory
         self.settings = settings or {}
+        # DailyResetService, injected exactly as PositionManager receives it.
+        # `_close_position_row` records a FLATTENED Trade; without this the loss
+        # only reached the daily R accumulator via the 48h exchange-sync
+        # recompute, so until then the day's loss total — the input to the -3R
+        # circuit breaker — understated reality.
+        #
+        # Safe against double counting: `update_daily_summary` INCREMENTS, and
+        # the only other caller is `PositionManager._close_position` (a
+        # different close path that cannot also flatten this row). The 48h
+        # exchange-sync does NOT call it — `routers/settings.exchange_sync`
+        # recomputes `daily_summary` with one raw-SQL `UPDATE ... FROM` over a
+        # `trades` aggregate, which SETS absolute values and is idempotent, so
+        # it overwrites whatever this call accumulated rather than adding to it.
+        self.daily_reset = daily_reset
         # Mirrors PositionManager: every row this service writes is tagged with
         # the mode it was opened in. It MUST exist — `_close_position_row` reads
         # it when recording a FLATTENED trade, and the attribute was never
@@ -826,9 +841,24 @@ class StrategyService:
                 )
                 session.add(trade)
                 await session.commit()
+                symbol = row.symbol
                 logger.warning(
                     "[%s] Recorded FLATTENED trade: %.4f USDT / %.2fR (failed entry, market-closed)",
-                    row.symbol, pnl_usdt, pnl_r)
+                    symbol, pnl_usdt, pnl_r)
+
+            # The Trade row is durable at this point, so the daily accumulator
+            # can be told about the loss. This runs AFTER the commit and inside
+            # its own try/except: a failure here must never undo the recorded
+            # Trade (that was 130f16e's whole point), and the 48h exchange-sync
+            # recompute remains the safety net for a missed notification.
+            if self.daily_reset is not None:
+                try:
+                    await self.daily_reset.update_daily_summary(pnl_r, pnl_usdt)
+                except Exception:
+                    logger.exception(
+                        "[%s] FLATTENED trade recorded but DailyResetService "
+                        "update failed — the daily R total stays low until the "
+                        "48h exchange-sync recompute", symbol)
         except Exception:
             logger.exception("Failed to close position row %s after failed entry", position_id)
 
