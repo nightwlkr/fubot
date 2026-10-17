@@ -131,6 +131,7 @@ async def list_trades(
 async def trade_stats(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    days: Optional[int] = Query(None, ge=1, le=730),
     mode: Optional[str] = Query("live", pattern="^(live|paper|all)$"),
 ):
     """Headline stats for the Performance page.
@@ -138,6 +139,12 @@ async def trade_stats(
     Live-only by default: paper fills are not real money and must never be
     averaged into a live win-rate or R-per-trade figure. Matches the /performance
     endpoints so the cards and the charts describe the same population.
+
+    `days` exists so the stat cards respect the page's range selection. Without
+    it the cards were ALL-TIME while every chart beside them honoured the
+    7d/30d/90d/365d buttons — so "Win Rate 38%" sat directly above a 7-day
+    chart describing a completely different sample. Omitted, it stays
+    all-time (the historical behaviour for existing API consumers).
 
     pnl_r is coerced through float() — the column is Numeric and comes back as
     Decimal, so a NULL would raise TypeError inside the sum().
@@ -147,6 +154,9 @@ async def trade_stats(
     query = select(Trade)
     if mode != "all":
         query = query.where(Trade.mode == (mode or "live"))
+    if days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = query.where(Trade.closed_at >= cutoff)
     result = await db.execute(query)
     trades = [float(t.pnl_r or 0) for t in result.scalars().all()]
 

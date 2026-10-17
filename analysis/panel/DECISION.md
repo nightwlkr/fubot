@@ -264,3 +264,17 @@ protected by LIMIT + STOP_MARKET + TAKE_PROFIT_MARKET algo orders.
 Start → Live in the dashboard.
 
 303 backend tests pass; frontend builds clean, lint 0 errors.
+
+### Monitoring check — 2026-10-17 07:48 (+04:00)
+
+**Engine:** RUNNING/live, 11 scans, last 03:50 UTC. **Daily:** 4 trades, 3W/1L, +3.81R, +$23.38. **Limit:** not hit.
+
+**Positions:** 0 open (flat). No unprotected positions.
+
+**Trades 70m:** 1 closed (SL_HIT), +0.68R / +$7.33.
+
+**Signals:** 0 PENDING, 0 LIMIT unfilled.
+
+**Journal:** 23 errors + 1 exchangeInfo 404 in 70m. The 404 is from the **old process** (PID 1632771, before the 05:45 restart). The current process (PID 1735383, started 05:45 after the e34e90b fix) has **0 exchangeInfo 404s**. Rate-limit events: **0** in 70m. The 23 errors are pre-restart from the old process.
+
+**Status:** All clean. The exchangeInfo 404 (v2→v1) was already fixed in `e34e90b` and deployed. Current process is healthy, trading profitably, no rate-limit pressure.

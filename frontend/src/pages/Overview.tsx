@@ -67,9 +67,10 @@ export default function Overview() {
 
   useEffect(() => {
     if (!chart || !series || equityCurve.length === 0) return
-    // The API returns equity_curve DESCENDING (newest first); lightweight-charts
-    // requires ASCENDING time order for setData — feeding it descending throws
-    // "Value is null" (out-of-order time) and renders an empty chart.
+    // The backend returns equity_curve ASCENDING now, but lightweight-charts
+    // requires ascending time order for setData and throws "Value is null"
+    // (out-of-order time) otherwise — so keep sorting defensively rather than
+    // trusting the payload order.
     const ascending = [...equityCurve].sort(
       (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
     )

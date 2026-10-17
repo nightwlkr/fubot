@@ -89,7 +89,7 @@ function EquityChart({ range, onRangeChange }: { range: Range; onRangeChange: (r
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Equity Curve</CardTitle>
+        <CardTitle>Equity Curve ({range.toUpperCase()})</CardTitle>
         <div className="flex gap-1">
           {(['7d', '30d', '90d', '365d'] as Range[]).map(r => (
             <button
@@ -157,7 +157,7 @@ function PnLChart({ range, onRangeChange }: { range: Range; onRangeChange: (r: R
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Trading P&amp;L ({metric === 'r' ? 'R' : 'USD'})</CardTitle>
+        <CardTitle>Trading P&amp;L ({metric === 'r' ? 'R' : 'USD'}, {range.toUpperCase()})</CardTitle>
         <div className="flex gap-1">
           <button
             onClick={() => setMetric('usd')}
@@ -295,7 +295,7 @@ function RDistributionChart({ range }: { range: Range }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>R:R Distribution</CardTitle>
+        <CardTitle>R:R Distribution ({range.toUpperCase()})</CardTitle>
       </CardHeader>
       <div ref={containerRef} className="w-full" />
       <div className="flex flex-wrap gap-3 px-4 pb-3">
@@ -319,17 +319,19 @@ export default function Performance() {
 
   useEffect(() => {
     // Stats are live-trading numbers — poll so they don't go stale while the
-    // operator watches the charts update.
+    // operator watches the charts update. They also honour the range: without
+    // `days` the cards were all-time while every chart beside them showed the
+    // selected window, so the headline numbers described a different sample.
     let cancelled = false
     const fetchStats = () => {
-      api.get<Stats>(ENDPOINTS.tradeStats)
+      api.get<Stats>(ENDPOINTS.tradeStats, { params: { days: RANGE_DAYS[range] } })
         .then(res => { if (!cancelled) setStats(res.data) })
         .catch(console.error)
     }
     fetchStats()
     const id = setInterval(fetchStats, 15000)
     return () => { cancelled = true; clearInterval(id) }
-  }, [])
+  }, [range])
 
   const statCards = [
     { label: 'Total Trades', value: stats?.total_trades?.toString() ?? '—' },
@@ -365,7 +367,13 @@ export default function Performance() {
       <PnLChart range={range} onRangeChange={setRange} />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
-          <CardHeader><CardTitle>Monthly Returns (R)</CardTitle></CardHeader>
+          <CardHeader>
+            <CardTitle>Monthly Returns (R)</CardTitle>
+          </CardHeader>
+          <p className="text-xs text-muted px-4 -mt-1 mb-2">
+            All-time by month — months are too coarse to slice, and the current
+            month is always partial. Use the range buttons for the selected window.
+          </p>
           <MonthlyReturnsChart range={range} />
         </Card>
         <RDistributionChart range={range} />

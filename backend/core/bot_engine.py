@@ -271,19 +271,22 @@ class BotEngine:
     async def _maybe_snapshot_equity(self):
         """Log equity snapshot.
 
-        Records the TOTAL USDT account balance, not `availableBalance`. The
-        equity curve is meant to show account value; free margin dips every time
-        a position opens and recovers when it closes, which read as a loss that
-        was really just collateral being locked up. `balance` is the figure
-        Binance's own app shows as "total balance".
+        Records `totalMarginBalance` from /fapi/v2/account — the account-wide,
+        USD-denominated equity that Binance's own UI labels "Margin Balance".
+
+        It previously recorded the USDT row of /fapi/v2/balance, which is NOT
+        the account: this account also holds BTC and BNB as cross-margin
+        collateral, so the USDT row was ~$23.90 against a real margin balance of
+        ~$223.72 — the equity curve understated the account by ~90%. Summing
+        `balance` across assets does not work either, since those values are
+        denominated in each asset (0.0022 BTC), not USD.
+
+        `availableBalance` was rejected earlier for a different reason: it is
+        free margin, which dips on every entry and recovers on exit.
         """
         try:
-            balance_data = await self.binance.get_account_balance()
-            usdt_balance = 0.0
-            for asset in balance_data:
-                if asset.get("asset") == "USDT":
-                    usdt_balance = float(asset.get("balance", 0) or 0)
-                    break
+            equity = await self.binance.get_account_equity()
+            usdt_balance = float(equity.get("margin_balance", 0) or 0)
 
             if self.session_factory is None:
                 return

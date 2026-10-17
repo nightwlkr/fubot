@@ -350,6 +350,46 @@ class BinanceService:
             for a in data
         ]
 
+    async def get_account_equity(self) -> dict:
+        """USD-denominated ACCOUNT totals — the correct source for an equity curve.
+
+        GET /fapi/v2/account (weight 5). Returns account-level totals already
+        valued in USDT across EVERY asset:
+
+            totalMarginBalance      = Wallet Balance + Unrealized PnL  (equity)
+            totalWalletBalance      = sum of all asset balances in USD
+            totalUnrealizedProfit   = open-position PnL
+            totalAvailableBalance   = free margin
+            totalInitialMargin      = collateral posted
+            totalMaintMargin        = maintenance margin
+
+        WHY NOT `get_account_balance()`: that returns one row per asset, and the
+        USDT row alone is NOT the account. This account also holds BTC and BNB
+        as cross-margin collateral, so the USDT row was ~$23.90 while real
+        margin balance was ~$223.72 — the equity curve understated the account
+        by ~90%. Summing the `balance` field across assets does not fix it
+        either: those are denominated in each asset (0.0022 BTC, 0.042 BNB), not
+        USD, so they cannot be added.
+
+        Live-only: an unauthenticated caller cannot read these.
+        """
+        data = await self._signed_request("GET", "fapi/v2/account", weight=5)
+
+        def _f(key: str) -> float:
+            try:
+                return float(data.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        return {
+            "margin_balance": _f("totalMarginBalance"),
+            "wallet_balance": _f("totalWalletBalance"),
+            "unrealized_pnl": _f("totalUnrealizedProfit"),
+            "available_balance": _f("totalAvailableBalance"),
+            "initial_margin": _f("totalInitialMargin"),
+            "maintenance_margin": _f("totalMaintMargin"),
+        }
+
     async def get_position(self, symbol: str) -> dict:
         """GET /fapi/v2/positionRisk — single symbol (weight 5)."""
         data = await self._signed_request("GET", "fapi/v2/positionRisk", {"symbol": symbol}, weight=5)

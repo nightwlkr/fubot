@@ -1,6 +1,6 @@
 """Dashboard router — overview and today stats."""
 import logging
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -88,13 +88,20 @@ async def dashboard_overview(
     positions = result.scalars().all()
     pricing = await fetch_pricing(request, [p.symbol for p in positions]) if positions else {}
 
-    # Equity curve (last 30 days)
-    cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(days=30)
+    # Equity curve for the Overview card, which is labelled "7D".
+    #
+    # This used to take the newest 30 ROWS of equity_log regardless of age.
+    # Snapshots are written every 5 scans (~2.5 min at a 30s interval), so 30
+    # rows is about 75 MINUTES — a card labelled "7D" was showing barely an
+    # hour. Filter by time to match the label, and order ASCENDING so the
+    # chart's series is in the order lightweight-charts requires (it throws
+    # 'Value is null' on out-of-order time) instead of relying on the frontend
+    # to re-sort a descending payload.
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     eq_result = await db.execute(
         select(EquityLog)
         .where(EquityLog.recorded_at >= cutoff)
-        .order_by(EquityLog.recorded_at.desc())
-        .limit(30)
+        .order_by(EquityLog.recorded_at)
     )
     equity_rows = eq_result.scalars().all()
 

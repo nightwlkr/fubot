@@ -24,31 +24,77 @@ import pytest
 # 1. The equity curve must record total account value
 # ---------------------------------------------------------------------------
 
-class TestEquityCurveRecordsTotalBalance:
-    """`_maybe_snapshot_equity` wrote `availableBalance` into `equity_log.balance_usdt`.
+class TestEquityCurveRecordsAccountEquity:
+    """`equity_log.balance_usdt` is what both the Performance Equity Curve and
+    the Overview curve chart. It has been wrong twice, in different ways:
 
-    availableBalance is FREE MARGIN: it drops the moment a position opens and
-    recovers when it closes, so the "equity curve" showed a cliff on every entry
-    that was really just collateral being locked. Binance's `/fapi/v2/balance`
-    returns the total on `balance`; `get_account_balance()` discarded it.
+    1. It recorded `availableBalance` — FREE MARGIN — which dips on every entry
+       and recovers on exit.
+    2. Changed to the `balance` field of the USDT row of /fapi/v2/balance. Still
+       wrong: that row is NOT the account. This account also holds BTC and BNB
+       as cross-margin collateral, so the USDT row read ~$23.90 while real
+       margin balance was ~$223.72 — the curve understated the account by ~90%.
+
+    Summing `balance` across assets does not fix it either: those values are
+    denominated in each asset (0.0022 BTC, 0.042 BNB), not USD, so they cannot
+    be added. The only correct source is the account-level USD total
+    `totalMarginBalance` from /fapi/v2/account — the figure Binance's own UI
+    labels "Margin Balance".
     """
 
-    def test_snapshot_writes_total_balance_not_available_balance(self):
+    def test_snapshot_uses_the_account_level_total(self):
         from backend.core.bot_engine import BotEngine
         src = inspect.getsource(BotEngine._maybe_snapshot_equity)
-        assert 'asset.get("balance"' in src, \
-            "the equity snapshot must record the TOTAL USDT balance"
-        assert 'asset.get("availableBalance"' not in src, \
-            "availableBalance is free margin, not equity — it must not be charted"
+        assert "get_account_equity()" in src, \
+            "equity must come from the account-level USD total"
+        assert 'equity.get("margin_balance"' in src
 
-    def test_balance_service_exposes_the_total(self):
+    def test_snapshot_does_not_use_the_usdt_asset_row(self):
+        """The per-asset USDT row excludes BTC/BNB cross-margin collateral."""
+        from backend.core.bot_engine import BotEngine
+        src = inspect.getsource(BotEngine._maybe_snapshot_equity)
+        assert "get_account_balance()" not in src, \
+            "the USDT row of /fapi/v2/balance is not the account"
+        assert 'asset.get("asset") == "USDT"' not in src
+
+    def test_snapshot_never_records_free_margin(self):
+        """Parse the AST and check only real code, so the docstring explaining
+        WHY availableBalance is wrong doesn't read as a use of it."""
+        import ast
+        import textwrap
+        from backend.core.bot_engine import BotEngine
+        tree = ast.parse(textwrap.dedent(inspect.getsource(BotEngine._maybe_snapshot_equity)))
+        # Drop docstrings — they are not executable content.
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if (isinstance(body, list) and body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                node.body = body[1:] or [ast.Pass()]
+        code = ast.unparse(tree)
+        assert "availableBalance" not in code and "available_balance" not in code, \
+            "free margin dips on every entry — it is not equity"
+
+    def test_equity_service_reads_the_account_endpoint(self):
+        from backend.services.binance_service import BinanceService
+        src = inspect.getsource(BinanceService.get_account_equity)
+        assert "fapi/v2/account" in src, \
+            "the USD totals live on /fapi/v2/account, not /fapi/v2/balance"
+        assert "totalMarginBalance" in src
+
+    def test_equity_service_declares_the_right_weight(self):
+        """/fapi/v2/account is weight 5; declaring 1 under-counts the limiter."""
+        from backend.services.binance_service import BinanceService
+        src = inspect.getsource(BinanceService.get_account_equity)
+        assert "weight=5" in src
+
+    def test_per_asset_balance_is_still_available_for_sizing(self):
+        """Fixing equity must not break position sizing, which legitimately
+        wants per-asset free margin."""
         from backend.services.binance_service import BinanceService
         src = inspect.getsource(BinanceService.get_account_balance)
-        assert '"balance"' in src, \
-            "get_account_balance must surface the total `balance` field"
-        # availableBalance must REMAIN available — position sizing needs free margin.
-        assert '"availableBalance"' in src, \
-            "availableBalance must stay: position sizing legitimately wants free margin"
+        assert '"availableBalance"' in src
+        assert '"balance"' in src
 
     def test_equity_point_is_labelled_as_balance(self):
         from backend.routers.performance import equity_curve
@@ -178,6 +224,45 @@ class TestRangeReachesEveryChart:
     ignored the 7d/30d/90d/365d buttons and always showed all-time while the
     charts beside it respected the selection.
     """
+
+    def test_stat_cards_also_respect_the_range(self):
+        """The 5 headline cards were all-time while every chart beside them
+        honoured the range — so "Win Rate 38%" sat directly above a 7-day
+        chart describing a completely different sample."""
+        import backend.routers.trades as tr
+        src = inspect.getsource(tr.trade_stats)
+        assert "days: Optional[int]" in src, \
+            "/trades/stats must accept the range the cards display"
+        assert "Trade.closed_at >= cutoff" in src
+
+    def test_stat_cards_send_the_range_from_the_frontend(self):
+        from pathlib import Path
+        tsx = (Path(__file__).resolve().parents[2]
+               / "frontend/src/pages/Performance.tsx").read_text()
+        idx = tsx.index("ENDPOINTS.tradeStats")
+        assert "days: RANGE_DAYS[range]" in tsx[idx:idx + 200], \
+            "the stat-card request must pass the selected range"
+        assert "[range]" in tsx, \
+            "the stats effect must re-run when the range changes"
+
+    def test_overview_equity_curve_matches_its_7d_label(self):
+        """It took the newest 30 ROWS of equity_log. Snapshots land every ~2.5
+        min, so 30 rows is about 75 MINUTES under a card labelled '7D'."""
+        import backend.routers.dashboard as rd
+        src = inspect.getsource(rd.equity_and_totals) if hasattr(rd, "equity_and_totals") \
+            else inspect.getsource(rd)
+        assert "timedelta(days=7)" in src, \
+            "the Overview curve must filter to the 7 days its title claims"
+        assert ".limit(30)" not in src, \
+            "a row limit ignores the time filter and silently shows ~75 minutes"
+
+    def test_overview_equity_curve_is_ordered_ascending(self):
+        """lightweight-charts throws 'Value is null' on out-of-order time, so the
+        backend should not ship DESCENDING and rely on the frontend to re-sort."""
+        import backend.routers.dashboard as rd
+        src = inspect.getsource(rd)
+        assert "EquityLog.recorded_at.desc()" not in src, \
+            "the equity curve must be ordered ascending"
 
     def test_strategies_endpoint_accepts_days(self):
         from backend.routers.performance import strategy_performance
