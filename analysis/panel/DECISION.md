@@ -321,3 +321,35 @@ that holds other assets as collateral. Only an account-level endpoint is.
 
 Verified after deploy: at 7d/30d/365d the stat cards, P&L points and R-distribution
 all report the identical sample (45 trades at each).
+
+## Trade Log filters (2026-10-17)
+
+User reported the Trade Log filters were not working. **The backend filters were
+all correct** — verified against production, each returns distinct, sensible
+counts (symbol/side/outcome/from_date/to_date). The defect was one level up: the
+five summary cards fetched `/trades/stats` with **no parameters**, so they always
+described all-time history while the table beside them was filtered. Narrowing
+to BTCUSDT left "45 trades / 40% win rate" above a 5-row table.
+
+Fixed: `/trades/stats` now takes the same filters as `/trades`; both requests in
+`TradeLog.tsx` send the same `params`. Also extracted `_apply_trade_filters()`
+so the six filters live in ONE place — they had been duplicated inline twice
+inside `list_trades` (page query + count query) and were about to be written a
+third time. Three copies is exactly how they drift apart.
+
+Verified after deploy — table rows and card totals agree on every filter:
+
+    none 46 | BTCUSDT 5 | DOTUSDT 3 | SHORT 24 | loss 25 | win 19 | BTCUSDT+LONG 1
+
+### Performance range selector
+
+Also corrected: the buttons offered only 7d/30d/90d/365d while the entire trade
+history spans **2.15 days**, so every option returned an identical 45 trades and
+the selector looked dead. Added 1d and 3d, which do discriminate (1d -> 22,
+2d -> 41, 3d+ -> 45).
+
+**Pattern worth keeping:** two of tonight's UI "the numbers are wrong" reports
+were the *summary* not agreeing with the *detail* beside it — cards fetched
+unfiltered, an equity field recording the wrong account, a stat block spanning a
+different sample. The detail widgets were right. When a dashboard looks broken,
+check that its panels describe the same population before suspecting the filters.
