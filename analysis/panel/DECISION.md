@@ -353,3 +353,55 @@ were the *summary* not agreeing with the *detail* beside it — cards fetched
 unfiltered, an equity field recording the wrong account, a stat block spanning a
 different sample. The detail widgets were right. When a dashboard looks broken,
 check that its panels describe the same population before suspecting the filters.
+
+## Trade Log filters — the actual root cause (2026-10-17, second pass)
+
+The first fix (making `/trades/stats` accept the filters) was correct but
+addressed the wrong symptom: the summary cards now matched the table, yet the
+TABLE itself never filtered. Selecting Short, selecting Wins, or typing a symbol
+all returned every trade.
+
+Root cause: **Starlette's `redirect_slashes`.** A request for a collection root
+without its trailing slash is answered with a 307 to the slashed form, and that
+redirect **discards the query string**:
+
+    GET /api/trades?side=SHORT  ->  307 Location: /api/trades/
+    GET /api/trades/            ->  200  (unfiltered, 47 trades)
+
+axios follows the redirect transparently, so the request *succeeded*, nothing
+errored, nothing logged — the client simply got every row back.
+
+Affected: `/trades`, `/signals`, `/positions`, `/orders` — the four routers whose
+`@router.get("/")` sits at a collection root. Sub-paths (`/trades/stats`,
+`/performance/equity`) never redirect, which is exactly why the Performance range
+buttons appeared to work while the Trade Log filters did not.
+
+### Why the previous verification missed it
+
+I had tested by calling `trades.list_trades()` **in-process**. That bypasses the
+routing layer entirely, so it returned correct filtered results and "proved"
+the backend worked. The defect lives in routing, which only a real HTTP request
+exercises. `tests/backend/test_endpoint_slashes.py` now goes through TestClient.
+
+**Lesson: when a symptom is "the API ignores my input", verify over real HTTP,
+not by calling the handler directly.** Two rounds were lost to in-process tests
+here.
+
+Fix (two layers): each of the four routers now registers both `@router.get("/")`
+and `@router.get("")`, so there is nothing to redirect; and ENDPOINTS uses the
+canonical trailing-slash form. Verified live: `?side=SHORT` -> 24 rows all SHORT,
+`?outcome=win` -> 20 rows all winners, `?symbol=BTCUSDT` -> 5 rows all BTCUSDT,
+unfiltered -> 47 rows.
+
+Also: `ENDPOINTS.settings = '/settings'` shares the bare-root shape but has no
+collection route, so it 307s into a 404. Unreferenced, left as-is and pinned by a
+test so the exemption is deliberate.
+
+### Pattern across tonight's UI bugs
+
+Every "the numbers are wrong" report tonight shared one shape: **a panel
+describing a different population than the detail beside it** — unfiltered cards,
+an equity field recording the wrong account, a stat block over a different range,
+and finally the table never receiving its query string at all. In each case the
+detail widget looked correct in isolation. Checking what each panel is actually
+requesting would have found all four faster.
