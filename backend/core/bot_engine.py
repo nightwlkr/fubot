@@ -269,13 +269,20 @@ class BotEngine:
             return [row[0] for row in result.fetchall()]
 
     async def _maybe_snapshot_equity(self):
-        """Log equity snapshot."""
+        """Log equity snapshot.
+
+        Records the TOTAL USDT account balance, not `availableBalance`. The
+        equity curve is meant to show account value; free margin dips every time
+        a position opens and recovers when it closes, which read as a loss that
+        was really just collateral being locked up. `balance` is the figure
+        Binance's own app shows as "total balance".
+        """
         try:
             balance_data = await self.binance.get_account_balance()
             usdt_balance = 0.0
             for asset in balance_data:
                 if asset.get("asset") == "USDT":
-                    usdt_balance = float(asset.get("availableBalance", 0))
+                    usdt_balance = float(asset.get("balance", 0) or 0)
                     break
 
             if self.session_factory is None:

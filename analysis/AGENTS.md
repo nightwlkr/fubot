@@ -26,6 +26,15 @@ Owner: FUBOT project team (Lead). Panelists write only their own assigned file i
 
 Artifacts are checked by the Lead for citation/sample-size compliance. The decisions they produce are verified by `PYTHONPATH=. pytest tests/backend/ -q` and by the monitoring window recorded in `DECISION.md`.
 
+## Performance page
+
+- **Endpoints**: `/performance/equity` (account equity from `equity_log`), `/performance/pnl` (cumulative realized R+USD from `trades`), `/performance/monthly` (per-month R/count/win-rate **from `trades`**), `/performance/strategies` (R:R histogram), `/trades/stats` (headline cards).
+- **Live-only by default.** Every trade-derived endpoint takes `mode=live|paper|all` and defaults to `live` — paper fills are not real money and must never contaminate a live win-rate or R-per-trade figure. Pass `all` to inspect paper history.
+- **`/performance/equity` is exempt from `mode`.** `equity_log` records account balance and has no `mode` column, so no filter is possible; `test_performance_wiring.py` asserts this exemption so it is not "fixed" later with a no-op filter.
+- **`equity_log.balance_usdt` must be the TOTAL USDT balance**, never `availableBalance`. `availableBalance` is free margin and dips on every entry — charting it made equity look like it lost money when collateral was merely locked. Binance's `/fapi/v2/balance` returns both; `get_account_balance()` exposes `balance`, `availableBalance`, `maxWithdrawAmount`, `unrealizedProfit`.
+- **Monthly Returns derives from `trades`, not `daily_summary`.** `daily_summary` is written by the daily-reset service and backfilled only by the exchange-sync recompute (last 48h), so it is not a projection of `trades` — reading it made Monthly Returns blank or disagree with `/pnl`.
+- **Known data defect (2026-10-17):** the dev database (`localhost/fubot`) holds 20 corrupt rows with placeholder entries (`entry_price` exactly 100 or 106.5, qty 4260) whose exits are real market prices. They contribute ~+183,826R of the total and dominate Best Trade / Avg R / the P&L chart. Production must be checked separately. Cleaning them is a user decision — see DECISION.md.
+
 ## Child DOX Index
 
 - `panel/` — per-cycle panel artifacts and the Lead decision document; owned by this doc.

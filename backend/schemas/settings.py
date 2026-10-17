@@ -54,8 +54,14 @@ class TradingSettingsUpdate(BaseModel):
 
     Validate on WRITE. Clamping the response instead only sanitises what the
     operator sees while the engine keeps running the unbounded value.
+
+    NOTE on risk_percent: config.py still says le=2.0, which is STALE — the
+    account has been traded at 5% risk/trade since 2026-10-15 (paired with a
+    300% notional cap, because honouring a risk target needs
+    cap >= risk_percent / stop_pct). Bounds copied verbatim from config.py
+    would have 422'd the operator's own live setting on the next save.
     """
-    risk_percent: float | None = Field(default=None, ge=0.5, le=2.0)
+    risk_percent: float | None = Field(default=None, ge=0.1, le=10.0)
     max_positions: int | None = Field(default=None, ge=1, le=10)
     daily_loss_limit_r: float | None = Field(default=None, ge=-50.0, le=-0.5)
     rr_min: float | None = Field(default=None, ge=2.0, le=5.0)

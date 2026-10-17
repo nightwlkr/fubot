@@ -884,7 +884,6 @@ class TestCloseAllPositions:
         SYM = "CLOSEALLUSDT"
         try:
             async with Session() as s:
-                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 s.add(Position(symbol=SYM, side="LONG", entry_price=100.0, quantity=1.0,
                                stop_loss=95.0, take_profit=110.0, status="OPEN",
@@ -913,7 +912,6 @@ class TestCloseAllPositions:
             assert trade is not None and trade.exit_reason == "MANUAL_CLOSE"
         finally:
             async with Session() as s:
-                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()
@@ -982,10 +980,12 @@ class TestLiveModeSafety:
         Session = async_sessionmaker(engine, expire_on_commit=False)
         SYM = "CLOSETST"
         cancelled = []
+        from backend.models.trade import Trade
         market_closed = []
         try:
             async with Session() as s:
                 await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 p = Position(symbol=SYM, side="LONG", entry_price=100.0, quantity=2.0,
                              stop_loss=95.0, take_profit=110.0, status="OPEN")
@@ -1022,6 +1022,7 @@ class TestLiveModeSafety:
         finally:
             async with Session() as s:
                 await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()
@@ -1039,10 +1040,12 @@ class TestLiveModeSafety:
         Session = async_sessionmaker(engine, expire_on_commit=False)
         SYM = "TPHITTST"
         cancelled = []
+        from backend.models.trade import Trade
         market_closed = []
         try:
             async with Session() as s:
                 await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 p = Position(symbol=SYM, side="LONG", entry_price=100.0, quantity=1.0,
                              stop_loss=95.0, take_profit=110.0, status="OPEN")
@@ -1076,6 +1079,7 @@ class TestLiveModeSafety:
         finally:
             async with Session() as s:
                 await s.execute(delete(Order).where(Order.symbol == SYM))
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()
@@ -1094,8 +1098,10 @@ class TestLiveModeSafety:
         Session = async_sessionmaker(engine, expire_on_commit=False)
         SYM = "SWEEPTST"
         cancelled = []
+        from backend.models.trade import Trade
         try:
             async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=1.0,
                              stop_loss=105.0, take_profit=90.0, status="OPEN")
@@ -1127,6 +1133,7 @@ class TestLiveModeSafety:
             assert (SYM, 777) in cancelled, f"unrecorded algo order not swept: {cancelled}"
         finally:
             async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()
@@ -1195,8 +1202,10 @@ class TestLiveModeSafety:
         Session = async_sessionmaker(engine, expire_on_commit=False)
         SYM = "FLATTST"
         market_closed = []
+        from backend.models.trade import Trade
         try:
             async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=5.0,
                              stop_loss=105.0, take_profit=90.0, status="OPEN")
@@ -1228,6 +1237,7 @@ class TestLiveModeSafety:
                 f"leftover exchange position not flattened: {market_closed}"
         finally:
             async with Session() as s:
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()

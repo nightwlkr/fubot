@@ -47,14 +47,13 @@ function isLossBucket(bucket: string): boolean {
 type Range = '7d' | '30d' | '90d' | '365d'
 const RANGE_DAYS: Record<Range, number> = { '7d': 7, '30d': 30, '90d': 90, '365d': 365 }
 
-function EquityChart() {
+function EquityChart({ range, onRangeChange }: { range: Range; onRangeChange: (r: Range) => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   // Hold the series returned by addSeries() — createChart's chart object has
   // NO getSeries() method at runtime (that's on a pane API), so calling
   // chart.getSeries() threw "not a function" and crashed the page.
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
-  const [range, setRange] = useState<Range>('30d')
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -95,7 +94,7 @@ function EquityChart() {
           {(['7d', '30d', '90d', '365d'] as Range[]).map(r => (
             <button
               key={r}
-              onClick={() => setRange(r)}
+              onClick={() => onRangeChange(r)}
               className={`px-2 py-1 text-xs rounded font-mono transition-colors ${
                 range === r ? 'bg-primary text-white' : 'bg-surface2 text-muted hover:text-text'
               }`}
@@ -110,12 +109,11 @@ function EquityChart() {
   )
 }
 
-function PnLChart() {
+function PnLChart({ range, onRangeChange }: { range: Range; onRangeChange: (r: Range) => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const [metric, setMetric] = useState<'r' | 'usd'>('usd')
-  const [range, setRange] = useState<Range>('30d')
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -181,7 +179,7 @@ function PnLChart() {
           {(['7d', '30d', '90d', '365d'] as Range[]).map(r => (
             <button
               key={r}
-              onClick={() => setRange(r)}
+              onClick={() => onRangeChange(r)}
               className={`px-2 py-1 text-xs rounded font-mono transition-colors ${
                 range === r ? 'bg-primary text-white' : 'bg-surface2 text-muted hover:text-text'
               }`}
@@ -192,14 +190,14 @@ function PnLChart() {
         </div>
       </CardHeader>
       <p className="text-xs text-muted px-1 mb-1">
-        Cumulative realized P&amp;L from closed trades only — unlike the equity curve, this excludes collateral price drift.
+        Cumulative realized P&amp;L from closed <span className="text-text">live</span> trades only — unlike the equity curve, this excludes collateral price drift.
       </p>
       <div ref={containerRef} className="w-full" />
     </Card>
   )
 }
 
-function MonthlyReturnsChart() {
+function MonthlyReturnsChart({ range }: { range: Range }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
@@ -228,7 +226,11 @@ function MonthlyReturnsChart() {
       .then(res => {
         const series = seriesRef.current
         if (!series || !chartRef.current) return
-        series.setData(res.data.data.map(p => ({
+        const rows = Array.isArray(res.data.data) ? res.data.data : []
+        // Months are a coarse axis — never cut them at the range boundary, or
+        // the current (partial) month vanishes. Keep every month that OVERLAPS
+        // the window so the bar is present, just with the range noted below.
+        series.setData(rows.map(p => ({
           time: (new Date(p.month + '-01').getTime() / 1000) as Time,
           value: p.pnl_r,
           color: p.pnl_r >= 0 ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.7)',
@@ -236,12 +238,16 @@ function MonthlyReturnsChart() {
         chartRef.current.timeScale().fitContent()
       })
       .catch(console.error)
-  }, [])
+    // `range` is accepted but deliberately not a filter: months are too coarse
+    // to slice (the current month is always partial), and dropping it would
+    // hide the month in progress. Changing range re-renders this chart only if
+    // the dependency is present — kept for correctness if a filter is added.
+  }, [range])
 
   return <div ref={containerRef} className="w-full" />
 }
 
-function RDistributionChart() {
+function RDistributionChart({ range }: { range: Range }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
@@ -267,7 +273,11 @@ function RDistributionChart() {
   }, [])
 
   useEffect(() => {
-    api.get<{ data: RDatum[] }>(ENDPOINTS.performanceStrategies)
+    // The endpoint had no `days` param, so this chart ignored the range buttons
+    // and always showed all-time while the charts beside it respected 7d/30d/…
+    api.get<{ data: RDatum[] }>(ENDPOINTS.performanceStrategies, {
+      params: { days: RANGE_DAYS[range] },
+    })
       .then(res => {
         const rows = Array.isArray(res.data.data) ? res.data.data : []
         setData(rows)
@@ -280,7 +290,7 @@ function RDistributionChart() {
         })))
       })
       .catch(console.error)
-  }, [])
+  }, [range])
 
   return (
     <Card>
@@ -302,9 +312,23 @@ function RDistributionChart() {
 
 export default function Performance() {
   const [stats, setStats] = useState<Stats | null>(null)
+  // One range for the whole page. Previously each chart owned its own state, so
+  // the R-distribution had no range at all and silently showed all-time next to
+  // charts that respected the buttons.
+  const [range, setRange] = useState<Range>('30d')
 
   useEffect(() => {
-    api.get<Stats>(ENDPOINTS.tradeStats).then(res => setStats(res.data)).catch(console.error)
+    // Stats are live-trading numbers — poll so they don't go stale while the
+    // operator watches the charts update.
+    let cancelled = false
+    const fetchStats = () => {
+      api.get<Stats>(ENDPOINTS.tradeStats)
+        .then(res => { if (!cancelled) setStats(res.data) })
+        .catch(console.error)
+    }
+    fetchStats()
+    const id = setInterval(fetchStats, 15000)
+    return () => { cancelled = true; clearInterval(id) }
   }, [])
 
   const statCards = [
@@ -322,7 +346,10 @@ export default function Performance() {
           <BarChart3 className="w-5 h-5 text-primary" />
           Performance
         </h1>
-        <p className="text-sm text-muted mt-0.5">Equity curve, monthly returns, and trade statistics</p>
+        <p className="text-sm text-muted mt-0.5">
+          Equity curve, monthly returns, and trade statistics
+          <span className="text-muted"> — live trades only</span>
+        </p>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
@@ -334,14 +361,14 @@ export default function Performance() {
         ))}
       </div>
 
-      <EquityChart />
-      <PnLChart />
+      <EquityChart range={range} onRangeChange={setRange} />
+      <PnLChart range={range} onRangeChange={setRange} />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
           <CardHeader><CardTitle>Monthly Returns (R)</CardTitle></CardHeader>
-          <MonthlyReturnsChart />
+          <MonthlyReturnsChart range={range} />
         </Card>
-        <RDistributionChart />
+        <RDistributionChart range={range} />
       </div>
     </div>
   )

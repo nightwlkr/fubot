@@ -1,6 +1,7 @@
 """Performance router — equity curve, monthly returns, strategy breakdown."""
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from sqlalchemy import select, func
@@ -23,6 +24,21 @@ from backend.schemas.performance import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/performance", tags=["performance"])
+
+
+def _mode_filter(query, mode: Optional[str]):
+    """Restrict a query to live or paper trades.
+
+    `Trade.mode` exists precisely so paper and live results never mix (added
+    with migration 009), but nothing read it — so every statistic on the
+    Performance page summed paper fills into live performance with no
+    indication. Default is live-only: paper results are not real money and must
+    never contaminate a live P&L number. Pass `mode='paper'` or `'all'` to see
+    the others.
+    """
+    if mode == "all":
+        return query
+    return query.where(Trade.mode == (mode or "live"))
 
 
 async def get_current_user_from_cookie(request: Request, db: AsyncSession):
@@ -69,20 +85,25 @@ async def pnl_curve(
     request: Request,
     db: AsyncSession = Depends(get_db),
     days: int = Query(365, ge=1, le=730),
+    mode: Optional[str] = Query("live", pattern="^(live|paper|all)$"),
 ):
     """Cumulative trading P&L (R and USD) from closed trades, in close order.
 
     Unlike the equity curve (total account value, moves with collateral prices),
     this shows ONLY realized PnL from the strategy — the honest performance line.
     Returns ascending (oldest first) for charting.
+
+    Live-only by default so paper fills cannot contaminate real-money P&L.
     """
     user = await get_current_user_from_cookie(request, db)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     result = await db.execute(
-        select(Trade)
-        .where(Trade.closed_at >= cutoff)
-        .order_by(Trade.closed_at)
+        _mode_filter(
+            select(Trade)
+            .where(Trade.closed_at >= cutoff),
+            mode,
+        ).order_by(Trade.closed_at)
     )
     rows = result.scalars().all()
 
@@ -105,58 +126,73 @@ async def pnl_curve(
 async def monthly_returns(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    mode: Optional[str] = Query("live", pattern="^(live|paper|all)$"),
 ):
+    """Per-month R, trade count and win rate.
+
+    Aggregated from `trades`, NOT `daily_summary`. The two disagreed: this
+    endpoint read daily_summary while /pnl read trades, and nothing backfills
+    daily_summary from trades (the exchange-sync recompute only covers the last
+    48h). So Monthly Returns could show nothing while the PnL chart next to it
+    was full, and the two would quietly disagree on the totals. trades is the
+    source of truth for per-trade P&L.
+    """
     user = await get_current_user_from_cookie(request, db)
 
-    result = await db.execute(
-        select(DailySummary)
-        .order_by(DailySummary.date)
-    )
-    summaries = result.scalars().all()
+    result = await db.execute(_mode_filter(select(Trade), mode))
+    trades = result.scalars().all()
 
-    # Group by month
     monthly: dict[str, dict] = {}
-    for s in summaries:
-        month_key = s.date.strftime("%Y-%m")
-        if month_key not in monthly:
-            monthly[month_key] = {
-                "month": month_key,
-                "pnl_r": 0.0,
-                "pnl_usdt": 0.0,
-                "trades": 0,
-                "wins": 0,
-            }
-        monthly[month_key]["pnl_r"] += float(s.total_pnl_r)
-        monthly[month_key]["pnl_usdt"] += float(s.total_pnl_usdt)
-        monthly[month_key]["trades"] += s.total_trades
-        monthly[month_key]["wins"] += s.wins
+    for t in trades:
+        if t.closed_at is None:
+            continue
+        # closed_at is timestamptz-aware; use its own date so a trade closed at
+        # 23:30 UTC lands in the month a human would expect.
+        month_key = t.closed_at.strftime("%Y-%m")
+        m = monthly.setdefault(month_key, {
+            "pnl_r": 0.0, "trades": 0, "wins": 0, "losses": 0,
+        })
+        m["pnl_r"] += float(t.pnl_r or 0)
+        m["trades"] += 1
+        if float(t.pnl_r or 0) > 0:
+            m["wins"] += 1
+        elif float(t.pnl_r or 0) < 0:
+            m["losses"] += 1
 
-    data = []
-    for month_key in sorted(monthly.keys()):
-        m = monthly[month_key]
-        win_rate = (m["wins"] / m["trades"] * 100) if m["trades"] > 0 else 0.0
-        data.append(MonthlyReturn(
-            month=m["month"],
-            pnl_r=float(m["pnl_r"]),
-            trades=m["trades"],
-            win_rate=win_rate,
-        ))
-
-    return MonthlyResponse(data=data)
+    return MonthlyResponse(data=[
+        MonthlyReturn(
+            month=key,
+            pnl_r=round(monthly[key]["pnl_r"], 4),
+            trades=monthly[key]["trades"],
+            win_rate=(monthly[key]["wins"] / monthly[key]["trades"] * 100)
+            if monthly[key]["trades"] > 0 else 0.0,
+        )
+        for key in sorted(monthly.keys())
+    ])
 
 
 @router.get("/strategies", response_model=StrategyResponse)
 async def strategy_performance(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    days: Optional[int] = Query(None, ge=1, le=730),
+    mode: Optional[str] = Query("live", pattern="^(live|paper|all)$"),
 ):
     """R:R distribution of closed trades — feeds the Performance histogram.
 
     Buckets match the frontend labels (PHASE5_STEP8); ordered from worst to best.
+
+    `days` was missing, so this chart ignored the 7d/30d/90d/365d range buttons
+    and always showed all-time while the charts beside it respected the range.
+    Omitted (None) it stays all-time, which is the historical behaviour.
     """
     user = await get_current_user_from_cookie(request, db)
 
-    result = await db.execute(select(Trade))
+    query = _mode_filter(select(Trade), mode)
+    if days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = query.where(Trade.closed_at >= cutoff)
+    result = await db.execute(query)
     trades = [float(t.pnl_r) for t in result.scalars().all()]
 
     edges = [

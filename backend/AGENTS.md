@@ -48,6 +48,10 @@ Location: `/Users/vick/Documents/Projects/fubot/backend/`
 | `indicators/atr.py` | `calculate_atr` (scalar, full-series — what the LIVE scanner uses) + `calculate_atr_series` (per-index, lookahead-free; backtests only). `series[0] == 0.0` and indices `1..period` are a running average, so callers must skip non-positive values. Never swap the series into `signal_service` without that guard. |
 | `utils/` | Empty placeholder — no shared helpers yet |
 
+- **The Performance page must read ONE source of truth per metric** (2026-10-17): Monthly Returns read `daily_summary` while `/pnl` read `trades`, and nothing backfills one from the other, so they could not agree. Monthly now derives from `trades` — `daily_summary` is written by the daily-reset service and backfilled only by the exchange-sync recompute (last 48h), so it is not a projection of `trades`. The equity curve read `availableBalance` (free margin, dips on every entry) and now records the total `balance`.
+- **Trade-derived performance endpoints default to `mode=live`** (2026-10-17): `Trade.mode` was added with migration 009 precisely to keep paper and live separate, but nothing read it (`grep -c "Trade.mode"` was 0 in `performance.py` and `trades.py`) — every statistic summed both. All of `/performance/pnl`, `/performance/monthly`, `/performance/strategies` and `/trades/stats` take `mode=live|paper|all` now. `/performance/equity` is exempt: `equity_log` has no mode column.
+- **`pnl_r` must be coerced to float before arithmetic** (2026-10-17): it is a `Numeric` column returning `Decimal`, so `sum(t.pnl_r for t in trades)` mixes Decimal with float literals and raises on NULL.
+
 ### Confirmed defects (2026-10-17 review, `analysis/REVIEW_2026-10-17.md`)
 
 **All Tier-1 items below are FIXED** (uncommitted, `test_review_2026_10_17.py` locks each one in). Verify each is still open before re-fixing — several were fixed here and earlier in the same day (`f3810be`, `f8838cb`).
@@ -124,7 +128,7 @@ Still open from the review (not money-path, deliberately deferred):
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 266 passing (e2e trade flow, -3R hard stop, security audit, payload contracts, orphan-sweep, reconcile-adopts-SL/TP, close-flattens-leftover, BE-trail trigger/revert, limit-entry fill+cancel+partial+on-cancel, breached-stop skip, side-aware R:R, notional-cap-setting, settings-hot-reload+bounds, OB+FVG scan gating + freshness, scan rate-limit guard, the 2026-10-17 review regressions in `test_review_2026_10_17.py`, prototype-indicator + backtest-harness regressions included)
+- `PYTHONPATH=. pytest tests/backend/ -q` — 286 passing (e2e trade flow, -3R hard stop, security audit, payload contracts, orphan-sweep, reconcile-adopts-SL/TP, close-flattens-leftover, BE-trail trigger/revert, limit-entry fill+cancel+partial+on-cancel, breached-stop skip, side-aware R:R, notional-cap-setting, settings-hot-reload+bounds, OB+FVG scan gating + freshness, scan rate-limit guard, the 2026-10-17 review regressions in `test_review_2026_10_17.py`, prototype-indicator + backtest-harness regressions included)
 - `PYTHONPATH=. python -c "import backend.main"` — app imports without errors
 - `python -m uvicorn backend.main:app --reload` — boots and serves; local dev currently on port 8001 (a stale process holds 8000)
 - No hardcoded credentials — everything from env vars

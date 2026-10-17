@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     DOMAIN: str = "fubot.bedikian.cc"
 
     # Trading defaults
-    RISK_PERCENT: float = Field(default=1.0, ge=0.5, le=2.0)
+    RISK_PERCENT: float = Field(default=1.0, ge=0.1, le=10.0)
     MAX_POSITIONS: int = Field(default=3, ge=1, le=10)
     DAILY_LOSS_LIMIT_R: float = Field(default=-3.0)
     RR_MIN: float = Field(default=3.0, ge=2.0, le=5.0)

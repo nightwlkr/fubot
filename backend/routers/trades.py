@@ -131,21 +131,36 @@ async def list_trades(
 async def trade_stats(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    mode: Optional[str] = Query("live", pattern="^(live|paper|all)$"),
 ):
+    """Headline stats for the Performance page.
+
+    Live-only by default: paper fills are not real money and must never be
+    averaged into a live win-rate or R-per-trade figure. Matches the /performance
+    endpoints so the cards and the charts describe the same population.
+
+    pnl_r is coerced through float() — the column is Numeric and comes back as
+    Decimal, so a NULL would raise TypeError inside the sum().
+    """
     user = await get_current_user_from_cookie(request, db)
-    result = await db.execute(select(Trade))
-    trades = result.scalars().all()
+
+    query = select(Trade)
+    if mode != "all":
+        query = query.where(Trade.mode == (mode or "live"))
+    result = await db.execute(query)
+    trades = [float(t.pnl_r or 0) for t in result.scalars().all()]
+
     total = len(trades)
-    wins = sum(1 for t in trades if t.pnl_r > 0)
+    wins = sum(1 for r in trades if r > 0)
     win_rate = (wins / total * 100) if total > 0 else 0.0
-    avg_r = sum(t.pnl_r for t in trades) / total if total > 0 else 0.0
-    best_trade = max((t.pnl_r for t in trades), default=0.0)
-    worst_trade = min((t.pnl_r for t in trades), default=0.0)
+    avg_r = (sum(trades) / total) if total > 0 else 0.0
+    best_trade = max(trades, default=0.0)
+    worst_trade = min(trades, default=0.0)
 
     return TradeStatsResponse(
         total_trades=total,
-        win_rate=win_rate,
-        avg_r=avg_r,
+        win_rate=round(win_rate, 2),
+        avg_r=round(avg_r, 4),
         best_trade=best_trade,
         worst_trade=worst_trade,
     )

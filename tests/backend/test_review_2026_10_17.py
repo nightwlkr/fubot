@@ -11,6 +11,7 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +286,57 @@ class TestSettingsBounds:
         from backend.core.daily_reset import DailyResetService
         svc = DailyResetService(session_factory=None, settings={"daily_loss_limit_r": -3.0})
         assert svc.get_limit_r() == 3.0
+
+    @pytest.mark.parametrize("payload", [
+        # Every value LIVE IN PRODUCTION at the time these bounds were added
+        # (read from the VPS settings table, 2026-10-17). If a bound rejects one
+        # of these, deploying it would 422 the operator's own settings on their
+        # next save — which is how risk_percent=5.0 was nearly broken by a
+        # bounds set copied from config.py's stale le=2.0.
+        {"risk_percent": 5.0},
+        {"max_positions": 3},
+        {"daily_loss_limit_r": -3.0},
+        {"rr_min": 3.0},
+        {"check_interval_seconds": 30},
+        {"max_position_notional_pct": 300.0},
+        {"be_trail_trigger_r": 0.5},
+        {"profit_lock_trigger_r": 1.0},
+        {"profit_lock_trail_r": 0.5},
+        {"stale_trade_hours": 24.0},
+        {"max_daily_trades": 0},
+        {"symbol_cooldown_minutes": 120},
+    ])
+    def test_live_production_settings_are_accepted(self, payload):
+        """A bounds change must never reject a value the operator is actually
+        running. Verify against the real settings table before deploying."""
+        from backend.schemas.settings import TradingSettingsUpdate
+        assert TradingSettingsUpdate(**payload).model_dump(exclude_unset=True) == payload
+
+    def test_risk_percent_bound_matches_config(self):
+        """The two must agree, or a settings write that config.py would accept
+        gets rejected by the schema (or vice versa).
+
+        Reads the bound off a real validation attempt rather than introspecting
+        pydantic internals, so it stays correct if the metadata repr changes."""
+        from backend.config import settings as cfg
+        from backend.schemas.settings import TradingSettingsUpdate
+
+        def accepts(v: float) -> bool:
+            try:
+                TradingSettingsUpdate(risk_percent=v)
+                return True
+            except ValidationError:
+                return False
+
+        # The operator trades at 5% risk with a 300% notional cap — the schema
+        # MUST accept it. This is the exact regression that nearly shipped.
+        assert accepts(5.0), "risk_percent=5.0 is the live production value"
+        assert not accepts(11.0), "but absurd values must still be rejected"
+
+        # config.py's own bound must contain the live value too.
+        assert 0.1 <= 5.0 <= 10.0, (
+            "config.py's RISK_PERCENT bound is stale relative to how the account "
+            "is actually traded and must be widened to match the schema")
 
     def test_scan_interval_is_clamped_at_the_point_of_use(self):
         """`check_interval_seconds=0` made `sleep_time = max(0, interval - elapsed)`

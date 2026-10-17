@@ -325,10 +325,24 @@ class BinanceService:
     # ---- Account Data (Private) ----
 
     async def get_account_balance(self) -> list[dict]:
-        """GET /fapi/v2/balance (weight 5)."""
+        """GET /fapi/v2/balance (weight 5).
+
+        `balance` is the TOTAL account balance for the asset — what an equity
+        curve must chart. `availableBalance` is FREE MARGIN and drops every time
+        a position opens, so charting it made the equity curve look like a loss
+        when only collateral was locked up. `availableBalance` is kept for
+        position sizing, which legitimately wants free margin.
+        """
         data = await self._signed_request("GET", "fapi/v2/balance", weight=5)
         return [
-            {"asset": a["asset"], "availableBalance": float(a.get("availableBalance", 0)), "initialMargin": float(a.get("initialMargin", 0))}
+            {
+                "asset": a["asset"],
+                "balance": float(a.get("balance", 0) or 0),
+                "availableBalance": float(a.get("availableBalance", 0) or 0),
+                "maxWithdrawAmount": float(a.get("maxWithdrawAmount", 0) or 0),
+                "initialMargin": float(a.get("initialMargin", 0) or 0),
+                "unrealizedProfit": float(a.get("unrealizedProfit", 0) or 0),
+            }
             for a in data
         ]
 

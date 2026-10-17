@@ -207,3 +207,17 @@ Different population.
 **Fix (f8838cb):** limiter sleeps outside the lock, bucket sized to Binance's real 2400-weight/min cap (refill 36/s ≈ 2160/min); correct weights on klines/positionRisk/balance. 2 regression tests.
 
 **Verified:** 5-minute clean window post-deploy — **0 rate-limit events, 0 errors**, engine advancing (12 scans). 207 tests pass.
+
+### Monitoring check — 2026-10-17 06:48 (+04:00)
+
+**Engine:** RUNNING/live, 12 scans, last 02:49 UTC. **Daily:** 3 trades, 2W/1L, +3.14R, +$16.05. **Limit:** not hit.
+
+**Positions:** 0 open (flat). No unprotected positions.
+
+**Trades 70m:** 3 closed, all SL_HIT. Net +3.14R / +$16.05.
+
+**Signals:** 0 PENDING, 0 LIMIT unfilled.
+
+**Journal:** 13 errors + 47 rate-limit events in 70m — BUT all from **before** the f8838cb rate-limiter fix (timestamped ~03:40, before the 04:20 restart). **0 rate-limit events in 30 min post-fix.** 1 error post-fix (the FILUSDT "Exchange still holds LONG after a detected exit" — the _ensure_flat safety net working as designed).
+
+**Status:** All clean. Rate-limiter fix confirmed working (f8838cb). Trail-stop fix confirmed (f3810be). Full review batch deployed (d9213ce).
