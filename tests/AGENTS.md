@@ -8,6 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
+- `test_defects_2026_10_17.py` — three small defects fixed after `57f5187`. (1) `_signed_request`/`_public_request` discard Binance's error body (`raise_for_status()` rendered `Client error '400 Bad Request' for url '…'` instead of `{"code":-2021,"msg":"ReduceOnly Order is rejected…"}`) and leaked `signature=<hmac>` into the journal. Behavioural: a 400 with a JSON body surfaces code+msg, a 404 with an HTML body still raises on the HTTP status, no raised/logged string contains `signature=`, and the 200-with-string-`"200"`, negative-code, unparseable-code and 3×429 paths are unchanged. Source-contract: `raise_for_status()` is gone from both request methods, they route through `_error_from_response`, and `redact_url` covers `signature`/`apiKey`/`X-MBX-APIKEY` while preserving non-secret context. Network-free (`httpx.MockTransport`).
 Status: 384 passing, 0 xfail (2026-10-17 — live-safety regressions: reconcile records exchange-only positions + adopts their resting SL/TP, close flattens a leftover exchange position, failed BE-trail reverts the DB stop, BE-trail trigger R (+ configurable) and one-way behaviour, LIMIT entry fill recorded from the order detail, unfilled-limit cancel+skip, post-fill SL/TP side re-validation against the mark price, breached-stop skip, side-aware R:R, flatten-if-unprotected, notional cap driven by setting, settings hot-reload, strategy-toggle gates the scan, SPA fallback + API precedence, OB+FVG requires order-block confluence / honours the freshness window / reads 1h volume. `test_review_2026_10_17.py` covers the 2026-10-17 codebase review: atomic close claim, stop-sweep fail-safe, close-before-cancel, per-tick no-DB, settings bounds + point-of-use clamps, rate-limit-raises-not-`{}`, lot-size raises + caching, flatten returns bool, orphan/partial limit handling, manual stop reaches the exchange, liquidation/margin wiring)
 
 ## Local Contracts
@@ -45,6 +46,7 @@ Status: 384 passing, 0 xfail (2026-10-17 — live-safety regressions: reconcile 
 
 - `PYTHONPATH=. pytest tests/backend/ -q` — 384 passed
 - A failing test blocks completion of the change that broke it
+- Test counts in this doc and the root `AGENTS.md` are updated by the change that moves them; the baseline this session was 384 passing / 48 trades / 39 positions
 
 ## Child DOX Index
 

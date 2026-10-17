@@ -1,6 +1,7 @@
 """Binance Futures service with async REST + WebSocket support."""
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -28,6 +29,38 @@ class BinanceAPIError(Exception):
         self.code = code
         self.message = message
         super().__init__(f"Binance API Error {code}: {message}")
+
+
+# Credential material that must never reach the journal. A signed Binance URL
+# embeds `signature=<hmac(secret, query)>`; the API key travels in the
+# `X-MBX-APIKEY` header (and in `apiKey=` on some endpoints). httpx renders the
+# FULL request URL into `HTTPStatusError`, so an exception built from a raw URL
+# writes the HMAC into `journalctl` (observed live:
+# `...&timestamp=1792240296815&signature=48e771c4153b5b92cfdfdee...`).
+#
+# The sensitive parameter is DROPPED, not blanked to `signature=REDACTED`: the
+# key name plus a placeholder would still read like a value to a log scraper, and
+# the remaining context (method, path, non-secret params, HTTP status) is what an
+# operator actually needs.
+_REDACTED = "[redacted]"
+_SENSITIVE_QUERY_KEYS = ("signature", "apiKey", "apikey", "api_key")
+_SENSITIVE_QUERY_RE = re.compile(
+    r"([?&])(" + "|".join(re.escape(k) for k in _SENSITIVE_QUERY_KEYS) +
+    r")=[^&\s\"']*", re.IGNORECASE)
+_SENSITIVE_HEADER_RE = re.compile(r"(X-MBX-APIKEY)(\s*[:=]\s*)([^\s&\"']+)", re.IGNORECASE)
+
+
+def redact_url(url: str) -> str:
+    """Strip credential material out of a URL/header blob before it is logged or
+    embedded in an exception message.
+
+    Redacts by KEY NAME, not by value: the signed query string is rebuilt per
+    request, so a value-based scrub would miss every new timestamp/signature.
+    """
+    if not url:
+        return url
+    out = _SENSITIVE_QUERY_RE.sub(rf"\1{_REDACTED}", url)
+    return _SENSITIVE_HEADER_RE.sub(rf"\1\2{_REDACTED}", out)
 
 
 class RateLimiter:
@@ -104,6 +137,48 @@ class BinanceService:
             )
         return self._client
 
+    def _error_from_response(self, resp: httpx.Response, method: str,
+                             path: str) -> BinanceAPIError:
+        """Build a `BinanceAPIError` from a 4xx/5xx response, keeping Binance's
+        OWN code and message.
+
+        `resp.raise_for_status()` throws the body away: a rejected order surfaced
+        as `Client error '400 Bad Request' for url '...'` while the actionable
+        `{"code": -2021, "msg": "ReduceOnly Order is rejected..."}` was never
+        read, so diagnosing a live failure needed a journal dump and a code read.
+
+        Falls back to the HTTP status when the body is not JSON — Binance serves
+        an HTML error page for some 404s. The URL is redacted: it is only
+        included for that fallback (the JSON branch carries no URL at all).
+        """
+        body = None
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+
+        if isinstance(body, dict):
+            msg = body.get("msg") or body.get("message")
+            code = body.get("code")
+            try:
+                code = int(code)
+            except (TypeError, ValueError):
+                code = None
+            if msg:
+                return BinanceAPIError(
+                    code if code is not None else resp.status_code,
+                    f"{msg} [{method} {path}]")
+
+        url = ""
+        try:
+            url = redact_url(str(resp.request.url))
+        except Exception:
+            url = ""
+        return BinanceAPIError(
+            resp.status_code,
+            f"HTTP {resp.status_code} on {method} {path} — non-JSON error body"
+            + (f" ({url})" if url else ""))
+
     async def _signed_request(
         self, method: str, path: str, params: dict | None = None, weight: int = 1
     ) -> dict:
@@ -128,7 +203,8 @@ class BinanceService:
                     logger.warning(f"Rate limited, waiting {retry_after}s (attempt {attempt+1})")
                     await asyncio.sleep(retry_after)
                     continue
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    raise self._error_from_response(resp, method, path)
                 data = resp.json()
                 if isinstance(data, dict) and "code" in data and "msg" in data:
                     # Algo endpoints return {"code": "200", "msg": "success"} on
@@ -182,7 +258,8 @@ class BinanceService:
                 if resp.status_code == 429:
                     await asyncio.sleep(1)
                     continue
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    raise self._error_from_response(resp, "GET", path)
                 data = resp.json()
                 if isinstance(data, dict) and "code" in data and "msg" in data:
                     # Mirror _signed_request: `code` may arrive as a STRING
