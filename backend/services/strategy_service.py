@@ -648,21 +648,62 @@ class StrategyService:
             return False
 
     async def _close_position_row(self, position_id: Optional[int]) -> None:
-        """Mark a just-created position row CLOSED after a failed live entry.
+        """Close a just-created position row AND record the realized Trade after
+        a failed live entry that was flattened.
 
         A live entry that fails after the position row is created would leave an
-        OPEN position with no exchange order behind it. Best-effort cleanup —
-        the entry order itself may also have partially filled (see caller).
+        OPEN position with no exchange order behind it. When the position was
+        flattened at market, the realized PnL must be recorded as a Trade row —
+        otherwise the loss/profit vanishes from trade history (observed live:
+        APEUSDT flattened at -$0.32 with no Trade row created).
         """
         if self.session_factory is None or position_id is None:
             return
         try:
             async with self.session_factory() as session:
                 row = await session.get(PositionModel, position_id)
-                if row and row.status == "OPEN":
-                    row.status = "CLOSED"
-                    row.closed_at = datetime.now(timezone.utc)
-                    await session.commit()
+                if not row or row.status != "OPEN":
+                    return
+
+                # Fetch realized PnL from the exchange before closing
+                pnl_usdt = 0.0
+                pnl_r = 0.0
+                if self._mode == "live" and self.binance is not None:
+                    try:
+                        income = await self.binance.get_position_income(
+                            row.symbol, "REALIZED_PNL",
+                            int(row.opened_at.timestamp() * 1000) if row.opened_at else None,
+                        )
+                        pnl_usdt = float(income.get("totalPnl", 0) or 0)
+                        if row.initial_risk_distance and float(row.initial_risk_distance) > 0:
+                            pnl_r = pnl_usdt / (float(row.quantity) * float(row.initial_risk_distance))
+                    except Exception:
+                        logger.debug("Could not fetch income for flatten close of %s", row.symbol)
+
+                row.status = "CLOSED"
+                row.closed_at = datetime.now(timezone.utc)
+
+                # Record the Trade row so the loss appears in trade history
+                from backend.models.trade import Trade as TradeModel
+                trade = TradeModel(
+                    position_id=row.id,
+                    symbol=row.symbol,
+                    side=row.side,
+                    mode=self._mode,
+                    entry_price=row.entry_price,
+                    exit_price=row.entry_price,  # approximate — market close, no exact price captured
+                    quantity=row.quantity,
+                    pnl_usdt=pnl_usdt,
+                    pnl_r=pnl_r,
+                    exit_reason="FLATTENED",
+                    opened_at=row.opened_at,
+                    closed_at=row.closed_at,
+                )
+                session.add(trade)
+                await session.commit()
+                logger.warning(
+                    "[%s] Recorded FLATTENED trade: %.4f USDT / %.2fR (failed entry, market-closed)",
+                    row.symbol, pnl_usdt, pnl_r)
         except Exception:
             logger.exception("Failed to close position row %s after failed entry", position_id)
 
