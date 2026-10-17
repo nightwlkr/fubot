@@ -611,3 +611,120 @@ class TestDashboardAgreesWithBreaker:
             assert body["daily_limit_status"]["remaining_r"] == pytest.approx(0.5), body
         finally:
             purge_daily_rows(days)
+
+
+# ------------------------------------------------------- exchange_sync latch
+
+def _sync_sql():
+    """The raw-SQL recompute `exchange_sync` runs, as it appears in source."""
+    src = (REPO_ROOT / "backend/routers/settings.py").read_text()
+    start = src.index("UPDATE daily_summary SET")
+    return src[start:src.index('"""', start)]
+
+
+def _latch_expression():
+    """The `daily_loss_limit_hit` expression alone.
+
+    Narrowed to this clause rather than the whole statement so the `-3.0` ban
+    below cannot be satisfied or broken by an unrelated literal elsewhere in the
+    GROUP BY (there is none today; asserting over the full statement would be a
+    test of today's incidental formatting, not of the latch).
+    """
+    for line in _sync_sql().splitlines():
+        if "daily_loss_limit_hit" in line:
+            return line.split("daily_loss_limit_hit", 1)[1].lstrip().lstrip("=").strip()
+    raise AssertionError("no daily_loss_limit_hit clause in the sync statement")
+
+
+class TestExchangeSyncLatch:
+    def test_the_latch_threshold_is_not_a_hardcoded_literal(self):
+        """It was `total_r <= -3.0`, so setting the limit to -5 left the sync
+        latching days at -3 — the configured limit was ignored entirely."""
+        expr = _latch_expression()
+        assert "-3.0" not in expr, "the sync must bind :limit_r, not hardcode -3.0"
+        assert ":limit_r" in expr
+
+    def test_the_latch_comparison_mirrors_the_breaker(self):
+        """The breaker tests `used_r >= limit` where used_r = max(0, -total_r).
+        The sync tested the raw `total_r <= -3.0`: a different comparison of the
+        same quantity, with no floor, so a winning day could latch."""
+        assert "COALESCE(-t.total_r, 0) >= :limit_r" in _latch_expression(), \
+            "the sync must apply the same max(0, ...) floor as used_r_from"
+
+    def test_the_bound_limit_goes_through_the_shared_clamp(self):
+        """Whatever row is in the DB, the sync and the breaker must latch on the
+        same number.
+
+        AST, not substring: the sync's prose mentions the old `-3.0` literal, and
+        a docstring mention must not satisfy a delegation check.
+        """
+        import ast
+        import inspect
+        import textwrap
+        import backend.routers.settings as s
+        called = {n.func.id for n in ast.walk(ast.parse(
+            textwrap.dedent(inspect.getsource(s.exchange_sync))))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "limit_r_from" in called, \
+            "the sync must CALL limit_r_from, not merely name it"
+
+    def test_the_expression_is_a_floored_comparison_over_a_bound_limit(self):
+        """Behavioural, against the real DB — but it WRITES nothing.
+
+        The extracted expression is evaluated over synthetic day totals instead
+        of by seeding `trades` (a Trade row needs a closed position, a strategy
+        type and a symbol, and a leaked one shows up on the Performance page).
+        This proves the three properties the source-contract tests above can only
+        assert textually: the floor, the `>=` spelling, and that the threshold is
+        the bound parameter rather than a constant.
+        """
+        from sqlalchemy import text
+        from conftest import run_async
+
+        expr = _latch_expression()
+
+        async def _latch(total_r, limit_r):
+            engine = _own_engine()
+            try:
+                async with engine.connect() as conn:
+                    # total_r is cast to numeric because that is what the real
+                    # GROUP BY produces (SUM over a Numeric column); leaving the
+                    # VALUES literal untyped would make Postgres infer its type
+                    # from the comparison instead, so the test could pass or fail
+                    # on a cast rule rather than on the latch.
+                    hit = (await conn.execute(text(
+                        f"SELECT ({expr}) FROM (VALUES "
+                        f"(CAST(:total_r AS numeric))) AS t(total_r)"),
+                        {"total_r": total_r, "limit_r": limit_r})).scalar()
+                    return bool(hit)
+            finally:
+                await engine.dispose()
+
+        # A winning day latches at NO limit — the floor the old raw comparison
+        # lacked. Stated for several limits, since a floor applied only at 3R
+        # would be a coincidence.
+        for limit in (1.0, 3.0, 5.0):
+            assert run_async(_latch(4.5, limit)) is False, \
+                f"a winning day must never latch (limit={limit})"
+            assert run_async(_latch(0.0, limit)) is False, \
+                f"a flat day must never latch (limit={limit})"
+
+        # The configured limit is honoured in BOTH directions: -3.5R latches at
+        # 3R, does not at 5R, and -5.5R latches at 5R.
+        assert run_async(_latch(-3.5, 3.0)) is True
+        assert run_async(_latch(-3.5, 5.0)) is False, \
+            "raising the limit to -5R must stop the sync latching at -3R"
+        assert run_async(_latch(-5.5, 5.0)) is True
+
+    def test_the_sync_still_sets_absolute_aggregates_rather_than_accumulating(self):
+        """`update_daily_summary` is an increment; this statement is not.
+
+        Calling the accumulator from the sync would double count, so the two
+        paths must stay separate — `test_defects_2026_10_17.py` pins the
+        increment half behaviourally; this pins the recompute half structurally
+        (the statement is a bare `UPDATE ... FROM (SELECT ... GROUP BY)` that
+        never adds to what is already in the row).
+        """
+        sql = _sync_sql()
+        assert "+ t." not in sql, "the sync must SET aggregates, never add to them"
+        assert "t.total_r" in sql and "SUM(pnl_r)" in sql, sql

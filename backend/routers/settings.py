@@ -368,6 +368,21 @@ async def exchange_sync(
 
     await db.commit()
 
+    # The latch threshold must equal the breaker's configured limit. It used to
+    # be the literal `-3.0`, so `daily_loss_limit_r=-5` left the sync latching
+    # days at -3. Read through the shared clamp so a malformed row degrades
+    # identically here and in the breaker, and read the row shape with
+    # `limit_setting_row_value` so the sync cannot accept a shape the breaker's
+    # loader (`routers/settings.py` load_bot_settings) would have discarded.
+    from backend.core.daily_reset import limit_r_from, limit_setting_row_value
+    from backend.models.setting import Setting
+    limit_row = await db.execute(
+        select(Setting).where(Setting.key == "daily_loss_limit_r"))
+    limit_setting = limit_row.scalar_one_or_none()
+    raw_limit = limit_setting_row_value(limit_setting)
+    limit_r = limit_r_from({"daily_loss_limit_r": raw_limit}
+                           if raw_limit is not None else {})
+
     # Recalculate daily summaries for affected dates
     from sqlalchemy import text
     await db.execute(text("""
@@ -375,7 +390,7 @@ async def exchange_sync(
             total_trades = t.cnt, wins = t.wins, losses = t.losses, breakeven = t.bes,
             total_pnl_r = t.total_r, total_pnl_usdt = t.total_usdt,
             worst_trade_r = t.worst_r, best_trade_r = t.best_r,
-            daily_loss_limit_hit = (t.total_r <= -3.0)
+            daily_loss_limit_hit = (COALESCE(-t.total_r, 0) >= :limit_r)
         FROM (SELECT DATE(closed_at) as d, COUNT(*) as cnt,
             COUNT(*) FILTER (WHERE pnl_r > 0) as wins,
             COUNT(*) FILTER (WHERE pnl_r < 0) as losses,
@@ -384,7 +399,7 @@ async def exchange_sync(
             COALESCE(MIN(pnl_r),0) as worst_r, COALESCE(MAX(pnl_r),0) as best_r
             FROM trades WHERE closed_at >= :cutoff GROUP BY DATE(closed_at)) t
         WHERE daily_summary.date = t.d
-    """), {"cutoff": cutoff})
+    """), {"cutoff": cutoff, "limit_r": limit_r})
     await db.commit()
 
     logger.info(f"Exchange sync by user '{user.username}': checked {checked}, fixed {fixed}")
