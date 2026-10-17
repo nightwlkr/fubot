@@ -82,8 +82,12 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       ])
       set({
         botStatus: overviewRes.data.bot_status,
-        positions: overviewRes.data.open_positions,
-        equityCurve: overviewRes.data.equity_curve,
+        // The backend SPA catch-all (/{full_path:path}) can answer an /api/...
+        // request with index.html at HTTP 200, so a missing array field must
+        // never reach the page: undefined would throw on .length and take the
+        // whole app shell down with it.
+        positions: Array.isArray(overviewRes.data.open_positions) ? overviewRes.data.open_positions : [],
+        equityCurve: Array.isArray(overviewRes.data.equity_curve) ? overviewRes.data.equity_curve : [],
         todayStats: todayRes.data,
         isLoading: false,
       })

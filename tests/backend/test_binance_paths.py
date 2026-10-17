@@ -103,9 +103,18 @@ async def test_closing_orders_are_reduce_only():
     def handler(request: httpx.Request):
         url = str(request.url)
         seen.append(url)
-        # exchangeInfo (for LOT_SIZE rounding) returns a minimal payload
+        # exchangeInfo (for LOT_SIZE rounding). get_lot_size RAISES when the
+        # symbol is absent — an empty filter dict is not a real Binance state
+        # and made the rounders return their input unrounded. So the stub must
+        # return real filters for the symbol under test.
         if "exchangeInfo" in url:
-            return httpx.Response(200, json={"symbols": []})
+            return httpx.Response(200, json={"symbols": [{
+                "symbol": "BTCUSDT",
+                "filters": [
+                    {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.1", "minPrice": "0.1"},
+                ],
+            }]})
         return httpx.Response(200, json={"algoId": 55, "algoStatus": "NEW"})
 
     svc = make_service(handler)

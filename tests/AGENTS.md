@@ -8,7 +8,7 @@ pytest suite for backend units and API smoke — indicators, encryption, auth, s
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/tests/`
-Status: 174 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile records exchange-only positions + adopts their resting SL/TP, close flattens a leftover exchange position, failed BE-trail reverts the DB stop, BE-trail trigger R (+ configurable) and one-way behaviour, LIMIT entry fill recorded from the order detail, unfilled-limit cancel+skip, breached-stop skip, side-aware R:R, flatten-if-unprotected, notional cap driven by setting, settings hot-reload, strategy-toggle gates the scan, SPA fallback + API precedence)
+Status: 266 passing, 0 xfail (2026-10-17 — live-safety regressions: reconcile records exchange-only positions + adopts their resting SL/TP, close flattens a leftover exchange position, failed BE-trail reverts the DB stop, BE-trail trigger R (+ configurable) and one-way behaviour, LIMIT entry fill recorded from the order detail, unfilled-limit cancel+skip, breached-stop skip, side-aware R:R, flatten-if-unprotected, notional cap driven by setting, settings hot-reload, strategy-toggle gates the scan, SPA fallback + API precedence, OB+FVG requires order-block confluence / honours the freshness window / reads 1h volume. `test_review_2026_10_17.py` covers the 2026-10-17 codebase review: atomic close claim, stop-sweep fail-safe, close-before-cancel, per-tick no-DB, settings bounds + point-of-use clamps, rate-limit-raises-not-`{}`, lot-size raises + caching, flatten returns bool, orphan/partial limit handling, manual stop reaches the exchange, liquidation/margin wiring)
 
 ## Local Contracts
 
@@ -23,6 +23,8 @@ Status: 174 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile 
   - `test_daily_reset.py` — PHASE6_STEP2: -3R hard stop, 80% warning, wins-don't-count, midnight reset
   - `test_security_audit.py` — PHASE6_STEP3: cookie flags, encrypted-at-rest keys, no secrets in logs, injection resistance
   - payload-contract regressions: overview bot_status/today PnLCard fields, position mark_price/unrealized_pnl, strategies R-buckets
+  - `test_review_2026_10_17.py` — regression tests for the full-codebase review (`analysis/REVIEW_2026-10-17.md`). Each class maps to one Tier-1 defect. Mixes **behavioural** tests (the stop-sweep actually cancels/keeps the right algo ids; a repeated 429 raises; the cache read does no I/O; settings payloads are rejected) with **source-contract** tests (the close claims via a conditional `UPDATE`; `_on_tick` contains no `_get_open_positions`) — the latter are intentional guards against silent reintroduction, since the defects are structural rather than behavioural.
+- `test_prototype_indicators.py` — prototype VWAP/ORB/Order-Block indicators, the LIVE `signal_service.detect_obfvg_candidates` contract (confluence required, opposite-direction OB rejected, freshness window excludes older gaps, `confirm_at_idx` bounds visibility, zero-ATR no-op, toggle gating, 1h volume routing, settings round-trip), and the `strategy_compare` harness contract (overlap cap binds, each open trade holds its own slot, unresolved trades counted not dropped, degenerate setups not counted, `fvg_entry_idx_5m` lookahead guard). Imports `scripts/strategy_compare.py` via `importlib` (it is a script, not a package).
 - Run: `PYTHONPATH=. pytest tests/backend/ -q` using the system Python 3.13 pytest (`/Library/Frameworks/Python.framework/Versions/3.13/bin/pytest`)
 - `conftest.py` puts the repo root on `sys.path` and provides a `db_session` fixture (rolled-back async session via `AsyncSessionLocal`). No custom `event_loop` fixture — pytest-asyncio 0.24 deprecates it, and a session-scoped loop coupled every async test to one loop.
 - `test_api_smoke.py` uses a FUNCTION-scoped client (fresh app lifespan per test) so the engine's DB session never spans TestClient portal lifecycles; its `_run` helper restores the thread's current event loop after `asyncio.run` (asyncio.run leaves `set_event_loop(None)`, which breaks the next async test under pytest-randomly)
@@ -37,7 +39,7 @@ Status: 174 passing, 0 xfail (2026-10-15 — live-safety regressions: reconcile 
 
 ## Verification
 
-- `PYTHONPATH=. pytest tests/backend/ -q` — 174 passed
+- `PYTHONPATH=. pytest tests/backend/ -q` — 266 passed
 - A failing test blocks completion of the change that broke it
 
 ## Child DOX Index

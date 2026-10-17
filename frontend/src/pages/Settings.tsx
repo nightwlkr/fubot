@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { api } from '../api/client'
+import { api, errorDetail } from '../api/client'
 import { ENDPOINTS } from '../api/endpoints'
 import { Card, CardHeader, CardTitle } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
@@ -30,6 +30,8 @@ interface TradingSettings {
   profit_lock_trigger_r: number
   profit_lock_trail_r: number
   stale_trade_hours: number
+  strategy_obfvg_enabled: boolean
+  strategy_obfvg_max_age_bars: number
 }
 
 interface SymbolConfig {
@@ -201,6 +203,7 @@ function TradingParamsSection() {
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const [riskPercent, setRiskPercent] = useState(2)
   const [maxPositions, setMaxPositions] = useState(5)
@@ -219,6 +222,8 @@ function TradingParamsSection() {
   const [profitLockTriggerR, setProfitLockTriggerR] = useState(1.0)
   const [profitLockTrailR, setProfitLockTrailR] = useState(0.5)
   const [staleTradeHours, setStaleTradeHours] = useState(24)
+  const [obfvgEnabled, setObfvgEnabled] = useState(true)
+  const [obfvgMaxAgeBars, setObfvgMaxAgeBars] = useState(2)
 
   useEffect(() => {
     api.get<TradingSettings>(ENDPOINTS.settingsTrading)
@@ -226,7 +231,11 @@ function TradingParamsSection() {
         const s = res.data
         setRiskPercent(s.risk_percent)
         setMaxPositions(s.max_positions)
-        setDailyLossLimit(s.daily_loss_limit_r)
+        // Stored negative (e.g. -3.0) and consumed via abs() everywhere, but
+        // the slider is a positive-magnitude control with min: 1 — a controlled
+        // range clamps an out-of-range value to min, so the label used to read
+        // "1R" for a real 3R stop-out threshold.
+        setDailyLossLimit(Math.abs(s.daily_loss_limit_r))
         setRrMin(s.rr_min)
         setCheckInterval(s.check_interval_seconds)
         setPaperUseRealBalance(s.paper_use_real_balance ?? true)
@@ -241,6 +250,8 @@ function TradingParamsSection() {
         setProfitLockTriggerR(s.profit_lock_trigger_r ?? 1.0)
         setProfitLockTrailR(s.profit_lock_trail_r ?? 0.5)
         setStaleTradeHours(s.stale_trade_hours ?? 24)
+        setObfvgEnabled(s.strategy_obfvg_enabled ?? true)
+        setObfvgMaxAgeBars(s.strategy_obfvg_max_age_bars ?? 2)
         setIsLoading(false)
       })
       .catch(() => setIsLoading(false))
@@ -248,11 +259,14 @@ function TradingParamsSection() {
 
   const handleSave = async () => {
     setIsSaving(true)
+    setSaveError(null)
     try {
       await api.put(ENDPOINTS.settingsTrading, {
         risk_percent: riskPercent,
         max_positions: maxPositions,
-        daily_loss_limit_r: dailyLossLimit,
+        // The slider holds a positive magnitude; the stored convention is
+        // negative (get_limit_r() takes abs(), so both read the same).
+        daily_loss_limit_r: -dailyLossLimit,
         rr_min: rrMin,
         check_interval_seconds: checkInterval,
         paper_use_real_balance: paperUseRealBalance,
@@ -267,11 +281,16 @@ function TradingParamsSection() {
         profit_lock_trigger_r: profitLockTriggerR,
         profit_lock_trail_r: profitLockTrailR,
         stale_trade_hours: staleTradeHours,
+        strategy_obfvg_enabled: obfvgEnabled,
+        strategy_obfvg_max_age_bars: obfvgMaxAgeBars,
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
     } catch (err) {
       console.error('Failed to save trading settings:', err)
+      // Silent failure here is money-relevant (Risk Per Trade / Max Position
+      // Notional): the operator must not believe a rejected change is live.
+      setSaveError(errorDetail(err, 'Failed to save trading parameters — changes were NOT applied'))
     } finally {
       setIsSaving(false)
     }
@@ -353,6 +372,37 @@ function TradingParamsSection() {
         )}
       </div>
 
+      {/* Strategies — per-strategy on/off. A "disabled" strategy must be
+          toggled here or the scanner keeps firing it. */}
+      <div className="mt-6 pt-4 border-t border-border">
+        <p className="text-xs text-muted uppercase tracking-wide mb-3">Strategies</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="flex items-center justify-between">
+            <div className="pr-3">
+              <p className="text-sm">Order Block + FVG</p>
+              <p className="text-xs text-muted">1h gap confirmed by a 5m order block (backtest: +0.32R)</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={obfvgEnabled}
+              onClick={() => setObfvgEnabled(v => !v)}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${obfvgEnabled ? 'bg-primary' : 'bg-surface2'}`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${obfvgEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+            </button>
+          </div>
+          <div>
+            <label className="text-xs text-muted uppercase tracking-wide block mb-1.5">OB+FVG Gap Age</label>
+            <div className="flex items-center gap-3">
+              <input type="range" min={1} max={12} step={1} value={obfvgMaxAgeBars} onChange={(e) => setObfvgMaxAgeBars(Number(e.target.value))} className="flex-1 accent-primary" />
+              <span className="text-sm font-mono font-bold w-16 text-right">{obfvgMaxAgeBars}h</span>
+            </div>
+            <p className="text-xs text-muted mt-1">Only gaps formed within this many closed 1h bars are traded</p>
+          </div>
+        </div>
+      </div>
+
       {/* Strategy Filters — toggles for the signal-pipeline gates */}
       <div className="mt-6 pt-4 border-t border-border">
         <p className="text-xs text-muted uppercase tracking-wide mb-3">Strategy Filters</p>
@@ -426,7 +476,10 @@ function TradingParamsSection() {
         </div>
       </div>
 
-      <div className="flex justify-end mt-6 pt-4 border-t border-border">
+      <div className="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-border">
+        {saveError && (
+          <span className="text-xs text-danger text-right">{saveError}</span>
+        )}
         <Button onClick={handleSave} isLoading={isSaving}>
           <Save className="w-4 h-4" />
           Save Parameters
@@ -439,29 +492,36 @@ function TradingParamsSection() {
 function SymbolConfigSection() {
   const [symbols, setSymbols] = useState<SymbolConfig[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     api.get<{ symbols: SymbolConfig[] }>(ENDPOINTS.settingsSymbols)
-      .then(res => setSymbols(res.data.symbols))
+      .then(res => setSymbols(Array.isArray(res.data.symbols) ? res.data.symbols : []))
       .catch(console.error)
       .finally(() => setIsLoading(false))
   }, [])
 
   const toggleSymbol = async (symbol: string, enabled: boolean) => {
+    setError(null)
     try {
       await api.put(ENDPOINTS.settingsSymbol(symbol), { enabled })
       setSymbols(prev => prev.map(s => s.symbol === symbol ? { ...s, enabled } : s))
     } catch (err) {
       console.error('Failed to toggle symbol:', err)
+      // Reverted silently before: the operator saw the old state with no idea
+      // the request was rejected.
+      setError(errorDetail(err, `Failed to ${enabled ? 'enable' : 'disable'} ${symbol} — unchanged`))
     }
   }
 
   const updateLeverage = async (symbol: string, max_leverage: number) => {
+    setError(null)
     try {
       await api.put(ENDPOINTS.settingsSymbol(symbol), { max_leverage })
       setSymbols(prev => prev.map(s => s.symbol === symbol ? { ...s, max_leverage } : s))
     } catch (err) {
       console.error('Failed to update leverage:', err)
+      setError(errorDetail(err, `Failed to set ${symbol} leverage to ${max_leverage}x — unchanged`))
     }
   }
 
@@ -470,6 +530,10 @@ function SymbolConfigSection() {
       <CardHeader>
         <CardTitle>Symbol Configuration</CardTitle>
       </CardHeader>
+
+      {error && (
+        <p className="text-xs text-danger px-4 pb-2">{error}</p>
+      )}
 
       {isLoading ? (
         <div className="flex items-center justify-center py-12 text-muted">Loading symbols...</div>

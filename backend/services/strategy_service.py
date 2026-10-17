@@ -327,10 +327,28 @@ class StrategyService:
                 # hours). If the exchange holds a position for this symbol with
                 # no resting stop, flatten it. If a stop IS resting, keep the
                 # position — the reconcile adopts it with its SL/TP.
-                await self._flatten_if_unprotected(symbol)
-                # Best-effort: undo the position row we just created so a failed
-                # live entry doesn't leave an OPEN position with no exchange order.
-                await self._close_position_row(position_id)
+                flattened = await self._flatten_if_unprotected(symbol)
+                if flattened:
+                    # Nothing is open on the exchange for this symbol — undo the
+                    # row we just created.
+                    await self._close_position_row(position_id)
+                else:
+                    # The exchange still holds (or may hold) this position. The
+                    # row MUST stay OPEN so the reconcile adopts a TRACKED
+                    # position. Previously the row was closed unconditionally,
+                    # contradicting the comment above and leaving an exchange
+                    # position with an SL, no TP and no OPEN row — so nothing
+                    # ever managed it again.
+                    logger.error(
+                        "[%s] Live flow failed (%s) but the exchange position was "
+                        "NOT flattened — leaving the row OPEN for reconcile",
+                        symbol, exc)
+                # Mark the signal in BOTH cases: left PENDING, it would be
+                # re-evaluated on the next scan and could place a SECOND entry
+                # on a symbol the exchange may still hold.
+                signal.status = "SKIPPED"
+                await self._mark_signal(
+                    signal.db_id, "SKIPPED", f"Order placement failed: {exc}")
                 return TradeDecision("SKIP", skip_reason=f"Order placement failed: {exc}")
 
         # 7. Mark the signal TRIGGERED (position row already created above)
@@ -500,6 +518,14 @@ class StrategyService:
         while time.monotonic() < deadline:
             try:
                 det = await self.binance.get_order(symbol, int(order_id))
+            except asyncio.CancelledError:
+                # asyncio.CancelledError is a BaseException, so `except
+                # Exception` does NOT catch it — pressing Stop, a deploy, or a
+                # task cancel during this wait used to leave a GTC limit ARMED
+                # on the exchange with no DB row. It could fill minutes later and
+                # open a position nobody was managing.
+                await self._cancel_orphan_limit(symbol, int(order_id))
+                raise
             except Exception as exc:
                 logger.debug("[%s] limit order status check failed: %s", symbol, exc)
                 break
@@ -510,47 +536,103 @@ class StrategyService:
                     "avgPrice": float(det.get("avgPrice", 0) or 0) or float(price),
                     "executedQty": float(det.get("executedQty", 0) or 0) or float(size),
                 }
+            if status == "PARTIALLY_FILLED":
+                # A partial fill is a REAL position on the exchange. Treating it
+                # as "not filled" cancelled the remainder and reported a clean
+                # skip, never reading executedQty — so the partial size was
+                # cleaned up only if _flatten_if_unprotected happened to act.
+                logger.warning(
+                    "[%s] limit entry PARTIALLY filled (%s/%s) — cancelling the "
+                    "remainder and flattening the filled slice",
+                    symbol, det.get("executedQty"), size)
+                await self._cancel_orphan_limit(symbol, int(order_id))
+                await self._flatten_if_unprotected(symbol)
+                return None
             if status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED"):
                 return None
             await asyncio.sleep(poll_s)
 
-        try:
-            await self.binance.cancel_order(symbol, int(order_id))
-            logger.info("[%s] limit entry not filled in %.0fs — cancelled", symbol, timeout_s)
-        except Exception as exc:
-            logger.warning(
-                "[%s] limit entry not filled and cancel failed (%s) — order may "
-                "still be resting; it will be re-evaluated", symbol, exc)
+        await self._cancel_orphan_limit(symbol, int(order_id), reason=f"not filled in {timeout_s:.0f}s")
         return None
 
-    async def _flatten_if_unprotected(self, symbol: str) -> None:
+    async def _cancel_orphan_limit(self, symbol: str, order_id: int,
+                                   reason: str = "cancelled") -> None:
+        """Cancel a resting entry LIMIT so it cannot fill unmanaged.
+
+        Every path out of _enter_with_limit must come through here. A GTC order
+        that outlives the process has no DB row, so if it fills later it opens a
+        position with no SL, no TP and nothing tracking it — the reconcile
+        adopts it within 5 minutes, but as an UNPROTECTED position.
+        """
+        try:
+            await self.binance.cancel_order(symbol, int(order_id))
+            logger.info("[%s] limit entry %s — order %s cancelled",
+                        symbol, reason, order_id)
+        except Exception as exc:
+            logger.error(
+                "[%s] CRITICAL — could not cancel resting limit entry %s (%s). "
+                "It may fill later and open an unmanaged position. Manual "
+                "cancellation on the exchange may be required.", symbol, order_id, exc)
+
+    async def _flatten_if_unprotected(self, symbol: str) -> bool:
         """Close an exchange position left naked by a failed live order flow.
 
-        Called after any live-flow exception. The MARKET entry can fill before a
-        later leg fails (SL/TP placement, logging); the DB row is then dropped,
-        so without this the position sits on the exchange with no stop — and the
-        reconcile can only adopt it UNPROTECTED (SL=None/TP=None).
+        Called after any live-flow exception. The entry can fill before a later
+        leg fails (SL/TP placement, logging), so without this the position sits
+        on the exchange with no stop — and the reconcile can only adopt it
+        UNPROTECTED (SL=None/TP=None).
+
+        Returns True when the exchange holds nothing for this symbol (nothing to
+        clean up, or it was successfully flattened) — only then may the caller
+        close the DB row. Returns False when the position is deliberately being
+        LEFT open (a protective stop rests) or when the exchange state could
+        not be determined; in both cases the caller MUST keep the row OPEN so
+        the reconcile adopts a tracked position.
+
+        The previous version returned None unconditionally, so the caller
+        closed the row even when this method had deliberately left an exchange
+        position open — an open position with an SL, no TP, and no OPEN row, so
+        nothing ever managed it again.
         """
         if self.binance is None:
-            return
+            return True
         try:
             pos = await self.binance.get_position(symbol)
         except Exception as exc:
-            logger.error("[%s] Could not verify position after failed flow: %s", symbol, exc)
-            return
+            # UNKNOWN, not "flat". Failing closed here means the caller keeps
+            # the DB row OPEN so the reconcile adopts a TRACKED position; the
+            # previous bare `return` let the caller close the row, dropping an
+            # exchange position that we simply couldn't check (a -1003 blip
+            # reproduced the original naked-position incident).
+            logger.error(
+                "[%s] Could not verify position after failed flow (%s) — "
+                "state UNKNOWN, not flat. Keeping the row open for reconcile.",
+                symbol, exc)
+            return False
+
         qty = float((pos or {}).get("quantity", 0) or 0)
         if qty <= 0:
-            return  # entry never filled — nothing to clean up
+            return True  # entry never filled — nothing to clean up
 
         try:
             algos = await self.binance.get_open_algo_orders(symbol)
-        except Exception:
-            algos = []
+        except Exception as exc:
+            # UNKNOWN whether a protective stop rests. An exception here must
+            # NOT be read as "no stop" — that is the exact condition which
+            # authorises a market close, so a transient blip would flatten a
+            # correctly-protected position. Fail closed: trust the exchange's
+            # stop and let the reconcile resolve it.
+            logger.error(
+                "[%s] Could not read resting algo orders after flow failure "
+                "(%s) — refusing to act. A stop may exist; the reconcile will "
+                "adopt it.", symbol, exc)
+            return False
+
         if any(a.get("orderType") == "STOP_MARKET" for a in algos):
             logger.warning(
                 "[%s] Live flow failed but a resting SL exists — leaving the "
-                "position for reconcile to adopt (qty %s)", symbol, qty)
-            return
+                "position OPEN for reconcile to adopt (qty %s)", symbol, qty)
+            return False
 
         close_side = "SELL" if (pos.get("side") or "LONG") == "LONG" else "BUY"
         try:
@@ -558,10 +640,12 @@ class StrategyService:
             logger.error(
                 "[%s] Live flow failed with an UNPROTECTED %s %s on the exchange "
                 "— flattened at market", symbol, pos.get("side"), qty)
+            return True
         except Exception as exc:
             logger.critical(
                 "[%s] FAILED to flatten naked %s %s after flow failure: %s — "
                 "manual intervention required", symbol, pos.get("side"), qty, exc)
+            return False
 
     async def _close_position_row(self, position_id: Optional[int]) -> None:
         """Mark a just-created position row CLOSED after a failed live entry.

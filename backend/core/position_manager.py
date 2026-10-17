@@ -9,6 +9,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from sqlalchemy import update
+
 from backend.models.position import Position
 from backend.models.trade import Trade
 from backend.models.signal import Signal
@@ -48,6 +50,11 @@ class PositionManager:
         self._check_locks: dict[str, asyncio.Lock] = {}  # per-symbol close lock
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        # Open-position snapshot shared by the high-frequency paths. The WS
+        # bookTicker handler fires per message (10-100+/sec) and must NOT run a
+        # DB query per tick — see _on_tick. Refreshed by the 30s _check_all_positions
+        # pass and after every close.
+        self._open_positions_cache: list[dict] = []
         # "paper" | "live" — set by BotEngine.start(). In live mode, closing a
         # position must also place a market order on the exchange (manual close)
         # or leave the exchange SL/TP to fire (auto TP/SL); the exchange SL/TP
@@ -216,13 +223,16 @@ class PositionManager:
             logger.debug(f"pnl_update broadcast failed: {e}")
 
     async def _get_open_positions(self) -> list[dict]:
-        """Snapshot all open positions as plain dicts."""
+        """Snapshot all open positions as plain dicts and refresh the cache.
+
+        Every caller goes through here so `_open_positions_cache` cannot drift.
+        """
         if self.session_factory is None:
             return []
         async with self.session_factory() as session:
             result = await session.execute(Position.__table__.select().where(Position.status == "OPEN"))
             rows = result.mappings().all()
-            return [
+            positions = [
                 {
                     "id": r["id"],
                     "symbol": r["symbol"],
@@ -239,6 +249,19 @@ class PositionManager:
                 }
                 for r in rows
             ]
+        # Cache for the high-frequency WS tick path (never queries the DB).
+        self._open_positions_cache = positions
+        return positions
+
+    def _cached_open_positions(self) -> list[dict]:
+        """Open positions from the last cache refresh. No DB access.
+
+        Used by the bookTicker handler, which fires 10-100+/sec. Falls back to
+        an empty list when the cache has never been populated (before the first
+        30s pass) — the REST pass still catches those, so a missed tick window
+        degrades latency, never correctness.
+        """
+        return self._open_positions_cache
 
     async def _sync_ws_subscriptions(self, open_positions: list[dict]):
         """Keep bookTicker subscriptions in sync with open-position symbols."""
@@ -283,12 +306,21 @@ class PositionManager:
         Uses a per-symbol lock so a burst of ticks can't double-close.
         BE-trailing is NOT done here (it needs 5m klines) — the REST loop
         still handles that plus reconciliation.
+
+        NO DB READ HERE. bookTicker fires 10-100+ times/second and a local
+        SELECT completes in ~1ms, so a per-tick `SELECT * FROM positions` was
+        issuing hundreds of queries/second on the same pool the scan loop and
+        the 30s pass need — the same event-loop starvation class as the old WS
+        task leak (login hangs, missed scans, "the bot went dead"), and with no
+        rate-limit signal to point at it. We read a snapshot cached by the 30s
+        `_check_all_positions` pass instead; `_refresh_open_cache()` is called
+        there and after any close.
         """
         lock = self._check_locks.setdefault(symbol, asyncio.Lock())
         if lock.locked():
             return  # a check for this symbol is already in flight
         async with lock:
-            positions = await self._get_open_positions()
+            positions = self._cached_open_positions()
             for position in positions:
                 if position["symbol"] != symbol:
                     continue
@@ -307,6 +339,9 @@ class PositionManager:
         status==OPEN guard.
         """
         open_positions = await self._get_open_positions()
+        # Refresh the cache even if a later step raises, so the WS tick path is
+        # never left reading a stale snapshot.
+        self._open_positions_cache = open_positions
         await self._sync_ws_subscriptions(open_positions)
 
         for position in open_positions:
@@ -570,10 +605,24 @@ class PositionManager:
 
         `keep_algo_id` is the stop just placed by this call; it must NOT be
         cancelled (place-then-cancel would otherwise kill the new stop too).
+
+        FAIL-SAFE: if the caller could not tell us which order is the new one,
+        we skip the sweep entirely. Sweeping blind would cancel the stop we just
+        placed along with the stale ones, leaving the position NAKED on the
+        exchange — strictly worse than the extra stops this sweep exists to
+        remove. Stacked reduce-only stops can only close the position early;
+        no stop at all lets it run unbounded.
         """
         if self.session_factory is None or self.binance is None:
             return
-        keep = str(keep_algo_id) if keep_algo_id is not None else None
+        if keep_algo_id is None:
+            logger.warning(
+                f"[{symbol}] Stop sweep skipped — the exchange did not return an "
+                f"algoId for the stop just placed, so the new stop cannot be "
+                f"distinguished from the stale ones. Leaving all resting stops "
+                f"armed rather than risk cancelling the live one.")
+            return
+        keep = str(keep_algo_id)
         try:
             for algo in await self.binance.get_open_algo_orders(symbol):
                 if str(algo.get("orderType")) != "STOP_MARKET":
@@ -616,6 +665,7 @@ class PositionManager:
             if not row or row.status != "OPEN":
                 return  # already closed elsewhere
 
+            symbol = row.symbol
             entry = float(row.entry_price)
             qty = float(row.quantity)
             side = row.side
@@ -709,10 +759,30 @@ class PositionManager:
             )
             session.add(trade)
 
-            row.status = "CLOSED"
-            row.closed_at = datetime.now(timezone.utc)
+            # ATOMIC CLOSE CLAIM. The in-memory `row.status != "OPEN"` check
+            # above is only a fast path: between it and this write we await two
+            # HTTP/DB round-trips (get_position_income, session.get(Signal)), so
+            # the WS tick path and the 30s REST / 5-min reconcile paths can both
+            # observe OPEN and both proceed. That produced duplicate Trade rows
+            # and DOUBLED the daily R total, which can trip the -3R hard stop on
+            # phantom R and halt trading for the day.
+            #
+            # This conditional UPDATE is the real mutual exclusion: only one
+            # transaction can transition OPEN -> CLOSED. The loser sees
+            # rowcount == 0 and rolls back, taking its Trade with it.
+            claimed = await session.execute(
+                update(Position)
+                .where(Position.id == position["id"], Position.status == "OPEN")
+                .values(status="CLOSED", closed_at=datetime.now(timezone.utc))
+            )
+            if claimed.rowcount == 0:
+                await session.rollback()
+                logger.warning(
+                    "[%s] Position %s was already closed by another path — "
+                    "discarding duplicate close (%s)", symbol, position["id"], reason)
+                return
+
             await session.commit()
-            symbol = row.symbol
             side = row.side
             qty = float(row.quantity)
 
@@ -737,8 +807,21 @@ class PositionManager:
         elif self._mode == "live" and reason == "EXTERNAL_CLOSE":
             await self._cancel_exchange_orders(position["id"], position["symbol"])
         elif self._mode == "live":
+            # ORDER MATTERS: close on the exchange FIRST, cancel protection
+            # second. The previous order (cancel, then market-close) left a
+            # window where a failed close produced an open exchange position
+            # with zero SL/TP — naked, while the DB already said CLOSED.
+            # _market_close swallows its own exceptions, so it reports whether
+            # it actually flattened; if it did not, restore a protective stop
+            # rather than leaving the position unprotected.
+            closed = await self._market_close(symbol, side, qty)
             await self._cancel_exchange_orders(position["id"], position["symbol"])
-            await self._market_close(symbol, side, qty)
+            if not closed:
+                logger.error(
+                    "[%s] Market close FAILED and protection has now been "
+                    "cancelled — restoring an emergency stop so the position is "
+                    "not left naked", symbol)
+                await self._restore_emergency_stop(symbol, side, qty)
 
         # Update daily summary + alert outside the session
         await self.daily_reset.update_daily_summary(pnl_r, pnl_usdt)
@@ -818,17 +901,64 @@ class PositionManager:
         except Exception:
             logger.exception("Failed to cancel exchange orders for position %s", position_id)
 
-    async def _market_close(self, symbol: str, side: str, qty: float) -> None:
+    async def _market_close(self, symbol: str, side: str, qty: float) -> bool:
         """Place a MARKET order to close a live position (manual/closed-loop exit).
 
-        Opposite side of the position: LONG → SELL, SHORT → BUY.
+        Opposite side of the position: LONG -> SELL, SHORT -> BUY.
+
+        Returns True when the close order was successfully placed. Callers rely
+        on this: an earlier version returned None and swallowed every failure,
+        so the caller could not tell a successful flatten from a failed one and
+        went on to cancel the position's protection.
         """
         close_side = "SELL" if side == "LONG" else "BUY"
         try:
             await self.binance.place_market_order(symbol, close_side, qty)
             logger.info(f"[{symbol}] Live market close placed: {close_side} {qty}")
+            return True
         except Exception as e:
             logger.error(f"[{symbol}] Live market close failed: {e}")
+            return False
+
+    async def _restore_emergency_stop(self, symbol: str, side: str, qty: float) -> None:
+        """Last-resort protection: re-arm a stop on a position we failed to close.
+
+        Used when the market close failed AND we have already cancelled the
+        position's resting SL/TP. A position with no stop on the exchange is
+        unbounded — it is better to close prematurely at a poor price than to
+        let it run. The stop is placed a conservative distance from the last
+        known price, and the failure is surfaced loudly so the operator can act.
+        """
+        try:
+            price = self._latest_price.get(symbol, 0.0)
+            if price <= 0:
+                ticker = await self.binance.get_ticker(symbol)
+                price = float((ticker or {}).get("price", 0) or 0)
+            if price <= 0:
+                raise RuntimeError("no price available to place an emergency stop")
+
+            # 1% away from the last known price, on the losing side.
+            stop_price = price * 0.99 if side == "LONG" else price * 1.01
+            await self.binance.modify_position_stop(symbol, side, stop_price, qty)
+            logger.error(
+                "[%s] EMERGENCY STOP re-armed at %.6g after a failed market close "
+                "— this position was left unprotected", symbol, stop_price)
+            if self.alerts:
+                await self.alerts.error(
+                    f"{symbol}: market close FAILED, emergency stop placed at "
+                    f"{stop_price:.6g}. Manual intervention required.")
+        except Exception as e:
+            logger.critical(
+                "[%s] CRITICAL — market close failed AND the emergency stop could "
+                "not be placed (%s). The position is NAKED on the exchange.",
+                symbol, e)
+            if self.alerts:
+                try:
+                    await self.alerts.error(
+                        f"{symbol}: CLOSE FAILED and no stop could be placed — "
+                        f"position is NAKED. Intervene immediately.")
+                except Exception:
+                    pass
 
     async def _ensure_flat(self, symbol: str) -> None:
         """Close any exchange position left after an engine-detected exit.

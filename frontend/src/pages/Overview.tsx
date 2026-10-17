@@ -4,6 +4,7 @@ import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
 import { Table, TableHead, TableRow, TableHeadCell, TableCell } from '../components/ui/Table'
 import { useDashboardStore } from '../store/dashboardStore'
+import { errorDetail } from '../api/client'
 import type { Position } from '../store/dashboardStore'
 import { clsx } from 'clsx'
 import { Play, Square, Loader2, ExternalLink, XCircle } from 'lucide-react'
@@ -82,16 +83,49 @@ export default function Overview() {
   const isRunning = botStatus?.status === 'running'
   const mode = botStatus?.mode || 'paper'
   const [isTransitioning, setIsTransitioning] = useState(false)
+  const [isStartingMode, setIsStartingMode] = useState<'paper' | 'live' | null>(null)
   const [isClosingAll, setIsClosingAll] = useState(false)
   const [closedCount, setClosedCount] = useState<number | null>(null)
 
+  // Pull the backend's `detail` string out of an axios error when it has one.
+  const detailOf = (err: unknown, fallback: string) => errorDetail(err, fallback)
+
+  // LIVE places real mainnet orders — it always gets a confirmation, whichever
+  // control triggered it.
+  const confirmLive = () => window.confirm(
+    'Start the bot in LIVE mode?\n\nThis places REAL orders on Binance Futures with your own funds. ' +
+    'Confirm your risk settings before continuing.'
+  )
+
   const handleToggle = async () => {
+    if (!isRunning && mode === 'live' && !confirmLive()) return
     setIsTransitioning(true)
     try {
       if (isRunning) await stopBot()
       else await startBot(mode as 'paper' | 'live')
+    } catch (err) {
+      console.error('Failed to toggle bot state:', err)
+      window.alert(`Failed to ${isRunning ? 'stop' : 'start'} the bot: ${detailOf(err, 'request failed')}`)
+      // The UI may still show the stale status after a rejected request.
+      fetchOverview()
     } finally {
       setIsTransitioning(false)
+    }
+  }
+
+  const handleStartMode = async (target: 'paper' | 'live') => {
+    if (isRunning || isStartingMode) return
+    if (target === 'live' && !confirmLive()) return
+
+    setIsStartingMode(target)
+    try {
+      await startBot(target)
+    } catch (err) {
+      console.error('Failed to start bot:', err)
+      window.alert(`Failed to start the bot in ${target.toUpperCase()} mode: ${detailOf(err, 'request failed')}`)
+      fetchOverview()
+    } finally {
+      setIsStartingMode(null)
     }
   }
 
@@ -107,6 +141,8 @@ export default function Overview() {
       await fetchOverview()  // refresh positions table
     } catch (err) {
       console.error('Failed to close all positions:', err)
+      window.alert(`Failed to close all positions: ${detailOf(err, 'request failed')}`)
+      fetchOverview()
     } finally {
       setIsClosingAll(false)
     }
@@ -148,26 +184,26 @@ export default function Overview() {
                 <p className="text-xs text-muted uppercase tracking-wide">Mode</p>
                 <div className="flex gap-2 mt-1">
                   <button
-                    onClick={() => !isRunning && startBot('paper')}
-                    disabled={isRunning}
+                    onClick={() => handleStartMode('paper')}
+                    disabled={isRunning || isStartingMode !== null}
                     className={clsx(
                       'px-3 py-1 rounded text-xs font-mono font-medium border transition-colors',
                       mode === 'paper' ? 'border-warning bg-warning/10 text-warning' : 'border-border text-muted hover:text-text',
-                      isRunning && 'opacity-50 cursor-not-allowed'
+                      (isRunning || isStartingMode !== null) && 'opacity-50 cursor-not-allowed'
                     )}
                   >
-                    PAPER
+                    {isStartingMode === 'paper' ? <Loader2 className="w-3 h-3 animate-spin inline" /> : 'PAPER'}
                   </button>
                   <button
-                    onClick={() => !isRunning && startBot('live')}
-                    disabled={isRunning}
+                    onClick={() => handleStartMode('live')}
+                    disabled={isRunning || isStartingMode !== null}
                     className={clsx(
                       'px-3 py-1 rounded text-xs font-mono font-medium border transition-colors',
                       mode === 'live' ? 'border-danger bg-danger/10 text-danger' : 'border-border text-muted hover:text-text',
-                      isRunning && 'opacity-50 cursor-not-allowed'
+                      (isRunning || isStartingMode !== null) && 'opacity-50 cursor-not-allowed'
                     )}
                   >
-                    LIVE
+                    {isStartingMode === 'live' ? <Loader2 className="w-3 h-3 animate-spin inline" /> : 'LIVE'}
                   </button>
                 </div>
               </div>
@@ -177,7 +213,7 @@ export default function Overview() {
                   size="md"
                   onClick={handleToggle}
                   isLoading={isTransitioning}
-                  disabled={isTransitioning}
+                  disabled={isTransitioning || isStartingMode !== null}
                 >
                   {isTransitioning ? <Loader2 className="w-4 h-4 animate-spin" /> : isRunning ? <><Square className="w-4 h-4" /> Stop</> : <><Play className="w-4 h-4" /> Start</>}
                 </Button>

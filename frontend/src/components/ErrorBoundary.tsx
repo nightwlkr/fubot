@@ -25,6 +25,12 @@ export default class ErrorBoundary extends Component<Props, State> {
     console.error('[UI] Uncaught render error:', error)
   }
 
+  // Reset without a full reload: this boundary wraps the protected layout, so
+  // once the error is cleared the app shell (nav links, Close All) comes back.
+  handleReset = () => {
+    this.setState({ error: null })
+  }
+
   render() {
     if (this.state.error) {
       return (
@@ -32,12 +38,24 @@ export default class ErrorBoundary extends Component<Props, State> {
           <div className="max-w-md text-center space-y-3">
             <h1 className="text-xl font-bold">Something went wrong</h1>
             <p className="text-sm text-muted font-mono break-words">{this.state.error.message}</p>
-            <button
-              className="px-4 py-2 rounded bg-primary text-white hover:bg-primary/80"
-              onClick={() => window.location.reload()}
-            >
-              Refresh Page
-            </button>
+            <p className="text-xs text-muted">
+              If retrying fails again, refresh the page — the backend may be returning
+              an unexpected response.
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                className="px-4 py-2 rounded bg-primary text-white hover:bg-primary/80"
+                onClick={this.handleReset}
+              >
+                Try Again
+              </button>
+              <button
+                className="px-4 py-2 rounded border border-border text-text hover:bg-surface2"
+                onClick={() => window.location.reload()}
+              >
+                Refresh Page
+              </button>
+            </div>
           </div>
         </div>
       )

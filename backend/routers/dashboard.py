@@ -61,6 +61,8 @@ def _format_position(pos: Position, pricing: dict) -> PositionItem:
         mark_price=px["mark_price"],
         unrealized_pnl=px["unrealized_pnl"],
         unrealized_pnl_pct=px["unrealized_pnl_pct"],
+        liquidation_price=px["liquidation_price"],
+        margin_usd=px["margin_usd"],
     )
 
 

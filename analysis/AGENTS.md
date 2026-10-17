@@ -29,3 +29,4 @@ Artifacts are checked by the Lead for citation/sample-size compliance. The decis
 ## Child DOX Index
 
 - `panel/` — per-cycle panel artifacts and the Lead decision document; owned by this doc.
+- `REVIEW_2026-10-17.md` — full-codebase review (backend + frontend). Read before changing the position lifecycle, the settings API, or the WS/tick path.

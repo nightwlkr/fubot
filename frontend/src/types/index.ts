@@ -54,6 +54,8 @@ export interface TradingSettings {
   strategy_fvg_enabled: boolean
   strategy_3candle_enabled: boolean
   strategy_choch_enabled: boolean
+  strategy_obfvg_enabled: boolean
+  strategy_obfvg_max_age_bars: number
 }
 
 export interface SymbolConfig {

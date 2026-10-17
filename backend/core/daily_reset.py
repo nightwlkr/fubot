@@ -13,6 +13,11 @@ from backend.models.daily_summary import DailySummary
 
 logger = logging.getLogger(__name__)
 
+# The -3R daily stop is the project's hard loss boundary. These bound what a
+# single settings row can do to it.
+DEFAULT_DAILY_LOSS_LIMIT_R = 3.0
+MAX_DAILY_LOSS_LIMIT_R = 20.0
+
 
 class DailyResetService:
     """Tracks cumulative daily PnL in R units, enforces -3R hard stop, resets at UTC midnight."""
@@ -36,8 +41,22 @@ class DailyResetService:
         self._limit_hit_date: Optional[date] = None
 
     def get_limit_r(self) -> float:
-        """Get the daily loss limit in R (positive value)."""
-        return abs(self.settings.get("daily_loss_limit_r", -3.0))
+        """Get the daily loss limit in R (positive value).
+
+        CLAMPED here as well as on the settings schema. This is the last line of
+        defence — a bad DB row (hand-edited, restored from an old backup, or
+        written before the schema had bounds) must not be able to switch the
+        -3R stop off. Before this, `daily_loss_limit_r=9999` made the limit
+        9999R and the hard stop never fired.
+        """
+        limit = abs(float(self.settings.get("daily_loss_limit_r", -3.0)))
+        if not (0 < limit <= MAX_DAILY_LOSS_LIMIT_R):
+            logger.error(
+                "daily_loss_limit_r=%r is out of range (0, %s] — falling back "
+                "to %sR", self.settings.get("daily_loss_limit_r"),
+                MAX_DAILY_LOSS_LIMIT_R, DEFAULT_DAILY_LOSS_LIMIT_R)
+            return DEFAULT_DAILY_LOSS_LIMIT_R
+        return limit
 
     def _zero_stats(self, today) -> dict:
         limit_r = self.get_limit_r()

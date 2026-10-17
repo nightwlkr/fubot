@@ -85,7 +85,11 @@ export const useAuthStore = create<AuthState>((set) => ({
         clearToken()
         set({ user: null, token: null, isRestoring: false })
       } else {
-        set({ user: null, token: null, isRestoring: false })
+        // Transient failure (502 during a deploy, network blip, offline): the
+        // session is NOT proven invalid, so keep the user and token. Nulling
+        // `user` here made RequireAuth redirect to /login — bouncing the
+        // operator off the dashboard with live positions open.
+        set({ isRestoring: false })
       }
     }
   },

@@ -57,3 +57,15 @@ export const api = {
   delete: <T>(url: string) =>
     apiClient.delete<T>(url),
 }
+
+/**
+ * Extract a human-readable error message from a failed request.
+ *
+ * Axios rejects with `unknown`, so every catch site needs a cast to reach the
+ * backend's `detail`. Centralised here so no page re-invents it (and so a single
+ * place satisfies strict catch-clause checks).
+ */
+export function errorDetail(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  return detail ? String(detail) : fallback
+}

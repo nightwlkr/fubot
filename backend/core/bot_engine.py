@@ -26,6 +26,12 @@ from backend.core.websocket_manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
+# Bounds on the scan cadence. Mirrors config.py (ge=10, le=300) but enforced
+# at the point of use as well, so a bad settings row cannot spin the loop.
+MIN_SCAN_INTERVAL = 10
+MAX_SCAN_INTERVAL = 300
+DEFAULT_SCAN_INTERVAL = 60
+
 
 class BotEngine:
     """Main trading bot orchestrator — runs continuous scan/evaluate/execute loop."""
@@ -103,7 +109,7 @@ class BotEngine:
 
     async def _main_loop(self):
         """Main trading loop — runs every check_interval_seconds."""
-        interval = self.settings.get("check_interval_seconds", 60)
+        interval = self._safe_interval()
 
         while self._running:
             try:
@@ -131,7 +137,28 @@ class BotEngine:
             except Exception as e:
                 logger.error(f"BotEngine main loop error: {e}", exc_info=True)
                 await self.alerts.error(f"Bot loop error: {e}")
-                await asyncio.sleep(interval)
+                await asyncio.sleep(self._safe_interval())
+
+    def _safe_interval(self) -> int:
+        """Scan interval, clamped to a sane range.
+
+        `check_interval_seconds` reaching 0 (or negative) made
+        `sleep_time = max(0, interval - elapsed)` equal 0 on every pass, so the
+        scan loop spun continuously and hammered the Binance REST API — a
+        self-inflicted rate-limit ban. The settings schema now rejects it on
+        write, but a value already in the DB (or hand-edited) would still spin.
+        """
+        try:
+            interval = int(self.settings.get("check_interval_seconds", 60))
+        except (TypeError, ValueError):
+            interval = 60
+        if not (MIN_SCAN_INTERVAL <= interval <= MAX_SCAN_INTERVAL):
+            logger.error(
+                "check_interval_seconds=%r out of range (%s-%s) — using %ss",
+                self.settings.get("check_interval_seconds"),
+                MIN_SCAN_INTERVAL, MAX_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+            return DEFAULT_SCAN_INTERVAL
+        return interval
 
     async def _scan_and_evaluate(self):
         """For each enabled symbol: scan, evaluate, execute."""

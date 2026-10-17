@@ -21,12 +21,79 @@ from sqlalchemy import select
 from backend.indicators.atr import calculate_atr
 from backend.indicators.trend import analyze_trend_bias
 from backend.indicators.fvg import detect_fvg, evaluate_fvg_entry
+from backend.indicators.order_block import detect_order_blocks, fvg_within_order_block
 from backend.indicators.three_candle import detect_three_candles, evaluate_three_candle_entry
 from backend.indicators.choch import detect_choch
 from backend.indicators.volume_profile import get_volume_confirmed_filter
 from backend.models.signal import Signal as SignalModel
 
 logger = logging.getLogger(__name__)
+
+# `evaluate_fvg_entry` builds the target from `risk * rr_min`, so rr_ratio is
+# mathematically exactly rr_min — but float division can land a hair under it and
+# fail `is_valid`. This tolerance matches the backtest harness (RR_EPSILON).
+RR_EPSILON = 1e-9
+
+# OB detection needs this much 5m history before the first candle is considered
+# (see detect_order_blocks' start_idx).
+OB_START_IDX = 30
+
+
+def detect_obfvg_candidates(
+    k5m: list[dict],
+    k1h: list[dict],
+    atr_1h: float,
+    rr_min: float,
+    max_age_bars: int = 2,
+    ob_lookback: int = 50,
+) -> list[tuple[str, float, float, float, float, float]]:
+    """Order-Block-confirmed Fair Value Gaps on the 1h timeframe.
+
+    Returns (fvg_direction, zone_min, zone_max, stop, take_profit, rr) tuples.
+
+    A bullish 1h FVG only qualifies when a confirmed BULLISH order block on the
+    5m series overlaps its zone (and vice versa). Plain FVG alone is disabled in
+    production at -0.397R/trade; the OB confluence is what separates this
+    population — measured +0.432R ungated / +0.315R with the live trend gate
+    over 20 symbols at R:R 3.0 (DECISION.md cycle 2).
+
+    FRESHNESS: only FVGs on the last `max_age_bars` CLOSED 1h bars are eligible.
+    The backtest entered each gap at the first 5m bar after its forming hour
+    closed; a gap that formed days ago would instead be entered at today's
+    price, which is a different trade and was never measured. Two bars of slack
+    covers the 60s scan cadence so a fresh gap is never missed.
+
+    OB visibility is bounded by `confirm_at_idx` (via fvg_within_order_block), so
+    an OB that only confirms after the FVG cannot create confluence.
+    """
+    if not k5m or not k1h or atr_1h <= 0:
+        return []
+
+    # "Now" on the 5m series — a fresh FVG formed on the last closed hour, so
+    # this is the correct confluence-visibility point.
+    current_5m = len(k5m) - 1
+    obs = detect_order_blocks(k5m, left_bars=2, right_bars=2, start_idx=OB_START_IDX)
+    if not obs:
+        return []
+
+    cutoff = len(k1h) - 1 - max(0, max_age_bars)
+    out: list[tuple[str, float, float, float, float, float]] = []
+    for f in detect_fvg(k1h):
+        if f.bar_index < cutoff:
+            continue
+        e = evaluate_fvg_entry(f, atr_1h, rr_min)
+        if not e["is_valid"] and e["rr_ratio"] < rr_min - RR_EPSILON:
+            continue
+        if e["rr_ratio"] <= 0:
+            continue
+        if not fvg_within_order_block(
+            f.zone_min, f.zone_max, f.direction,
+            obs, lookback=ob_lookback, current_idx=current_5m,
+        ):
+            continue
+        out.append((f.direction, f.zone_min, f.zone_max,
+                    e["stop_loss"], e["take_profit"], e["rr_ratio"]))
+    return out
 
 
 @dataclass
@@ -123,6 +190,13 @@ class SignalService:
                     candidates.append(("CHOC", direction,
                                        ch.pullback_entry_zone[0], ch.pullback_entry_zone[1],
                                        ch.stop_loss, ch.take_profit, ch.rr_ratio))
+        if bool(self.settings.get("strategy_obfvg_enabled", True)):
+            max_age = int(self.settings.get("strategy_obfvg_max_age_bars", 2))
+            for fdir, zmin, zmax, sl, tp, rr in detect_obfvg_candidates(
+                k5m, k1h, atr_1h, rr_min, max_age_bars=max_age
+            ):
+                candidates.append(("OBFVG", "LONG" if fdir == "BULLISH" else "SHORT",
+                                   zmin, zmax, sl, tp, rr))
 
         if not candidates:
             return []
@@ -165,8 +239,9 @@ class SignalService:
             else:
                 # Filter 2 — volume confirmation (10 candles preceding formation).
                 # Use the timeframe the pattern was detected on: 1h volume for
-                # the 1h FVG, 5m volume for 5m 3-candle / 15m CHoCH.
-                vol_candles = k1h[-15:-5] if strategy_type == "FVG" else k5m[-15:-5]
+                # the 1h FVG and the 1h FVG leg of OB+FVG, 5m volume for 5m
+                # 3-candle / 15m CHoCH.
+                vol_candles = k1h[-15:-5] if strategy_type in ("FVG", "OBFVG") else k5m[-15:-5]
                 volume_confirmed = get_volume_confirmed_filter(direction, vol_candles).passes_filter
                 # Volume filter DISABLED by default (2026-10-13): the backtest
                 # showed it blocked profitable trades without improving quality

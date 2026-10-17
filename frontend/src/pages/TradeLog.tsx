@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { api } from '../api/client'
+import { api, errorDetail } from '../api/client'
 import { ENDPOINTS } from '../api/endpoints'
 import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
@@ -38,6 +38,9 @@ interface TradeStats {
 }
 
 const PAGE_SIZE = 50
+// Backend hard-caps a page at 100 rows (trades.py: limit le=100).
+const EXPORT_PAGE_SIZE = 100
+const EXPORT_MAX_PAGES = 100  // 10k rows ceiling; a longer export is warned about
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString()
@@ -51,6 +54,7 @@ export default function TradeLog() {
   const [trades, setTrades] = useState<Trade[]>([])
   const [stats, setStats] = useState<TradeStats | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [isExporting, setIsExporting] = useState(false)
 
   const [symbol, setSymbol] = useState('')
   const [side, setSide] = useState('')
@@ -62,8 +66,8 @@ export default function TradeLog() {
   const [totalPages, setTotalPages] = useState(1)
   const [total, setTotal] = useState(0)
 
-  const fetchTrades = useCallback(async () => {
-    setIsLoading(true)
+  const fetchTrades = useCallback(async (showLoader = true) => {
+    if (showLoader) setIsLoading(true)
     try {
       const params: Record<string, string | number> = { page, limit: PAGE_SIZE }
       if (symbol) params.symbol = symbol
@@ -77,9 +81,11 @@ export default function TradeLog() {
         api.get<TradeStats>(ENDPOINTS.tradeStats),
       ])
 
-      setTrades(tradesRes.data.trades)
-      setTotal(tradesRes.data.total)
-      setTotalPages(tradesRes.data.pages)
+      // A 200-with-HTML response (the SPA catch-all can answer an /api/... path)
+      // would push undefined into .length and crash the page.
+      setTrades(Array.isArray(tradesRes.data.trades) ? tradesRes.data.trades : [])
+      setTotal(Number(tradesRes.data.total) || 0)
+      setTotalPages(Number(tradesRes.data.pages) || 1)
       setStats(statsRes.data)
     } catch (err) {
       console.error('Failed to fetch trades:', err)
@@ -92,23 +98,68 @@ export default function TradeLog() {
     fetchTrades()
   }, [fetchTrades])
 
-  const exportCSV = () => {
-    const headers = ['ID', 'Symbol', 'Side', 'Entry Price', 'Exit Price', 'Quantity', 'Value (USD)', 'PnL (R)', 'PnL (USDT)', 'Exit Reason', 'Strategy', 'Closed At']
-    const rows = trades.map(t => [t.id, t.symbol, t.side, t.entry_price, t.exit_price, t.quantity,
-                                  (t.quantity * t.entry_price).toFixed(2), t.pnl_r, t.pnl_usdt,
-                                  t.exit_reason, t.strategy_type, t.closed_at])
+  // Poll like App.tsx does for the overview (10s): a trade closing while the
+  // operator sits on this page was otherwise invisible until a filter changed.
+  useEffect(() => {
+    const id = setInterval(() => fetchTrades(false), 10000)
+    return () => clearInterval(id)
+  }, [fetchTrades])
 
-    const csv = [headers, ...rows]
-      .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
-      .join('\n')
+  // The backend caps a page at 100 rows (trades.py: limit le=100), so exporting
+  // the on-screen rows would silently truncate. Walk the pages for the current
+  // filters instead — the file is the whole filtered set, as the name implies.
+  const exportCSV = async () => {
+    if (isExporting) return
+    setIsExporting(true)
+    try {
+      const collected: Trade[] = []
+      let exportTotal = 0
+      let exportPages = 1
+      let p = 1
+      do {
+        const params: Record<string, string | number> = { page: p, limit: EXPORT_PAGE_SIZE }
+        if (symbol) params.symbol = symbol
+        if (side) params.side = side
+        if (outcome) params.outcome = outcome
+        if (fromDate) params.from_date = fromDate
+        if (toDate) params.to_date = toDate
 
-    const blob = new Blob([csv], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `fubot-trades-${new Date().toISOString().slice(0, 10)}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+        const res = await api.get<TradeResponse>(ENDPOINTS.trades, { params })
+        if (Array.isArray(res.data.trades)) collected.push(...res.data.trades)
+        exportTotal = Number(res.data.total) || exportTotal
+        exportPages = Number(res.data.pages) || 1
+        p += 1
+      } while (p <= exportPages && p <= EXPORT_MAX_PAGES)
+
+      if (p <= exportPages) {
+        console.warn(`Export truncated at ${EXPORT_MAX_PAGES} pages (${collected.length}/${exportTotal} trades)`)
+        window.alert(`Only the first ${collected.length} of ${exportTotal} trades could be exported.`)
+      }
+
+      const headers = ['ID', 'Symbol', 'Side', 'Entry Price', 'Exit Price', 'Quantity', 'Value (USD)', 'PnL (R)', 'PnL (USDT)', 'Exit Reason', 'Strategy', 'Closed At']
+      const rows = collected.map(t => [t.id, t.symbol, t.side, t.entry_price, t.exit_price, t.quantity,
+                                        (t.quantity * t.entry_price).toFixed(2), t.pnl_r, t.pnl_usdt,
+                                        t.exit_reason, t.strategy_type, t.closed_at])
+
+      const csv = [headers, ...rows]
+        .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+        .join('\n')
+
+      const blob = new Blob([csv], { type: 'text/csv' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const scope = symbol || side || outcome || fromDate || toDate ? '-filtered' : ''
+      a.download = `fubot-trades${scope}-${new Date().toISOString().slice(0, 10)}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('Failed to export trades:', err)
+      const detail = errorDetail(err, 'request failed')
+      window.alert(`Failed to export trades: ${detail}`)
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   const clearFilters = () => {
@@ -130,9 +181,9 @@ export default function TradeLog() {
           <h1 className="text-xl font-semibold">Trade Log</h1>
           <p className="text-sm text-muted mt-0.5">{total} trades recorded</p>
         </div>
-        <Button variant="secondary" size="sm" onClick={exportCSV} disabled={trades.length === 0}>
+        <Button variant="secondary" size="sm" onClick={exportCSV} isLoading={isExporting} disabled={trades.length === 0 || isExporting}>
           <Download className="w-4 h-4" />
-          Export CSV
+          Export CSV{hasFilters ? ' (filtered)' : ''}
         </Button>
       </div>
 
@@ -143,7 +194,7 @@ export default function TradeLog() {
             { label: 'Total Trades', value: stats.total_trades.toString() },
             { label: 'Win Rate', value: `${stats.win_rate.toFixed(1)}%` },  // backend sends percent
             { label: 'Avg R', value: `${stats.avg_r >= 0 ? '+' : ''}${stats.avg_r.toFixed(2)}R` },
-            { label: 'Best Trade', value: `+${stats.best_trade.toFixed(2)}R`, className: 'text-success' },
+            { label: 'Best Trade', value: `${stats.best_trade >= 0 ? '+' : ''}${stats.best_trade.toFixed(2)}R`, className: stats.best_trade >= 0 ? 'text-success' : 'text-danger' },
             { label: 'Worst Trade', value: `${stats.worst_trade.toFixed(2)}R`, className: 'text-danger' },
           ].map(({ label, value, className }) => (
             <Card key={label} className="p-3">

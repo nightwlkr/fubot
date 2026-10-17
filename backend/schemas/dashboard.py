@@ -147,6 +147,8 @@ class TradingSettings(BaseModel):
     strategy_fvg_enabled: bool = True
     strategy_3candle_enabled: bool = True
     strategy_choch_enabled: bool = True
+    strategy_obfvg_enabled: bool = True
+    strategy_obfvg_max_age_bars: int = 2
 
 
 # --- Order ---

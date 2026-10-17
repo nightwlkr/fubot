@@ -37,6 +37,13 @@ interface RDatum {
   count: number
 }
 
+// Only NEGATIVE buckets are losses. The backend labels the winning buckets
+// "0 to 0.5R" and "0.5 to 1R", so the old startsWith('0') test painted both of
+// them red in the histogram and the legend.
+function isLossBucket(bucket: string): boolean {
+  return bucket.trim().startsWith('-')
+}
+
 type Range = '7d' | '30d' | '90d' | '365d'
 const RANGE_DAYS: Record<Range, number> = { '7d': 7, '30d': 30, '90d': 90, '365d': 365 }
 
@@ -262,13 +269,14 @@ function RDistributionChart() {
   useEffect(() => {
     api.get<{ data: RDatum[] }>(ENDPOINTS.performanceStrategies)
       .then(res => {
-        setData(res.data.data)
+        const rows = Array.isArray(res.data.data) ? res.data.data : []
+        setData(rows)
         const series = seriesRef.current
         if (!series) return
-        series.setData(res.data.data.map((b, i) => ({
+        series.setData(rows.map((b, i) => ({
           time: (i + 1) as Time,
           value: b.count,
-          color: b.bucket.startsWith('0') || b.bucket.startsWith('-') ? 'rgba(239, 68, 68, 0.7)' : 'rgba(34, 197, 94, 0.7)',
+          color: isLossBucket(b.bucket) ? 'rgba(239, 68, 68, 0.7)' : 'rgba(34, 197, 94, 0.7)',
         })))
       })
       .catch(console.error)
@@ -283,7 +291,7 @@ function RDistributionChart() {
       <div className="flex flex-wrap gap-3 px-4 pb-3">
         {data.map(bucket => (
           <div key={bucket.bucket} className="flex items-center gap-1.5 text-xs">
-            <div className={`w-2 h-2 rounded-sm ${bucket.bucket.startsWith('0') || bucket.bucket.startsWith('-') ? 'bg-danger' : 'bg-success'}`} />
+            <div className={`w-2 h-2 rounded-sm ${isLossBucket(bucket.bucket) ? 'bg-danger' : 'bg-success'}`} />
             <span className="text-muted">{bucket.bucket}: <span className="text-text font-mono">{bucket.count}</span></span>
           </div>
         ))}
@@ -303,7 +311,7 @@ export default function Performance() {
     { label: 'Total Trades', value: stats?.total_trades?.toString() ?? '—' },
     { label: 'Win Rate', value: stats ? `${stats.win_rate.toFixed(1)}%` : '—' },  // backend sends percent
     { label: 'Avg R/Trade', value: stats ? `${stats.avg_r >= 0 ? '+' : ''}${stats.avg_r.toFixed(2)}R` : '—' },
-    { label: 'Best Trade', value: stats ? `+${stats.best_trade.toFixed(2)}R` : '—', className: 'text-success' },
+    { label: 'Best Trade', value: stats ? `${stats.best_trade >= 0 ? '+' : ''}${stats.best_trade.toFixed(2)}R` : '—', className: stats && stats.best_trade < 0 ? 'text-danger' : 'text-success' },
     { label: 'Worst Trade', value: stats ? `${stats.worst_trade.toFixed(2)}R` : '—', className: 'text-danger' },
   ]
 

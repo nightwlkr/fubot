@@ -80,6 +80,10 @@ class BinanceService:
         self._base_url = TESTNET_BASE if self._testnet else PROD_BASE
         self._limiter = RateLimiter()
         self._client: httpx.AsyncClient | None = None
+        # symbol -> LOT_SIZE/MARKET_LOT_SIZE/PRICE_FILTER, cached for the
+        # process lifetime. Filters change at most weekly; the uncached version
+        # re-downloaded the full ~1MB exchangeInfo per order placement.
+        self._lot_cache: dict[str, dict] = {}
 
     def set_credentials(self, api_key: str, api_secret: str) -> None:
         """Load API credentials (e.g. from the encrypted Account table) at runtime.
@@ -135,7 +139,15 @@ class BinanceService:
                     try:
                         code = int(data["code"])
                     except (TypeError, ValueError):
-                        code = -1
+                        # Unparseable code on a code+msg payload: treat as
+                        # SUCCESS and warn. Inventing -1 here raised a spurious
+                        # BinanceAPIError on a successful cancel, which callers
+                        # swallowed at debug level — leaving duplicate stops
+                        # armed (the "2 active SLs per position" bug).
+                        logger.warning(
+                            "Unparseable Binance code %r on %s %s — treating as "
+                            "success", data.get("code"), method, path)
+                        return data
                     if code != 200:
                         raise BinanceAPIError(code, data["msg"])
                 return data
@@ -146,7 +158,18 @@ class BinanceService:
                     logger.error(f"Request failed after 3 attempts: {e}")
                     raise
                 await asyncio.sleep(2 ** attempt)
-        return {}
+
+        # Retries exhausted (reached here only via repeated 429s, which `continue`
+        # rather than raise). MUST raise, not return {}: every caller reads an
+        # empty result as "flat" / "no positions" / "success". Returning {}
+        # after a rate limit made _ensure_flat believe the exchange had already
+        # closed the position (leaving it open and naked), and made the scan
+        # loop believe no symbol was held — so it could open a SECOND position on
+        # an already-exposed symbol.
+        raise BinanceAPIError(
+            -1003,
+            f"Rate limited after 3 attempts on {method} {path} — state is UNKNOWN, "
+            f"not empty. Callers must not treat this as 'flat'.")
 
     async def _public_request(self, path: str, params: dict | None = None, weight: int = 1) -> dict:
         await self._limiter.acquire(weight)
@@ -162,7 +185,19 @@ class BinanceService:
                 resp.raise_for_status()
                 data = resp.json()
                 if isinstance(data, dict) and "code" in data and "msg" in data:
-                    raise BinanceAPIError(data["code"], data["msg"])
+                    # Mirror _signed_request: `code` may arrive as a STRING
+                    # ("200"), and a code+msg payload with a 200 code is a
+                    # success, not an error. Comparing raw here would fail-open
+                    # on any endpoint that answers {"code":"200","msg":"ok"}.
+                    try:
+                        code = int(data["code"])
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "Unparseable Binance code %r on %s — treating as success",
+                            data.get("code"), path)
+                        return data
+                    if code != 200:
+                        raise BinanceAPIError(code, data["msg"])
                 return data
             except (httpx.HTTPStatusError, BinanceAPIError):
                 raise
@@ -170,7 +205,10 @@ class BinanceService:
                 if attempt == 2:
                     raise
                 await asyncio.sleep(2 ** attempt)
-        return {}
+        # Exhausted retries (repeated 429s). Raise — see _signed_request: a
+        # falsy return here reads as "no data" to every caller.
+        raise BinanceAPIError(
+            -1003, f"Rate limited after 3 attempts on {path}")
 
     def _sign(self, query_string: str) -> str:
         import hmac
@@ -355,20 +393,37 @@ class BinanceService:
         }
 
     async def get_lot_size(self, symbol: str) -> dict:
-        """GET /fapi/v1/exchangeInfo — LOT_SIZE + MARKET_LOT_SIZE + PRICE_FILTER for one symbol."""
-        try:
-            info = await self._public_request("fapi/v1/exchangeInfo")
-            for s in info.get("symbols", []):
-                if s.get("symbol") == symbol:
-                    lot = {}
-                    for f in s.get("filters", []):
-                        ft = f.get("filterType", "")
-                        if ft in ("LOT_SIZE", "MARKET_LOT_SIZE", "PRICE_FILTER"):
-                            lot[ft] = f
-                    return lot
-        except Exception:
-            pass
-        return {}
+        """LOT_SIZE + MARKET_LOT_SIZE + PRICE_FILTER for one symbol.
+
+        RAISES instead of swallowing. This used to catch every exception and
+        return {}, which made `_round_qty`/`_round_price` return their input
+        UNROUNDED — so one exchangeInfo timeout during a live entry sent the SL
+        with quantity 89.332934, Binance rejected it with -1013 Precision, and
+        the already-filled position was left with NO stop. An empty filter dict
+        is not a real Binance state, so it must never be a fallback.
+
+        Cached per symbol: the full exchange descriptor is ~1MB and this was
+        re-downloaded on every order placement (three per live entry). Filters
+        change at most weekly.
+        """
+        cached = self._lot_cache.get(symbol)
+        if cached is not None:
+            return cached
+
+        info = await self._public_request("fapi/v2/exchangeInfo")
+        for s in info.get("symbols", []):
+            if s.get("symbol") == symbol:
+                lot = {}
+                for f in s.get("filters", []):
+                    ft = f.get("filterType", "")
+                    if ft in ("LOT_SIZE", "MARKET_LOT_SIZE", "PRICE_FILTER"):
+                        lot[ft] = f
+                if not lot:
+                    raise BinanceAPIError(
+                        -1100, f"No LOT_SIZE/PRICE_FILTER filters for {symbol}")
+                self._lot_cache[symbol] = lot
+                return lot
+        raise BinanceAPIError(-1121, f"Invalid symbol {symbol} (no exchangeInfo entry)")
 
     def _round_qty(self, qty: float, lot_filters: dict) -> float:
         """Round quantity down to the LOT_SIZE step (MARKET_LOT_SIZE if present).
