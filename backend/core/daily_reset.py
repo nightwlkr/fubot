@@ -66,6 +66,36 @@ def limit_r_from(settings: Optional[dict]) -> float:
     return limit
 
 
+def limit_setting_row_value(row) -> Optional[Any]:
+    """The scalar a `Setting` row actually carries, or None if it carries none.
+
+    Mirrors the scalars-only acceptance rule of the Settings read path
+    (`routers/settings.py::get_trading_settings`, which drops a non-scalar row
+    value and uses the default) so a display path can never read a value the
+    breaker's loader would have discarded. NOT `load_bot_settings` (main.py) —
+    that one passes `row.value` through raw, which is precisely why the breaker
+    reaches the same answer via `limit_r_from` rejecting the un-floatable value
+    rather than via a filter.
+    Without this, a dict-shaped row read 5R on the dashboard while the breaker,
+    which rejects dicts and falls back to the 3.0 default, enforced 3R: the one
+    panel whose whole job is to tell you the truth overstated the allowance.
+
+    `PUT /settings/trading` writes bare scalars, so the dict branch the display
+    path used to carry was dead in practice -- but "dead in practice" is exactly
+    how the six-way divergence this de-duplication exists to remove survived in
+    the first place. Two parse rules for one column is the bug class; this makes
+    the rule shared rather than agreeing by luck.
+
+    Returns None (not a dict, not the inner value) for any shape the loader would
+    reject, so the caller can pass it straight to `limit_r_from` and land on the
+    same default the breaker lands on.
+    """
+    if row is None:
+        return None
+    value = row.value
+    return value if isinstance(value, (int, float, bool, str)) else None
+
+
 def used_r_from(summary: Optional[Any]) -> float:
     """R consumed against today's limit.
 

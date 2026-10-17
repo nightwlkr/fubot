@@ -7,9 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.daily_reset import today_utc, used_r_from, limit_r_from
+from backend.core.daily_reset import (
+    limit_r_from,
+    limit_setting_row_value,
+    today_utc,
+    used_r_from,
+)
 from backend.database import get_db
 from backend.models.daily_summary import DailySummary
+from backend.models.setting import Setting
 from backend.models.position import Position
 from backend.models.trade import Trade
 from backend.models.equity_log import EquityLog
@@ -107,10 +113,7 @@ async def dashboard_overview(
     equity_rows = eq_result.scalars().all()
 
     # Today's stats
-    # UTC, not local. The breaker resolves the trading day in UTC; on a host
-    # EAST of UTC (the VPS is Europe/Berlin, UTC+2) local time runs ahead, so
-    # between 22:00-24:00 UTC a local resolution returns TOMORROW -- a
-    # daily_summary row that does not exist yet, i.e. a freshly zeroed day.
+    # UTC, not local — see daily_reset.today_utc() for why this diverges.
     today = today_utc()
     daily_result = await db.execute(select(DailySummary).where(DailySummary.date == today))
     daily = daily_result.scalar_one_or_none()
@@ -164,9 +167,7 @@ async def today_stats(
     db: AsyncSession = Depends(get_db),
 ):
     user = await get_current_user_from_cookie(request, db)
-    # UTC, not local -- see dashboard_overview. Both endpoints must resolve the
-    # SAME trading day as the breaker, or the panel describes a day that is not
-    # the one being enforced.
+    # UTC, not local — see daily_reset.today_utc() for why this diverges.
     today = today_utc()
 
     result = await db.execute(select(DailySummary).where(DailySummary.date == today))
@@ -177,15 +178,15 @@ async def today_stats(
     # trading. It used to parse the setting unclamped and re-derive used_r
     # inline, which meant a 9999 row rendered "9999R remaining" while the bot
     # had already stopped.
-    from backend.models.setting import Setting
     settings_result = await db.execute(select(Setting).where(Setting.key == "daily_loss_limit_r"))
     setting = settings_result.scalar_one_or_none()
-    raw_limit = None
-    if setting is not None:
-        raw_limit = (setting.value.get("value")
-                     if isinstance(setting.value, dict)
-                     else setting.value)
-    limit_r = limit_r_from({"daily_loss_limit_r": raw_limit})
+    raw_limit = limit_setting_row_value(setting)
+    # A missing row, or one carrying a shape the breaker's loader rejects, is a
+    # NORMAL state (fresh DB, key not yet written) and this endpoint is polled
+    # every 15s — pass an empty mapping so limit_r_from returns the default
+    # silently instead of logging an ERROR on every poll.
+    limit_r = limit_r_from({"daily_loss_limit_r": raw_limit}
+                           if raw_limit is not None else {})
 
     # Only losses count toward the limit (a winning day must not trip -3R)
     # used_r_from(None) is 0.0, so the "no row yet" case needs no guard.
