@@ -1616,3 +1616,59 @@ async def _stats_async():
 
 async def _true_async():
     return True
+
+
+class TestRateLimiter:
+    """Regression: the Binance REST rate limiter must actually throttle.
+
+    The old implementation `await sleep()` while holding the lock and refilled
+    a flat 20 tokens/sec from an oversized 1200 bucket, so it never throttled —
+    the bot consumed Binance's real 2400-weight/min budget many times faster
+    than the limiter believed, tripping the IP limit (-1003 -> HTTP 400/429)
+    and blanking every signed call for ~60s."""
+
+    async def test_burst_then_sustained_rate(self):
+        import time as _time
+        from backend.services.binance_service import RateLimiter
+
+        r = RateLimiter(max_tokens=200, rate_per_sec=50.0)
+
+        # A burst of up to max_tokens is instant (bucket starts full)
+        t0 = _time.monotonic()
+        for _ in range(200):
+            await r.acquire(1)
+        assert _time.monotonic() - t0 < 0.5, "burst up to bucket size must not block"
+
+        # Beyond the bucket, the rate is capped at rate_per_sec — 100 more
+        # tokens at 50/s must take ~2s, not 0.
+        t1 = _time.monotonic()
+        for _ in range(100):
+            await r.acquire(1)
+        elapsed = _time.monotonic() - t1
+        assert elapsed >= 1.5, (
+            f"expected ~2s to drain 100 tokens at 50/s, got {elapsed:.2f}s — "
+            "the limiter is not throttling")
+
+    async def test_acquire_does_not_hold_lock_while_waiting(self):
+        """A blocked acquire must not serialise other acquirers behind it.
+
+        With the old sleep-under-lock, a task waiting for tokens held the lock
+        for the whole sleep, so every other caller queued behind it."""
+        import asyncio as _asyncio
+        from backend.services.binance_service import RateLimiter
+
+        r = RateLimiter(max_tokens=10, rate_per_sec=100.0)
+        # Drain the bucket so the next acquire must wait
+        for _ in range(10):
+            await r.acquire(1)
+
+        results = []
+
+        async def worker(n):
+            await r.acquire(1)
+            results.append(n)
+
+        # Launch 3 waiters concurrently; with sleep-under-lock they'd serialise
+        # (total ~0.03s each). With the fix they interleave on the same wait.
+        await _asyncio.gather(worker(1), worker(2), worker(3))
+        assert sorted(results) == [1, 2, 3]

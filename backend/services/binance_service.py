@@ -31,9 +31,22 @@ class BinanceAPIError(Exception):
 
 
 class RateLimiter:
-    """Token bucket rate limiter for Binance REST API (1200 weight/min)."""
+    """Token bucket rate limiter for Binance REST API.
 
-    def __init__(self, max_tokens: int = 1200, rate_per_sec: float = 20.0):
+    Sized to Binance Futures' real caps so the bot stays under them:
+    request WEIGHT 2400/min, plus ORDER/RAW-REQUEST 3000/day and 1200/5min.
+    The bucket refills at `rate_per_sec` tokens (weight) and holds at most
+    `max_tokens`, so a burst can never exceed the 1-min budget and the
+    sustained rate can never exceed the 5-min budget.
+
+    NOTE the earlier bug this replaces: `acquire` used to `await sleep()` while
+    holding the lock AND refill a flat 20 tokens/sec from an oversized 1200
+    bucket, so it never actually throttled — the bot consumed Binance's real
+    budget many times faster than the limiter believed. The sleep now happens
+    OUTSIDE the lock and the bucket is sized to the true 1-min cap.
+    """
+
+    def __init__(self, max_tokens: int = 2200, rate_per_sec: float = 36.0):
         self.max_tokens = max_tokens
         self.rate = rate_per_sec
         self._tokens = float(max_tokens)
@@ -41,18 +54,20 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     async def acquire(self, weight: int = 1):
-        async with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(self.max_tokens, self._tokens + elapsed * self.rate)
-            self._last_refill = now
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last_refill
+                self._tokens = min(self.max_tokens, self._tokens + elapsed * self.rate)
+                self._last_refill = now
 
-            if self._tokens < weight:
+                if self._tokens >= weight:
+                    self._tokens -= weight
+                    return
+                # compute the wait, then sleep OUTSIDE the lock so other tasks
+                # can keep consuming/refilling instead of serialising behind us
                 wait = (weight - self._tokens) / self.rate
-                await asyncio.sleep(wait)
-                self._tokens = 0.0
-            else:
-                self._tokens -= weight
+            await asyncio.sleep(wait)
 
 
 class BinanceService:
@@ -169,8 +184,26 @@ class BinanceService:
     # ---- Market Data (Public) ----
 
     async def get_klines(self, symbol: str, interval: str = "1h", limit: int = 100) -> list[dict]:
-        """GET /fapi/v1/klines"""
-        data = await self._public_request("fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+        """GET /fapi/v1/klines
+
+        Weight scales with `limit` per Binance's table (1-100→1, 101-200→2,
+        201-300→5, 301-500→10, 501-1000→10). The scan fetches 200 bars ×3
+        intervals ×24 symbols per pass, so declaring these as weight 1 let the
+        bot blow through the real budget ~2× faster than the limiter thought.
+        """
+        if limit <= 100:
+            kweight = 1
+        elif limit <= 200:
+            kweight = 2
+        elif limit <= 300:
+            kweight = 5
+        else:
+            kweight = 10
+        data = await self._public_request(
+            "fapi/v1/klines",
+            {"symbol": symbol, "interval": interval, "limit": limit},
+            weight=kweight,
+        )
         result = []
         for k in data:
             result.append({
@@ -254,16 +287,16 @@ class BinanceService:
     # ---- Account Data (Private) ----
 
     async def get_account_balance(self) -> list[dict]:
-        """GET /fapi/v2/balance"""
-        data = await self._signed_request("GET", "fapi/v2/balance")
+        """GET /fapi/v2/balance (weight 5)."""
+        data = await self._signed_request("GET", "fapi/v2/balance", weight=5)
         return [
             {"asset": a["asset"], "availableBalance": float(a.get("availableBalance", 0)), "initialMargin": float(a.get("initialMargin", 0))}
             for a in data
         ]
 
     async def get_position(self, symbol: str) -> dict:
-        """GET /fapi/v2/positionRisk — single symbol."""
-        data = await self._signed_request("GET", "fapi/v2/positionRisk", {"symbol": symbol})
+        """GET /fapi/v2/positionRisk — single symbol (weight 5)."""
+        data = await self._signed_request("GET", "fapi/v2/positionRisk", {"symbol": symbol}, weight=5)
         for p in data:
             if p["symbol"] == symbol and float(p.get("positionAmt", 0)) != 0:
                 return {
@@ -278,8 +311,8 @@ class BinanceService:
         return {}
 
     async def get_all_positions(self) -> list[dict]:
-        """GET /fapi/v2/positionRisk — all positions."""
-        data = await self._signed_request("GET", "fapi/v2/positionRisk")
+        """GET /fapi/v2/positionRisk — all positions (weight 5)."""
+        data = await self._signed_request("GET", "fapi/v2/positionRisk", weight=5)
         return [
             {
                 "symbol": p["symbol"],
@@ -459,8 +492,8 @@ class BinanceService:
         }
 
     async def get_open_orders(self, symbol: str) -> list[dict]:
-        """GET /fapi/v1/openOrders"""
-        data = await self._signed_request("GET", "fapi/v1/openOrders", {"symbol": symbol})
+        """GET /fapi/v1/openOrders (weight 1 when symbol-scoped)."""
+        data = await self._signed_request("GET", "fapi/v1/openOrders", {"symbol": symbol}, weight=1)
         return [
             {
                 "orderId": o.get("orderId"),
@@ -484,7 +517,7 @@ class BinanceService:
         invisible to the position-linked cancel and would otherwise survive
         the close."""
         data = await self._signed_request(
-            "GET", "fapi/v1/openAlgoOrders", {"symbol": symbol})
+            "GET", "fapi/v1/openAlgoOrders", {"symbol": symbol}, weight=1)
         return [
             {
                 "algoId": a.get("algoId"),
