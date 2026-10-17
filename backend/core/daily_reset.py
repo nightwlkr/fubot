@@ -5,7 +5,7 @@ both the engine's scan loop and request handlers concurrently).
 """
 import logging
 from datetime import datetime, date, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy import select
 
@@ -24,15 +24,18 @@ def today_utc() -> date:
 
     Every breaker decision is made in UTC, so every consumer must resolve the
     day in UTC too. Resolving it LOCALLY is a real divergence, not a cosmetic
-    one: on a UTC+2 host `date.today()` returns YESTERDAY between 22:00 and
-    24:00 UTC, so a consumer resolving it locally reads the previous day's
-    summary while the breaker reads today's -- for two hours every night.
+    one. On a host EAST of UTC (the VPS runs Europe/Berlin, UTC+2), local time
+    runs ahead: between 22:00 and 24:00 UTC it is already the next calendar day
+    there, so `date.today()` returns TOMORROW. A consumer resolving it locally
+    looks up tomorrow's `daily_summary` -- a row that does not exist yet -- and
+    renders an empty, fully-remaining day for two hours every night while the
+    breaker is enforcing today's real, over-limit row.
     """
     return datetime.now(timezone.utc).date()
 
 
-def limit_r_from(settings: dict) -> float:
-    """Daily loss limit in R (positive), clamped to `(0, MAX]`.
+def limit_r_from(settings: Optional[dict]) -> float:
+    """Daily loss limit in R (positive), rejecting anything outside `(0, MAX]`.
 
     SINGLE SOURCE for the limit. Shared by the breaker and every display path so
     a malformed row cannot make the panel disagree with the thing that halts
@@ -40,7 +43,12 @@ def limit_r_from(settings: dict) -> float:
     and rendered "limit 9999R / remaining 9999R" while the breaker -- correctly
     clamping to 3.0 -- had already stopped the bot for the day.
 
-    Fail-closed: unparseable or out-of-range falls back to the 3.0 default.
+    Fail-closed: an out-of-range or unparseable row is REJECTED to the 3.0
+    default, NOT clamped to the bound -- a row of 9999 must not buy a 9999R
+    allowance by sitting above MAX. The range test is NEGATED on purpose
+    (`not (0 < limit <= MAX)`) so NaN, which compares False against everything,
+    takes the fallback; the `limit <= 0 or limit > MAX` rewrite would let NaN
+    through and silently disable the breaker on real money.
     """
     raw = (settings or {}).get("daily_loss_limit_r",
                                -DEFAULT_DAILY_LOSS_LIMIT_R)
@@ -58,7 +66,7 @@ def limit_r_from(settings: dict) -> float:
     return limit
 
 
-def used_r_from(summary) -> float:
+def used_r_from(summary: Optional[Any]) -> float:
     """R consumed against today's limit.
 
     NET semantics, deliberately: only a losing day consumes R, and a winning day
@@ -68,8 +76,15 @@ def used_r_from(summary) -> float:
     the rate at which the per-strategy sample accumulates. See
     docs/superpowers/specs/2026-10-18-daily-limit-single-source-design.md
 
-    `summary` may be None (no row yet -- the pre-first-trade case) or have a
-    null `total_pnl_r` (a fresh un-flushed Numeric column).
+    `summary` is duck-typed -- anything exposing `.total_pnl_r` (the
+    `DailySummary` ORM row in production, a `SimpleNamespace` in tests). It may
+    be None (no row yet -- the pre-first-trade case) or have a null
+    `total_pnl_r` (a fresh un-flushed Numeric column).
+
+    Unlike `limit_r_from` this does NOT swallow a malformed non-numeric
+    `total_pnl_r`: the column is `Numeric` and only ever holds Decimal/float,
+    and raising here fails CLOSED -- the trade check aborts rather than
+    proceeding with an unknown used_r.
     """
     if summary is None:
         return 0.0

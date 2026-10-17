@@ -48,6 +48,15 @@ class TestLimitRFrom:
         assert limit_r_from({}) == pytest.approx(3.0)
         assert limit_r_from(None) == pytest.approx(3.0)
 
+    def test_nan_and_inf_fall_back_rather_than_disabling_the_breaker(self):
+        """The negated range check is what makes this safe: NaN fails every
+        comparison, so it takes the fallback. Rewriting it as
+        `if limit <= 0 or limit > MAX` lets NaN through, and a NaN limit makes
+        every `used_r >= limit` False -- the breaker silently off."""
+        from backend.core.daily_reset import limit_r_from
+        for junk in (float("nan"), float("inf"), float("-inf"), "nan", "inf"):
+            assert limit_r_from({"daily_loss_limit_r": junk}) == pytest.approx(3.0), junk
+
 
 # ----------------------------------------------------------------- used_r_from
 
@@ -86,22 +95,43 @@ class TestUsedRFrom:
 # -------------------------------------------------------------------- today_utc
 
 class TestTodayUtc:
-    def test_it_returns_the_utc_date_not_the_local_one(self, monkeypatch):
-        """23:30 UTC on a UTC+2 host is 01:30 LOCAL the next day. Under the old
-        `date.today()` the two disagreed for two hours every night."""
-        import time
+    def test_it_resolves_the_day_in_utc_and_returns_that_date(self, monkeypatch):
+        """23:30 UTC on a UTC+2 host is 01:30 LOCAL the next day, so a
+        local-time resolution returns 2026-03-16 while the breaker returns
+        2026-03-15. Asserting the tz ARGUMENT is what actually pins the
+        contract -- a fake that ignored tz would let a naive `datetime.now()`
+        pass, and the `date.today()` path is only caught by calendar luck."""
         from datetime import datetime, timezone
         import backend.core.daily_reset as dr
 
-        monkeypatch.setenv("TZ", "Europe/Berlin")
-        time.tzset()
-        try:
-            class _FixedUTC(datetime):
-                @classmethod
-                def now(cls, tz=None):
-                    return cls(2026, 3, 15, 23, 30, tzinfo=timezone.utc)
+        base = datetime(2026, 3, 15, 23, 30, tzinfo=timezone.utc)
+        seen = {}
 
-            monkeypatch.setattr(dr, "datetime", _FixedUTC)
-            assert dr.today_utc() == datetime(2026, 3, 15, tzinfo=timezone.utc).date()
-        finally:
-            time.tzset()
+        class _FixedUTC(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                seen["tz"] = tz
+                return base.astimezone(tz) if tz is not None else base.astimezone()
+
+        monkeypatch.setattr(dr, "datetime", _FixedUTC)
+        assert dr.today_utc() == base.date()
+        assert seen["tz"] is timezone.utc, "the trading day must be resolved in UTC"
+
+    def test_the_module_does_not_resolve_the_day_locally(self):
+        """Guards the `date.today()` path directly, which the fake-clock test
+        above cannot catch on its own.
+
+        Checked as an AST CALL rather than as a substring: the prose in
+        `today_utc`'s docstring must be able to NAME `date.today()` in order to
+        explain why it is not used, and a text search would forbid exactly that.
+        """
+        import ast
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[2]
+               / "backend/core/daily_reset.py").read_text()
+        called = set()
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "today"):
+                called.add(ast.unparse(node.func))
+        assert "date.today" not in called, f"local day resolution: {sorted(called)}"
