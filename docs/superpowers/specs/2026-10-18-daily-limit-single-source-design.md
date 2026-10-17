@@ -161,8 +161,14 @@ daily_loss_limit_hit = (COALESCE(-t.total_r, 0) >= :limit_r)
 
 - `-3.0` literal replaced by a bound parameter, read through `limit_r_from`
 - comparison flipped to mirror the breaker's own `used_r >= limit`
-- `COALESCE(-t.total_r, 0)` guards a **NULL** `total_r`, so the comparison — and
-  therefore `daily_loss_limit_hit` — can never come out NULL/indeterminate
+- `COALESCE(-t.total_r, 0)` is **defensive only** and guards nothing reachable:
+  the subquery already emits `COALESCE(SUM(pnl_r),0) as total_r`, so `total_r`
+  is non-NULL by the time the comparison reads it. The earlier claim here — that
+  it guards "a day with trades but no summed R" — is **factually wrong**: a
+  group whose `SUM(pnl_r)` is NULL (every `pnl_r` NULL) is already coalesced to
+  0 by the inner `COALESCE`. The explicit NULL guard is kept because it makes
+  the comparison's non-NULL-ness local and obvious; it is not a fix for
+  anything, and must not be cited as one.
 
 **`COALESCE` is not a floor, and must not be read as one.** It does not spell
 `max(0, …)`: on a +4.5R day it evaluates to `-4.5`. The winning day fails to

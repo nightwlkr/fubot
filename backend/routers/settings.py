@@ -389,15 +389,18 @@ async def exchange_sync(
             total_trades = t.cnt, wins = t.wins, losses = t.losses, breakeven = t.bes,
             total_pnl_r = t.total_r, total_pnl_usdt = t.total_usdt,
             worst_trade_r = t.worst_r, best_trade_r = t.best_r,
-            -- `used_r` is max(0, -total_r). The max() is NOT spelled here:
-            -- COALESCE only guards a NULL `total_r` (a day with trades but no
-            -- summed R), and a winning day is excluded because `limit_r` is
-            -- strictly POSITIVE -- -4.5 >= 3.0 is simply false. `limit_r_from`
-            -- only returns values in (0, MAX] (see TestLimitRFrom), so the two
-            -- spellings agree on every input it can produce. Do not "fix" this
-            -- into GREATEST(0, -total_r) for symmetry with used_r_from: it
-            -- would be equivalent, and the shared clamp is what actually keeps
-            -- the two answers equal.
+            -- `used_r` is max(0, -total_r). The max() is NOT spelled here, and
+            -- the COALESCE below is DEFENSIVE, not load-bearing: the subquery
+            -- already emits `COALESCE(SUM(pnl_r),0) as total_r`, so `total_r`
+            -- cannot be NULL by the time it is read. It is kept as an explicit
+            -- NULL guard, but it guards nothing reachable -- do not describe it
+            -- as protecting a real case. A winning day is excluded because
+            -- `limit_r` is strictly POSITIVE -- -4.5 >= 3.0 is simply false.
+            -- `limit_r_from` only returns values in (0, MAX] (see
+            -- TestLimitRFrom), so the two spellings agree on every input it can
+            -- produce. Do not "fix" this into GREATEST(0, -total_r) for symmetry
+            -- with used_r_from: it would be equivalent, and the shared clamp is
+            -- what actually keeps the two answers equal.
             daily_loss_limit_hit = (COALESCE(-t.total_r, 0) >= :limit_r)
         FROM (SELECT DATE(closed_at) as d, COUNT(*) as cnt,
             COUNT(*) FILTER (WHERE pnl_r > 0) as wins,

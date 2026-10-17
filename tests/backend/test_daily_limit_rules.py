@@ -809,8 +809,11 @@ class TestExchangeSyncLatch:
             assert run_async(_latch(0.0, limit)) is False, \
                 f"a flat day must never latch (limit={limit})"
 
-        # A NULL total_r (COALESCE's reason to exist) must not leave the latch
-        # NULL/indeterminate.
+        # A NULL total_r must not leave the latch NULL/indeterminate. Note this
+        # case is UNREACHABLE through the real statement — the subquery already
+        # emits `COALESCE(SUM(pnl_r),0) as total_r` — so the COALESCE in the
+        # comparison is a defensive guard, not a fix. The case is asserted on the
+        # extracted expression because that is what the expression accepts.
         assert run_async(_latch(None, 3.0)) is False
 
         # The configured limit is honoured in BOTH directions: -3.5R latches at
@@ -844,43 +847,87 @@ class TestExchangeSyncLatch:
 
 # ------------------------------------------------- re-duplication guard
 
+def _used_r_clamp_sites():
+    """Every `max(0, -x)` call site under `backend/`, as `file:lineno`, plus the
+    `used_r_from` definitions it may live in.
+
+    Matched on the SHAPE — a two-argument `max()` whose first argument is the
+    constant zero and whose second is a unary negation — and deliberately NOT on
+    the identifiers in the arguments.
+
+    That identifier assumption has now failed twice, both times silently, and
+    both times the guard went green over ZERO matches while reading as coverage:
+
+      1. the original literal substring `max(0.0, -float(` stopped existing the
+         day `used_r_from` hoisted the `float()` into a local;
+      2. the AST rewrite swapped the substring for
+         `"total_pnl_r" in <args> or "total_r" in <args>`, which hoisting the
+         float() defeats the same way — `ast.unparse` of the real call's
+         arguments is `'0.0'` and `'-value'`, neither of which mentions the
+         column. It matched zero sites.
+
+    A hoisted local is the NORMAL state of this function (it grew one to hold
+    the non-finite check), so an identifier-based guard is guaranteed to miss.
+    The negation shape survives hoisting: `-value` is still a `UnaryOp`, which
+    is exactly what the rewrite keys on.
+
+    As a bonus it removes a latent false positive: `"total_r"` is a substring of
+    `total_risk_distance`, so the old identifier test would have flagged an
+    unrelated `max(0.0, -total_risk_distance)`.
+    """
+    import ast
+    sites = []
+    homes = []
+    for p in sorted((REPO_ROOT / "backend").rglob("*.py")):
+        tree = ast.parse(p.read_text())
+        homes_here = [n for n in ast.walk(tree)
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and n.name == "used_r_from"]
+        for n in homes_here:
+            homes.append(f"{p.name}:{n.lineno}")
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "max"
+                    and len(node.args) == 2):
+                continue
+            zero, negated = node.args
+            if not (isinstance(zero, ast.Constant) and zero.value == 0
+                    and isinstance(negated, ast.UnaryOp)
+                    and isinstance(negated.op, ast.USub)):
+                continue
+            owner = next((f for f in homes_here
+                          if f.lineno <= node.lineno <= (f.end_lineno or 0)),
+                         None)
+            sites.append((f"{p.name}:{node.lineno}", owner))
+    return sites, homes
+
+
 class TestTheRulesExistInExactlyOnePlace:
+    def test_the_guard_finds_the_real_clamp_it_exists_to_protect(self):
+        """A guard that matches ZERO sites is worse than no guard, because it
+        reads as coverage. Both previous versions of this rule did exactly
+        that, unnoticed, and the docstring went on claiming otherwise — so the
+        positive case is asserted first and explicitly."""
+        sites, homes = _used_r_clamp_sites()
+        assert len(sites) == 1, f"expected exactly one max(0, -x) site, found {sites}"
+        assert sites[0][0].startswith("daily_reset.py"), sites
+        assert sites[0][1] is not None, \
+            f"the one clamp site {sites[0][0]} is not inside a used_r_from — " \
+            "the owner resolution is dead"
+        assert len(homes) == 1 and homes[0].startswith("daily_reset.py"), \
+            f"exactly one used_r_from must own the formula, found {homes}"
+
     def test_the_used_r_formula_is_written_once_in_the_repo(self):
         """The whole point of the change. A second inline copy is free to drift
         back out of sync with the breaker, which is the defect this removes.
 
-        Matched as an AST SHAPE, not as the literal `max(0.0, -float(`: the
-        original substring guard silently passed the day `used_r_from` grew the
-        non-finite guard and hoisted the float() into a local — the formula was
-        unchanged but the string no longer existed, so the guard went green over
-        ZERO matches. What it now asserts is structural: `used_r_from` is
-        defined once and owns the clamp, and no other function anywhere under
-        `backend/` floors a negated daily-pnl expression of its own."""
-        import ast
-        offenders = []
-        homes = []
-        for p in sorted((REPO_ROOT / "backend").rglob("*.py")):
-            tree = ast.parse(p.read_text())
-            homes_here = [n for n in ast.walk(tree)
-                          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                          and n.name == "used_r_from"]
-            for n in homes_here:
-                homes.append(f"{p.name}:{n.lineno}")
-            for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id == "max"
-                        and any("total_pnl_r" in ast.unparse(a)
-                                or "total_r" in ast.unparse(a) for a in node.args)):
-                    continue
-                owner = next((f for f in homes_here
-                              if f.lineno <= node.lineno <= (f.end_lineno or 0)),
-                             None)
-                if owner is None:
-                    offenders.append(f"{p.name}:{node.lineno}")
-        # daily_reset.used_r_from is the single legitimate home.
-        assert len(homes) == 1 and homes[0].startswith("daily_reset.py"), \
-            f"exactly one used_r_from must own the formula, found {homes}"
+        Structural, and keyed on the negation shape rather than on the column
+        names in the arguments — see `_used_r_clamp_sites` for why the name in
+        the argument is not a property of the formula (both prior guards
+        matched zero real sites once the float() was hoisted). It is verified
+        by mutation in both directions, including the hoisted form."""
+        sites, _ = _used_r_clamp_sites()
+        offenders = [site for site, owner in sites if owner is None]
         assert offenders == [], \
             f"the used_r formula is re-implemented outside used_r_from at {offenders}"
 

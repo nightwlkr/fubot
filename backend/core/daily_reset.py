@@ -118,7 +118,7 @@ def used_r_from(summary: Optional[Any]) -> float:
     proceeding with an unknown used_r.
 
     A NON-FINITE total is the same threat from the other side, and it fails
-    OPENED silently if it is left to `max()`: `max(0.0, -float("nan"))` is
+    OPEN silently if it is left to `max()`: `max(0.0, -float("nan"))` is
     **0.0**, because every comparison against NaN is False. A NaN daily total
     would therefore read as "nothing consumed" and disable the breaker for the
     day -- the exact mirror of the NaN-LIMIT case `limit_r_from` already

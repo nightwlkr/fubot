@@ -158,9 +158,21 @@ export default function Overview() {
   const wins = todayStats?.wins ?? 0
   const losses = todayStats?.losses ?? 0
   const trades = todayStats?.trades_count ?? 0
-  const limit = (todayStats?.daily_limit_status?.limit_r ?? 3)
-  const used = todayStats?.daily_limit_status?.used_r ?? 0
-  const remaining = limit - used
+  const limitStatus = todayStats?.daily_limit_status
+  const limit = (limitStatus?.limit_r ?? 3)
+  // `used_r` is null on exactly ONE path: the server hit its fail-closed case —
+  // `used_r_from` returns `inf` for a non-finite daily total so the breaker
+  // HALTS, and Pydantic serialises `inf` as JSON `null`, not `Infinity`.
+  // `null ?? 0` therefore read as "nothing consumed" and rendered a HALTED bot
+  // with a full green "3.00R left" bar — the panel denying the breaker fired,
+  // which is the whole failure class this panel's single-source change exists
+  // to remove. An unreadable consumed amount is the FULL limit, not zero, and
+  // that is also what the server's own `remaining_r` reports for it (0).
+  const used = (limitStatus?.used_r ?? limit)
+  // `remaining_r` comes from the server, which floors it at 0 and already gets
+  // the fail-closed case right. Recomputing `limit - used` from a nullable
+  // field is precisely what turned a halt into "3.00R left".
+  const remaining = (limitStatus?.remaining_r ?? Math.max(0, limit - used))
 
   return (
     <div className="space-y-6">
@@ -289,6 +301,9 @@ export default function Overview() {
               <span className="text-muted uppercase tracking-wide">Daily Limit</span>
               <span className={clsx('font-mono', remaining <= 0 ? 'text-danger' : 'text-muted')}>
                 {used.toFixed(2)}R / {limit}R
+                {limitStatus != null && limitStatus.used_r == null && (
+                  <span className="text-danger ml-1">(halted — daily total unreadable)</span>
+                )}
                 {remaining > 0 && <span className="text-success ml-1">({remaining.toFixed(2)}R left)</span>}
               </span>
             </div>

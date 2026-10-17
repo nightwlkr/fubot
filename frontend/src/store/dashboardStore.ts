@@ -28,8 +28,13 @@ export interface BotStatus {
 }
 
 export interface DailyLimitStatus {
-  used_r: number
+  // `used_r` is NULLABLE and the null is meaningful: on the server's
+  // fail-closed path (`used_r_from` returns `inf` for a non-finite daily total
+  // so the breaker halts) Pydantic serialises `inf` as JSON `null`. Never
+  // `?? 0` this — that renders a halted bot as a day with nothing consumed.
+  used_r: number | null
   limit_r: number
+  // Always a finite number: floored at 0 server-side, 0 on the halt path.
   remaining_r: number
 }
 
