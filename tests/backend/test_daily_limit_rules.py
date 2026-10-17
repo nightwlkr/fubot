@@ -305,3 +305,130 @@ class TestServiceDelegatesToHelpers:
                   if isinstance(n, ast.FunctionDef) and n.name == "today_utc")
         assert fn.lineno <= inline[0].lineno <= fn.end_lineno, \
             "the only inline day resolution must be inside today_utc itself"
+
+
+# --------------------------------------------------- dashboard/breaker parity
+
+@pytest.fixture()
+def auth(client, test_user):
+    from conftest import TEST_PASSWORD
+    res = client.post("/api/auth/login",
+                      json={"username": test_user.username,
+                            "password": TEST_PASSWORD})
+    assert res.status_code == 200, res.text
+    client.cookies.set("fubot_token", res.json()["token"])
+    return client
+
+
+class TestDashboardAgreesWithBreaker:
+    def test_the_dashboard_module_no_longer_recomputes_the_rules(self):
+        """Source contract. `date.today()` and an inline `max(0.0, -...)` are
+        exactly how the two divergences were introduced; if either reappears the
+        dashboard starts disagreeing with the breaker again."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[2]
+               / "backend/routers/dashboard.py").read_text()
+        assert "date.today()" not in src, \
+            "the trading day must be resolved in UTC via today_utc(), not locally"
+        assert "max(0.0, -float(" not in src, \
+            "used_r must come from used_r_from(), not an inline copy"
+
+    def test_the_dashboard_and_the_breaker_report_the_same_limit(self, auth):
+        """The live divergence: a 9999 row clamps in the breaker but not in the
+        dashboard, which then renders 9999R remaining while the bot has halted.
+
+        Both the DB row and the service's settings dict are set to 9999 so the
+        comparison isolates the CLAMPING bug — the settings *source* still
+        differs by design and is deliberately out of scope."""
+        from types import SimpleNamespace
+
+        from backend.config import settings as cfg
+        from backend.core.daily_reset import DailyResetService
+        from backend.models.setting import Setting
+        from conftest import run_async
+        from sqlalchemy import delete, select
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        async def _write(limit):
+            """Replace every `daily_loss_limit_r` row with `limit`, returning
+            the rows that were there before so they can be put back.
+
+            The dev database DOES carry a real -3.0 row, so this snapshots and
+            restores rather than deleting — dropping it would silently move the
+            breaker's allowance for every later test.
+
+            Own NullPool engine: the shared pool is loop-bound and the `client`
+            fixture already drove it on the TestClient's loop, so the pooled
+            connection would arrive attached to another loop (the pattern
+            established in test_strategy_breakdown)."""
+            engine = create_async_engine(cfg.DATABASE_URL, poolclass=NullPool)
+            try:
+                async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+                    existing = (await db.execute(
+                        select(Setting).where(Setting.key == "daily_loss_limit_r")
+                    )).scalars().all()
+                    previous = [r.value for r in existing]
+                    await db.execute(
+                        delete(Setting).where(Setting.key == "daily_loss_limit_r"))
+                    if limit is not None:
+                        db.add(Setting(key="daily_loss_limit_r",
+                                       value={"value": limit}))
+                    await db.commit()
+                    return previous
+            finally:
+                await engine.dispose()
+
+        async def _restore(previous):
+            engine = create_async_engine(cfg.DATABASE_URL, poolclass=NullPool)
+            try:
+                async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+                    await db.execute(
+                        delete(Setting).where(Setting.key == "daily_loss_limit_r"))
+                    for value in previous:
+                        db.add(Setting(key="daily_loss_limit_r", value=value))
+                    await db.commit()
+            finally:
+                await engine.dispose()
+
+        previous = run_async(_write(9999))
+        try:
+            body = auth.get("/api/dashboard/today").json()
+
+            # The breaker is fed the SAME daily row the dashboard read (its
+            # counters are echoed in the response), so `used_r` and
+            # `remaining_r` are real comparisons — a null factory reports
+            # used_r 0.0 and would disagree for a reason that has nothing to do
+            # with the clamp.
+            row = SimpleNamespace(
+                total_pnl_r=body["pnl_r"],
+                total_pnl_usdt=body["pnl_usdt"],
+                total_trades=body["trades_count"],
+                wins=body["wins"],
+                losses=body["losses"],
+                daily_loss_limit_hit=False)
+
+            class _Session:
+                async def execute(self, *a, **k):
+                    return SimpleNamespace(scalar_one_or_none=lambda: row)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            svc = DailyResetService(session_factory=lambda: _Session(),
+                                    settings={"daily_loss_limit_r": 9999})
+            breaker = run_async(svc.get_daily_stats())
+            assert breaker["limit_r"] == pytest.approx(3.0), \
+                "the 9999 row must already be rejected by the breaker"
+            assert body["daily_limit_status"]["limit_r"] \
+                == pytest.approx(breaker["limit_r"]), \
+                f"dashboard {body['daily_limit_status']} vs breaker {breaker}"
+            assert body["daily_limit_status"]["used_r"] \
+                == pytest.approx(breaker["used_r"])
+            assert body["daily_limit_status"]["remaining_r"] \
+                == pytest.approx(breaker["remaining_r"])
+        finally:
+            run_async(_restore(previous))
