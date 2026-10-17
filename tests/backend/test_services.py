@@ -1758,7 +1758,7 @@ class TestTrailStopNoStacking:
         class FakeFactory:
             def __call__(self): return FakeSession()
 
-        async def fake_cancel(position_id, symbol, keep_algo_id=None):
+        async def fake_cancel(position_id, symbol, keep_algo_id=None, keep_trigger=None):
             calls["keep"] = keep_algo_id
 
         pm = PositionManager.__new__(PositionManager)

@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/positions", tags=["positions"])
 
 
-async def _cancel_superseded_stops(binance, symbol: str, keep_algo_id) -> None:
+async def _cancel_superseded_stops(binance, symbol: str, keep_algo_id,
+                                    keep_trigger=None) -> None:
     """Cancel the symbol's other resting STOP_MARKET algos, keeping one.
 
     A manual stop change re-places the stop without removing the old one, which
@@ -25,23 +26,40 @@ async def _cancel_superseded_stops(binance, symbol: str, keep_algo_id) -> None:
     exchange rather than the orders table — the trail/manual paths never write
     their algoId back there.
 
-    Skips the sweep entirely when `keep_algo_id` is unknown: cancelling blind
-    would remove the stop we just placed and leave the position naked.
+    Keeps the new stop by algoId OR trigger price: the id from the place
+    response has not always matched the id in the list response, and matching
+    on id alone cancelled the NEW stop and kept the stale one (observed live).
+
+    Skips the sweep entirely when neither is known: cancelling blind would
+    remove the stop we just placed and leave the position naked.
     """
-    if keep_algo_id is None:
+    keep_id = str(keep_algo_id) if keep_algo_id is not None else None
+    keep_px = None
+    if keep_trigger is not None:
+        try:
+            keep_px = float(keep_trigger)
+        except (TypeError, ValueError):
+            keep_px = None
+    if keep_id is None and keep_px is None:
         logger.error(
-            "[%s] Stop sweep skipped — Binance returned no algoId for the new "
-            "stop, so it cannot be distinguished from the superseded ones. "
-            "Leaving all resting stops armed.", symbol)
+            "[%s] Stop sweep skipped — Binance returned neither an algoId nor a "
+            "trigger price for the new stop, so it cannot be distinguished from "
+            "the superseded ones. Leaving all resting stops armed.", symbol)
         return
-    keep = str(keep_algo_id)
+    px_tol = abs(keep_px) * 0.001 if keep_px else 0.0
     try:
         for algo in await binance.get_open_algo_orders(symbol):
             if str(algo.get("orderType")) != "STOP_MARKET":
                 continue
             algo_id = algo.get("algoId")
-            if algo_id is None or str(algo_id) == keep:
+            if algo_id is None:
                 continue
+            if keep_id is not None and str(algo_id) == keep_id:
+                continue
+            if keep_px is not None:
+                trig = float(algo.get("triggerPrice") or 0)
+                if trig > 0 and abs(trig - keep_px) <= px_tol:
+                    continue
             try:
                 await binance.cancel_algo_order(symbol, int(algo_id))
                 logger.info("[%s] Cancelled superseded stop %s (%s) after a manual "
@@ -188,7 +206,8 @@ async def update_position(
                     detail=f"Could not place the stop on Binance ({exc}). "
                            f"The database was NOT changed.")
             # Cancel any superseded resting stop, keeping the one just placed.
-            await _cancel_superseded_stops(binance, position.symbol, new_algo_id)
+            await _cancel_superseded_stops(binance, position.symbol, new_algo_id,
+                                        keep_trigger=float(body.stop_loss))
 
     if body.stop_loss is not None:
         position.stop_loss = body.stop_loss

@@ -147,6 +147,125 @@ class TestStopSweepFailSafe:
         assert cancelled == [], "int/str algoId mismatch must not cancel the live stop"
 
 
+class TestStopSweepMatchesOnPriceNotJustId:
+    """The live DOTUSDT failure.
+
+    The algoId returned by `modify_position_stop` did not match the algoId
+    reported by `get_open_algo_orders` for the order it had just placed. The
+    sweep — which only compared ids — therefore cancelled the NEW stop and kept
+    the stale one. The DB recorded a profit lock (1.18366) that the exchange
+    never had (1.1522), and because `_check_profit_trailing`'s one-way guard
+    reads the DB stop, it then refused to re-trail: the position would have run
+    a profitable trade into a full -1R loss.
+
+    The sweep now keeps a stop matched by algoId OR by trigger price (within a
+    relative tolerance, since the exchange stores the tick-ROUNDED price).
+    """
+
+    @staticmethod
+    def _pm(algos, cancelled):
+        from backend.core.position_manager import PositionManager
+
+        class FakeBinance:
+            async def get_open_algo_orders(self, symbol):
+                return algos
+
+            async def cancel_algo_order(self, symbol, algo_id):
+                cancelled.append(algo_id)
+                return {}
+
+        pm = PositionManager.__new__(PositionManager)
+        pm.binance = FakeBinance()
+        pm.session_factory = object()
+        return pm
+
+    async def test_mismatched_id_still_keeps_the_new_stop_by_price(self):
+        cancelled = []
+        # The place response said algoId=999; the list says 222 for the stop at
+        # the price we just placed. 111 is the stale original.
+        algos = [
+            {"algoId": 111, "orderType": "STOP_MARKET", "triggerPrice": "1.1522"},
+            {"algoId": 222, "orderType": "STOP_MARKET", "triggerPrice": "1.1774"},
+        ]
+        pm = self._pm(algos, cancelled)
+
+        await pm._cancel_active_sl(366, "DOTUSDT", keep_algo_id=999,
+                                   keep_trigger=1.17741129)
+
+        assert cancelled == [111], (
+            "the stop matching the trigger price we just placed must survive even "
+            f"when the algoId does not match. Cancelled: {cancelled}")
+        assert 222 not in cancelled, \
+            "cancelling the new stop is what left DOTUSDT unprotected"
+
+    async def test_price_match_tolerates_tick_rounding(self):
+        """The exchange stores the rounded trigger (1.1522), the caller passes
+        the unrounded value (1.15222258) — so compare with a tolerance."""
+        cancelled = []
+        algos = [{"algoId": 111, "orderType": "STOP_MARKET", "triggerPrice": "1.1522"}]
+        pm = self._pm(algos, cancelled)
+
+        await pm._cancel_active_sl(1, "DOTUSDT", keep_algo_id=999,
+                                   keep_trigger=1.15222258)
+
+        assert cancelled == [], \
+            "a tick-rounded exchange price must still match the unrounded value"
+
+    async def test_stale_stop_at_a_different_price_is_still_cancelled(self):
+        """The price match must not become so loose it keeps the old stop."""
+        cancelled = []
+        algos = [
+            {"algoId": 111, "orderType": "STOP_MARKET", "triggerPrice": "1.1522"},
+            {"algoId": 222, "orderType": "STOP_MARKET", "triggerPrice": "1.1774"},
+        ]
+        pm = self._pm(algos, cancelled)
+
+        await pm._cancel_active_sl(1, "DOTUSDT", keep_algo_id=None,
+                                   keep_trigger=1.17741129)
+
+        assert cancelled == [111], "only the stop at the new price is kept"
+
+    async def test_sweep_is_skipped_when_neither_id_nor_price_is_known(self):
+        cancelled = []
+        algos = [{"algoId": 111, "orderType": "STOP_MARKET", "triggerPrice": "1.1522"}]
+        pm = self._pm(algos, cancelled)
+
+        await pm._cancel_active_sl(1, "DOTUSDT", keep_algo_id=None,
+                                   keep_trigger=None)
+
+        assert cancelled == [], \
+            "with nothing to anchor on, cancelling blind would leave the "\
+            "position naked"
+
+    async def test_take_profit_orders_are_never_cancelled(self):
+        cancelled = []
+        algos = [
+            {"algoId": 111, "orderType": "STOP_MARKET", "triggerPrice": "1.1522"},
+            {"algoId": 333, "orderType": "TAKE_PROFIT_MARKET", "triggerPrice": "1.2409"},
+        ]
+        pm = self._pm(algos, cancelled)
+
+        await pm._cancel_active_sl(1, "DOTUSDT", keep_algo_id=999,
+                                   keep_trigger=1.17741129)
+
+        assert 333 not in cancelled, "the TP must survive a stop sweep"
+
+    def test_trail_passes_the_new_stop_price_to_the_sweep(self):
+        """The caller must supply keep_trigger, or the price match never fires."""
+        import backend.core.position_manager as pm
+        src = inspect.getsource(pm.PositionManager._trail_stop_to_be)
+        assert "keep_trigger=new_stop" in src, \
+            "_trail_stop_to_be must pass the price it just placed"
+
+    def test_manual_stop_route_passes_the_new_price_too(self):
+        import backend.routers.positions as rp
+        src = inspect.getsource(rp.update_position)
+        assert "keep_trigger=" in src
+        src2 = inspect.getsource(rp._cancel_superseded_stops)
+        assert "keep_trigger" in src2
+        assert "triggerPrice" in src2, "must match on price, not id alone"
+
+
 # ---------------------------------------------------------------------------
 # 3. Close-before-cancel on the live exit path
 # ---------------------------------------------------------------------------
@@ -662,8 +781,10 @@ class TestManualStopChangeReachesTheExchange:
     def test_manual_sweep_is_also_fail_safe(self):
         import backend.routers.positions as rp
         src = inspect.getsource(rp._cancel_superseded_stops)
-        assert "keep_algo_id is None" in src, \
+        assert "keep_id is None and keep_px is None" in src, \
             "sweeping blind would cancel the new stop and leave the position naked"
+        assert "triggerPrice" in src, \
+            "must match the new stop on price, not id alone"
 
     def test_patch_validates_the_stop_is_on_the_correct_side(self):
         import backend.routers.positions as rp

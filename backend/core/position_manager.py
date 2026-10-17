@@ -565,7 +565,9 @@ class PositionManager:
                 await self._restore_stop(position_id, old_stop)
                 return
             new_algo_id = new_order.get("orderId") if isinstance(new_order, dict) else None
-            await self._cancel_active_sl(position_id, symbol, keep_algo_id=new_algo_id)
+            await self._cancel_active_sl(position_id, symbol,
+                                         keep_algo_id=new_algo_id,
+                                         keep_trigger=new_stop)
 
         if self.alerts:
             await self.alerts.be_trailing(symbol)
@@ -591,7 +593,8 @@ class PositionManager:
         except Exception:
             logger.exception("Failed to revert stop for position %s", position_id)
 
-    async def _cancel_active_sl(self, position_id: int, symbol: str, keep_algo_id=None) -> None:
+    async def _cancel_active_sl(self, position_id: int, symbol: str,
+                                 keep_algo_id=None, keep_trigger=None) -> None:
         """Cancel the symbol's resting STOP_MARKET algo orders (before re-placing).
 
         WHY THIS SWEEPS THE EXCHANGE (not the orders table): the trail path
@@ -603,33 +606,59 @@ class PositionManager:
         profit-lock stop could. Sweeping `openAlgoOrders` — the same sweep used
         on close — cancels every resting stop regardless of how it got there.
 
-        `keep_algo_id` is the stop just placed by this call; it must NOT be
-        cancelled (place-then-cancel would otherwise kill the new stop too).
+        `keep_algo_id` / `keep_trigger` identify the stop just placed by this
+        call; neither may be cancelled (place-then-cancel would otherwise kill
+        the new stop too). The stop is matched on BOTH the algoId AND the
+        trigger price, because the id returned by the place response has not
+        always matched the id in the list response — matching on id alone made
+        the sweep cancel the NEW stop and keep the stale one, so the DB
+        recorded a profit lock the exchange never had (observed live on
+        DOTUSDT: DB stop 1.18366, exchange stop 1.1522, and the one-way guard
+        then blocked the re-trail, so the position would have ridden to a full
+        loss).
 
-        FAIL-SAFE: if the caller could not tell us which order is the new one,
-        we skip the sweep entirely. Sweeping blind would cancel the stop we just
-        placed along with the stale ones, leaving the position NAKED on the
+        FAIL-SAFE: if we cannot identify the new stop by EITHER id or price,
+        the sweep is skipped entirely. Sweeping blind would cancel the stop we
+        just placed along with the stale ones, leaving the position NAKED on the
         exchange — strictly worse than the extra stops this sweep exists to
         remove. Stacked reduce-only stops can only close the position early;
         no stop at all lets it run unbounded.
         """
         if self.session_factory is None or self.binance is None:
             return
-        if keep_algo_id is None:
+
+        keep_id = str(keep_algo_id) if keep_algo_id is not None else None
+        keep_px = None
+        if keep_trigger is not None:
+            try:
+                keep_px = float(keep_trigger)
+            except (TypeError, ValueError):
+                keep_px = None
+        if keep_id is None and keep_px is None:
             logger.warning(
-                f"[{symbol}] Stop sweep skipped — the exchange did not return an "
-                f"algoId for the stop just placed, so the new stop cannot be "
-                f"distinguished from the stale ones. Leaving all resting stops "
-                f"armed rather than risk cancelling the live one.")
+                f"[{symbol}] Stop sweep skipped — the exchange gave us neither an "
+                f"algoId nor a trigger price for the stop just placed, so it "
+                f"cannot be distinguished from the stale ones. Leaving all resting "
+                f"stops armed rather than risk cancelling the live one.")
             return
-        keep = str(keep_algo_id)
+
+        # The exchange stores the tick-ROUNDED trigger, so compare with a
+        # relative tolerance rather than for exact equality.
+        px_tol = abs(keep_px) * 0.001 if keep_px else 0.0
+
         try:
             for algo in await self.binance.get_open_algo_orders(symbol):
                 if str(algo.get("orderType")) != "STOP_MARKET":
                     continue
                 algo_id = algo.get("algoId")
-                if algo_id is None or str(algo_id) == keep:
+                if algo_id is None:
                     continue
+                if keep_id is not None and str(algo_id) == keep_id:
+                    continue
+                if keep_px is not None:
+                    trig = float(algo.get("triggerPrice") or 0)
+                    if trig > 0 and abs(trig - keep_px) <= px_tol:
+                        continue  # this is the stop we just placed
                 try:
                     await self.binance.cancel_algo_order(symbol, int(algo_id))
                     logger.info(
