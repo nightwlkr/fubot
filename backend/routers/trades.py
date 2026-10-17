@@ -78,6 +78,17 @@ def _apply_trade_filters(
     return query
 
 
+# Registered TWICE, deliberately.
+#
+# Starlette's `redirect_slashes` answers GET /api/trades (no trailing slash)
+# with a 307 to /api/trades/ — and that redirect DISCARDS THE QUERY STRING.
+# axios follows it transparently, so `?side=SHORT` became `/api/trades/` and the
+# client got EVERY trade back with a 200 and no error: the Trade Log filters
+# silently did nothing.
+#
+# Registering the empty-path variant means there is nothing to redirect, so the
+# filters survive no matter how the client spells the URL.
+@router.get("", response_model=TradeListResponse, include_in_schema=False)
 @router.get("/", response_model=TradeListResponse)
 async def list_trades(
     request: Request,

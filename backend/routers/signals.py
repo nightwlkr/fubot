@@ -44,6 +44,16 @@ def _format_signal(s: Signal) -> SignalResponse:
     )
 
 
+# Registered TWICE, deliberately.
+#
+# Starlette's `redirect_slashes` answers GET /api/signals (no trailing slash) with a
+# 307 to /api/signals/ — and that redirect DISCARDS THE QUERY STRING. axios follows it
+# transparently, so `?side=SHORT` became `/api/signals/` and the client got EVERY row
+# back with a 200 and no error: the filters silently did nothing.
+#
+# Registering the empty-path variant means there is nothing to redirect, so the
+# filters survive no matter how the client spells the URL.
+@router.get("", include_in_schema=False)
 @router.get("/", response_model=SignalListResponse)
 async def list_signals(
     request: Request,
