@@ -639,17 +639,12 @@ def _latch_expression():
 class TestExchangeSyncLatch:
     def test_the_latch_threshold_is_not_a_hardcoded_literal(self):
         """It was `total_r <= -3.0`, so setting the limit to -5 left the sync
-        latching days at -3 — the configured limit was ignored entirely."""
+        latching days at -3 — the configured limit was ignored entirely.
+        Bound-parameter plumbing is pinned separately by
+        test_the_computed_limit_is_what_gets_bound."""
         expr = _latch_expression()
         assert "-3.0" not in expr, "the sync must bind :limit_r, not hardcode -3.0"
         assert ":limit_r" in expr
-
-    def test_the_latch_comparison_mirrors_the_breaker(self):
-        """The breaker tests `used_r >= limit` where used_r = max(0, -total_r).
-        The sync tested the raw `total_r <= -3.0`: a different comparison of the
-        same quantity, with no floor, so a winning day could latch."""
-        assert "COALESCE(-t.total_r, 0) >= :limit_r" in _latch_expression(), \
-            "the sync must apply the same max(0, ...) floor as used_r_from"
 
     def test_the_bound_limit_goes_through_the_shared_clamp(self):
         """Whatever row is in the DB, the sync and the breaker must latch on the
@@ -668,15 +663,59 @@ class TestExchangeSyncLatch:
         assert "limit_r_from" in called, \
             "the sync must CALL limit_r_from, not merely name it"
 
-    def test_the_expression_is_a_floored_comparison_over_a_bound_limit(self):
+    def test_the_computed_limit_is_what_gets_bound(self):
+        """The last hardcoded-literal vector, and the one that re-opens this exact
+        bug: writing `{"cutoff": cutoff, "limit_r": 3.0}` passes every other test
+        in this class. #1 only bans `-3.0` inside the clause, #4 supplies
+        `limit_r` itself, and #3 only proves `limit_r_from` is *called* — nothing
+        proved its *result* reached the statement. This closes that plumbing."""
+        import ast
+        import inspect
+        import textwrap
+        import backend.routers.settings as s
+        tree = ast.parse(textwrap.dedent(inspect.getsource(s.exchange_sync)))
+        bound = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Dict)
+                 and any(getattr(k, "value", None) == "limit_r" for k in n.keys)]
+        assert bound, "the sync must bind a limit_r param"
+        # The binding value must be the NAME the helper's result is assigned to,
+        # so `3.0`, `-3.0`, `limit_r_from(...)` inline or `DEFAULT_...` all fail.
+        value = bound[0].values[[getattr(k, "value", None) == "limit_r"
+                                 for k in bound[0].keys].index(True)]
+        assert isinstance(value, ast.Name) and value.id == "limit_r", (
+            "the limit_r param must bind the limit_r_from() result, not a "
+            f"literal — got {ast.unparse(value)!r}")
+
+    def test_the_winning_day_is_excluded_by_the_positive_limit_not_a_floor(self):
+        """What the expression actually does, stated plainly.
+
+        `COALESCE(-t.total_r, 0)` is NOT a `max(0, ...)`: on a +4.5R day it
+        evaluates to -4.5. The day fails to latch because `limit_r` is strictly
+        POSITIVE, so `-4.5 >= 3.0` is false. The `COALESCE` guards a NULL
+        `total_r` (a day with trades but no summed R), which would otherwise make
+        the comparison NULL and leave `daily_loss_limit_hit` NULL too.
+
+        The equivalence with `used_r_from` rests on `limit_r_from` only ever
+        returning values in (0, MAX] — pinned by TestLimitRFrom above — so both
+        spellings agree on every input the limit can actually take."""
+        from backend.core.daily_reset import (MAX_DAILY_LOSS_LIMIT_R,
+                                              DEFAULT_DAILY_LOSS_LIMIT_R)
+
+        # Every value the clamp can return, across the whole domain it accepts.
+        for limit in (1e-9, 1.0, DEFAULT_DAILY_LOSS_LIMIT_R, MAX_DAILY_LOSS_LIMIT_R):
+            assert limit > 0, "the whole argument above rests on this"
+
+    def test_the_expression_excludes_winning_days_and_honours_the_bound_limit(self):
         """Behavioural, against the real DB — but it WRITES nothing.
 
         The extracted expression is evaluated over synthetic day totals instead
         of by seeding `trades` (a Trade row needs a closed position, a strategy
         type and a symbol, and a leaked one shows up on the Performance page).
-        This proves the three properties the source-contract tests above can only
-        assert textually: the floor, the `>=` spelling, and that the threshold is
-        the bound parameter rather than a constant.
+        This proves the two properties the source-contract tests above can only
+        assert textually: that the configured limit is the bound parameter rather
+        than a constant, and that a winning day never latches — via the
+        POSITIVITY of the limit, not via a floor in the expression (see
+        test_the_winning_day_is_excluded_by_the_positive_limit_not_a_floor).
         """
         from sqlalchemy import text
         from conftest import run_async
@@ -700,14 +739,18 @@ class TestExchangeSyncLatch:
             finally:
                 await engine.dispose()
 
-        # A winning day latches at NO limit — the floor the old raw comparison
-        # lacked. Stated for several limits, since a floor applied only at 3R
-        # would be a coincidence.
+        # A winning day latches at NO limit, because -total_r is negative and the
+        # limit is positive. Stated for several limits, since this would only
+        # hold while the bound limit stays > 0.
         for limit in (1.0, 3.0, 5.0):
             assert run_async(_latch(4.5, limit)) is False, \
                 f"a winning day must never latch (limit={limit})"
             assert run_async(_latch(0.0, limit)) is False, \
                 f"a flat day must never latch (limit={limit})"
+
+        # A NULL total_r (COALESCE's reason to exist) must not leave the latch
+        # NULL/indeterminate.
+        assert run_async(_latch(None, 3.0)) is False
 
         # The configured limit is honoured in BOTH directions: -3.5R latches at
         # 3R, does not at 5R, and -5.5R latches at 5R.
@@ -715,6 +758,14 @@ class TestExchangeSyncLatch:
         assert run_async(_latch(-3.5, 5.0)) is False, \
             "raising the limit to -5R must stop the sync latching at -3R"
         assert run_async(_latch(-5.5, 5.0)) is True
+
+    def test_the_comparison_is_the_breakers_own_spelling(self):
+        """The breaker tests `used_r >= limit`; the sync must test the same
+        quantity with the same direction. `total_r <= -3.0` is the mirror-image
+        spelling of that question, and the two are only equivalent while the
+        threshold stays a POSITIVE number."""
+        assert "COALESCE(-t.total_r, 0) >= :limit_r" in _latch_expression(), \
+            "the sync must compare -total_r against the limit with >="
 
     def test_the_sync_still_sets_absolute_aggregates_rather_than_accumulating(self):
         """`update_daily_summary` is an increment; this statement is not.

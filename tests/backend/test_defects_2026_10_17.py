@@ -259,6 +259,22 @@ from backend.models.position import Position as PositionModel  # noqa: E402
 DAILY_SYMBOL = "ZZDAILYUSDT"
 
 
+def _exchange_sync_recompute_sql():
+    """The 48h recompute statement, EXTRACTED from `exchange_sync` at test time.
+
+    This used to be a hand-copy of the statement. It drifted: when the latch was
+    rewritten to bind the configured limit, the copy kept `total_r <= -3.0` and
+    still passed, because this test only pins the SET-vs-accumulate property. The
+    next reader would have taken it for the current SQL. Extracting it makes that
+    class of drift impossible — a statement that stops parsing or stops binding
+    fails here.
+    """
+    import backend.routers.settings as settings_router
+    src = inspect.getsource(settings_router.exchange_sync)
+    start = src.index('text("""') + len('text("""')
+    return src[start:src.index('"""', start)]
+
+
 class RecordingDailyReset:
     """Stands in for DailyResetService and records update_daily_summary calls."""
 
@@ -432,25 +448,8 @@ class TestFlattenNotifiesTheDailyAccumulator:
             assert after_increment["total_pnl_r"] == pytest.approx(-0.05)
 
             async with Session() as session:
-                await session.execute(text("""
-                    UPDATE daily_summary SET
-                        total_trades = t.cnt, wins = t.wins, losses = t.losses,
-                        breakeven = t.bes,
-                        total_pnl_r = t.total_r, total_pnl_usdt = t.total_usdt,
-                        worst_trade_r = t.worst_r, best_trade_r = t.best_r,
-                        daily_loss_limit_hit = (t.total_r <= -3.0)
-                    FROM (SELECT DATE(closed_at) as d, COUNT(*) as cnt,
-                        COUNT(*) FILTER (WHERE pnl_r > 0) as wins,
-                        COUNT(*) FILTER (WHERE pnl_r < 0) as losses,
-                        COUNT(*) FILTER (WHERE pnl_r = 0) as bes,
-                        COALESCE(SUM(pnl_r),0) as total_r,
-                        COALESCE(SUM(pnl_usdt),0) as total_usdt,
-                        COALESCE(MIN(pnl_r),0) as worst_r,
-                        COALESCE(MAX(pnl_r),0) as best_r
-                        FROM trades WHERE closed_at >= :cutoff
-                        GROUP BY DATE(closed_at)) t
-                    WHERE daily_summary.date = t.d
-                """), {"cutoff": cutoff})
+                await session.execute(text(_exchange_sync_recompute_sql()),
+                                      {"cutoff": cutoff, "limit_r": 3.0})
                 await session.commit()
 
             after_recompute = await daily.get_daily_stats()
