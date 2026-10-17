@@ -912,6 +912,10 @@ class TestCloseAllPositions:
             assert trade is not None and trade.exit_reason == "MANUAL_CLOSE"
         finally:
             async with Session() as s:
+                # close_all_positions -> _close_position INSERTS a Trade. Deleting
+                # only the Position leaked one CLOSEALLUSDT row per full-suite
+                # run (33 had piled up in the dev DB). See tests/AGENTS.md.
+                await s.execute(delete(Trade).where(Trade.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()

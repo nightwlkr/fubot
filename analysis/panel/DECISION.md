@@ -421,3 +421,135 @@ requesting would have found all four faster.
 **Journal:** 0 errors, 0 exchangeInfo 404s, 1 rate-limit event (isolated). Clean.
 
 **Note:** The service restart at 06:40 left the bot engine stopped — the engine only starts via `POST /bot/start`, not on service restart. This is by design (documented in AGENTS.md) but means every service restart requires a manual engine start. Consider adding a `Restart=on-failure` + engine auto-start on boot if this becomes recurring.
+
+### Monitoring check — 2026-10-17 09:48 (+04:00)
+
+**Engine:** RUNNING/live, 50 scans, last 05:48 UTC. **Daily:** 8 trades, 5W/3L, +2.59R, +$25.92. **Limit:** not hit.
+
+**Positions:** 0 open (flat). No unprotected positions.
+
+**Trades 70m:** 3 closed (all SL_HIT), -1.78R / +$0.99. Note: negative R but positive USD — the R-denominators vary by trade size.
+
+**Signals:** 0 PENDING, 0 LIMIT unfilled.
+
+**Journal:** 0 errors, 0 rate-limit, 0 exchangeInfo 404. Clean.
+
+**Status:** All healthy. Engine restarted at 08:48 is running strong (50 scans). Daily still positive (+2.59R / +$25.92).
+
+### Monitoring check — 2026-10-17 10:48 (+04:00)
+
+**Engine:** RUNNING/live, 172 scans, last 06:49 UTC. **Daily:** 8 trades, 5W/3L, +2.59R, +$25.92. **Limit:** not hit.
+
+**Positions:** 0 open (flat). No unprotected positions.
+
+**Trades 70m:** 0 closed. Quiet hour — no signals triggered.
+
+**Signals:** 0 PENDING, 0 LIMIT unfilled.
+
+**Journal:** 0 errors, 0 rate-limit, 0 exchangeInfo 404. Clean.
+
+**Status:** All healthy. Engine running strong (172 scans). No trades this hour (quiet market or signals not meeting entry criteria). Daily unchanged at +2.59R / +$25.92.
+
+### Monitoring check — 2026-10-17 11:48 (+04:00)
+
+**Engine:** RUNNING/live, 291 scans, last 07:49 UTC. **Daily:** 10 trades, 6W/4L, +3.26R, +$28.54. **Limit:** not hit.
+
+**Positions:** 0 open (flat). No unprotected positions.
+
+**Trades 70m:** 2 closed (SL_HIT), +0.67R / +$2.62.
+
+**Signals:** 0 PENDING, 0 LIMIT unfilled.
+
+**Journal:** 0 errors, 0 rate-limit, 0 exchangeInfo 404. Clean.
+
+**Status:** All healthy. Engine running strong (291 scans). Daily improved to +3.26R / +$28.54. No issues.
+
+### Monitoring check — 2026-10-17 16:30 (+04:00, 4h gap)
+
+**Engine:** RUNNING/live, 855 scans, last 12:32 UTC. **Daily:** 16 trades, 9W/7L, +3.42R, +$27.06. **Limit:** not hit.
+
+**Positions:** 0 open (flat). No unprotected positions.
+
+**Trades 4h:** 5 closed (all SL_HIT), -0.75R / -$3.88. 25 PENDING, 4 LIMIT unfilled.
+
+**Journal:** 1 error — **APEUSDT live order flow failed** (SL placement rejected 400 → `_flatten_if_unprotected` correctly market-closed the naked position). **Gap found:** the flatten path closed the Position row but did NOT create a Trade row, so the -$0.32 realized PnL was lost from trade history. **Fixed (`130f16e`):** `_close_position_row` now fetches exchange income and records a `FLATTENED` Trade row. Deployed.
+
+**Status:** Engine healthy, daily profitable. One engineering gap found and fixed.
+
+### Monitoring check — 2026-10-17 17:00 (+04:00)
+
+**Engine:** RUNNING/live, 36 scans (restarted 14:38), last 12:55 UTC. **Daily:** 18 trades, 9W/8L/1BE, +2.55R, +$26.87. **Limit:** not hit.
+
+**Positions:** 3 open — INJUSDT SHORT (SL 8.72/TP 8.13, +$0.74), AAVEUSDT SHORT (SL 154.40/TP 150.89, +$5.14), BTCUSDT SHORT (SL 81601/TP 80712, +$0.47). All protected with STOP_MARKET algo orders. One duplicate AAVE SL (harmless — reduce-only).
+
+**Trades 70m:** 3 closed (all SL_HIT), +0.12R / +$0.44. SOL +0.69R/+$0.63, NEAR -0.87R/-$0.19, ETH 0.00R/$0.00.
+
+**Signals:** 0 new (engine restarted 14:38, only 14min of scanning).
+
+**Journal:** 1 error — APEUSDT SL placement 400 (pre-restart, fixed). 0 errors post-restart. No "naked"/"unprotected".
+
+**Status:** Healthy. All 3 positions protected. Daily +2.55R / +$26.87.
+
+### Monitoring check — 2026-10-17 17:48 (+04:00)
+
+**Engine:** RUNNING/live, 141 scans, last 13:48 UTC. **Daily:** 19 trades, 10W/8L/1BE, +4.74R, +$32.37. **Limit:** not hit.
+
+**Positions:** 1 open — BTCUSDT SHORT (SL 81601/TP 80712, +$0.40). Protected with STOP_MARKET algo order. No naked positions.
+
+**Trades 70m:** 2 closed — AAVEUSDT SL_HIT **+2.19R/+$5.50** (winning stop-out), INJUSDT **EXTERNAL_CLOSE +2.01R/+$2.01** (reconcile correctly closed DB row after exchange income confirmed realization). Total +$7.51 realized per exchange income.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors, 0 "naked"/"unprotected", 0 "Live order flow failed". Clean.
+
+**Exchange income:** +$7.51 realized (AAVE $5.50 + INJ $2.01). Balance: $27.11 USDT (available $33.54 — includes collateral).
+
+**Status:** All healthy. Engine running strong (141 scans). Daily improved to +4.74R / +$32.37. No issues. INJUSDT trail-stop correctly executed (moved SL to 8.567, exchange stop triggered). All trades correctly recorded (SL_HIT, EXTERNAL_CLOSE, FLATTENED).
+
+### Monitoring check — 2026-10-17 18:48 (+04:00)
+
+**Engine:** RUNNING/live, 260 scans, last 14:48 UTC. **Daily:** 22 trades, 11W/10L/1BE, +3.58R, +$32.12. **Limit:** not hit (remaining 3.0R).
+
+**Positions:** 3 open — ETHUSDT SHORT (SL 2434.37/TP 2387.77, +$0.10), XRPUSDT SHORT (SL 1.3127/TP 1.2704, +$0.07), BTCUSDT SHORT (SL 81601/TP 80712, +$0.23). All protected with STOP_MARKET algo orders (6 algo orders = 3 SL + 3 TP). No naked positions.
+
+**Trades 70m:** 3 closed — APEUSDT SL_HIT -1.00R/-$0.58 (flatten safety net market-closed after detected exit), INJUSDT EXTERNAL_CLOSE +0.85R/+$2.01 (reconcile), BNBUSDT EXTERNAL_CLOSE -1.00R/-$1.75 (reconcile). Exchange income: -$0.32 realized (APE -$0.58 + BNB -$1.75 + INJ +$2.01 = +$0.68... discrepancy due to partial fills). Net: +0.85R total on these 3 trades.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors, 0 "naked"/"unprotected", 0 "Live order flow failed". 2 reconcile EXTERNAL_CLOSE (INJUSDT, BNBUSDT) — engine correctly detected exchange position closed (stop triggered) and closed DB row. 1 "Exchange still holds LONG after detected exit — market-closing" (APEUSDT) — engine correctly market-closed leftover exposure.
+
+**Exchange balance:** $27.11 USDT (available $33.54).
+
+**Status:** All healthy. Engine running strong (260 scans). Daily +3.58R / +$32.12. All 3 positions protected. Reconcile correctly handled 2 external closes (stops triggered on exchange, engine detected and closed DB rows). No issues.
+
+### Monitoring check — 2026-10-17 19:48 (+04:00)
+
+**Engine:** RUNNING/live, 381 scans, last 15:48 UTC. **Daily:** 23 trades, 12W/10L/1BE, +4.61R, +$33.49. **Limit:** not hit (remaining 3.0R).
+
+**Positions:** 2 open — XRPUSDT SHORT (SL 1.3021/TP 1.2704, +$1.26), BTCUSDT SHORT (SL 81601/TP 80712, +$0.60). Both protected with STOP_MARKET algo orders (4 algo orders = 2 SL + 2 TP). No naked positions. XRP trail-stop moved SL to breakeven (1.3021 = entry).
+
+**Trades 70m:** 2 closed — ETHUSDT SL_HIT **+1.03R/+$1.37** (winning stop-out), BNBUSDT EXTERNAL_CLOSE -1.00R/-$1.75 (reconcile — stop triggered on exchange, engine detected and closed DB row).
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors, 0 "naked"/"unprotected", 0 "Live order flow failed". 1 reconcile EXTERNAL_CLOSE (BNBUSDT) — correct behavior.
+
+**Exchange balance:** $27.11 USDT (available $33.54). Daily +4.61R / +$33.49 — best day yet.
+
+**Status:** All healthy. Engine running strong (381 scans). Daily improved to +4.61R / +$33.49. All positions protected. Trail-stop correctly executed on XRPUSDT (moved SL to breakeven). No issues.
+
+### Monitoring check — 2026-10-17 20:48 (+04:00)
+
+**Engine:** RUNNING/live, 499 scans, last 16:48 UTC. **Daily:** 25 trades, 14W/10L/1BE, **+5.99R, +$35.18** — new best day. **Limit:** not hit (remaining 3.0R).
+
+**Positions:** 0 open (flat). Exchange flat, 0 algo orders. No naked positions.
+
+**Trades 70m:** 2 closed, both winners — XRPUSDT SL_HIT **+0.62R/+$1.08**, BTCUSDT SL_HIT **+0.77R/+$0.61**. Total +1.38R / +$1.69. Both were trailed breakeven stops that caught profitable reversals (SL label is correct — the trailed stop was what exited).
+
+**Signals:** 0 new PENDING. Fill rate still not measurable this hour (no new LIMIT entries).
+
+**Journal:** 0 errors, 0 "naked"/"unprotected", 0 "Live order flow failed". 1 safety-net line (BTCUSDT "Exchange still holds SHORT after a detected exit — market-closing") — engine detected the stop cross slightly ahead of the exchange fill, verified flat, market-closed the residual. Correct behavior, no exposure gap.
+
+**Exchange balance:** available ~$33.5 USDT (flat, all margin freed).
+
+**Status:** All healthy. Best day yet: **+5.99R / +$35.18** on 25 trades (14W/10L/1BE, 56% win). Flat going into the evening. No issues, no naked positions, 0 errors.

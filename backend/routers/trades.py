@@ -206,10 +206,17 @@ async def trade_stats(
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         query = query.where(Trade.closed_at >= cutoff)
     result = await db.execute(query)
-    trades = [float(t.pnl_r or 0) for t in result.scalars().all()]
+    rows = result.scalars().all()
+    # Both columns are Numeric and come back as Decimal. Coerce through float()
+    # before any arithmetic — a NULL would raise TypeError inside sum(), and a
+    # bare Decimal would not serialise as a JSON number.
+    trades = [float(t.pnl_r or 0) for t in rows]
+    usd = [float(t.pnl_usdt or 0) for t in rows]
 
     total = len(trades)
     wins = sum(1 for r in trades if r > 0)
+    losses = sum(1 for r in trades if r < 0)
+    breakevens = sum(1 for r in trades if r == 0)
     win_rate = (wins / total * 100) if total > 0 else 0.0
     avg_r = (sum(trades) / total) if total > 0 else 0.0
     best_trade = max(trades, default=0.0)
@@ -221,6 +228,10 @@ async def trade_stats(
         avg_r=round(avg_r, 4),
         best_trade=best_trade,
         worst_trade=worst_trade,
+        wins=wins,
+        losses=losses,
+        breakevens=breakevens,
+        total_pnl_usdt=round(sum(usd), 2),
     )
 
 

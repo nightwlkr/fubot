@@ -35,6 +35,10 @@ interface TradeStats {
   avg_r: number
   best_trade: number
   worst_trade: number
+  wins: number
+  losses: number
+  breakevens: number
+  total_pnl_usdt: number
 }
 
 const PAGE_SIZE = 50
@@ -199,17 +203,40 @@ export default function TradeLog() {
 
       {/* Stats Summary */}
       {stats && (
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
             { label: 'Total Trades', value: stats.total_trades.toString() },
+            {
+              label: 'Total Wins',
+              value: stats.wins.toString(),
+              className: 'text-success',
+              // A breakeven is neither a win nor a loss, so wins + losses alone
+              // will not add up to Total Trades. Surfacing the count keeps the
+              // row reconciling on screen instead of looking like a bug.
+              sub: stats.breakevens > 0 ? `+${stats.breakevens} BE` : undefined,
+            },
+            {
+              label: 'Total Losses',
+              value: stats.losses.toString(),
+              className: stats.losses > 0 ? 'text-danger' : undefined,
+            },
             { label: 'Win Rate', value: `${stats.win_rate.toFixed(1)}%` },  // backend sends percent
+            {
+              label: 'Total P&L',
+              // USD, not R: 1R is not constant — it falls from ~$11.48 to ~$2
+              // whenever `max_position_notional_pct` binds on a tight stop, so
+              // a single R total would not describe the money.
+              value: `${stats.total_pnl_usdt >= 0 ? '+' : '-'}$${Math.abs(stats.total_pnl_usdt).toFixed(2)}`,
+              className: stats.total_pnl_usdt >= 0 ? 'text-success' : 'text-danger',
+            },
             { label: 'Avg R', value: `${stats.avg_r >= 0 ? '+' : ''}${stats.avg_r.toFixed(2)}R` },
             { label: 'Best Trade', value: `${stats.best_trade >= 0 ? '+' : ''}${stats.best_trade.toFixed(2)}R`, className: stats.best_trade >= 0 ? 'text-success' : 'text-danger' },
             { label: 'Worst Trade', value: `${stats.worst_trade.toFixed(2)}R`, className: 'text-danger' },
-          ].map(({ label, value, className }) => (
+          ].map(({ label, value, className, sub }) => (
             <Card key={label} className="p-3">
               <p className="text-xs text-muted uppercase tracking-wide">{label}</p>
               <p className={clsx('text-lg font-mono font-bold mt-0.5', className)}>{value}</p>
+              {sub && <p className="text-xs text-muted font-mono">{sub}</p>}
             </Card>
           ))}
         </div>

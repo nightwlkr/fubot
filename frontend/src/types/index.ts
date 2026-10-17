@@ -34,6 +34,14 @@ export interface TradeStats {
   avg_r: number
   best_trade: number
   worst_trade: number
+  wins: number
+  losses: number
+  /** Neither a win nor a loss. `wins + losses` will not reconcile with
+   *  `total_trades` without it, so the Wins tile shows it as a suffix. */
+  breakevens: number
+  /** Summed dollar P&L. Every R figure on this page is normalised, and 1R
+   *  varies with whether the notional cap bound, so USD is the honest total. */
+  total_pnl_usdt: number
 }
 
 export interface MonthlyReturn {
