@@ -221,3 +221,46 @@ Different population.
 **Journal:** 13 errors + 47 rate-limit events in 70m — BUT all from **before** the f8838cb rate-limiter fix (timestamped ~03:40, before the 04:20 restart). **0 rate-limit events in 30 min post-fix.** 1 error post-fix (the FILUSDT "Exchange still holds LONG after a detected exit" — the _ensure_flat safety net working as designed).
 
 **Status:** All clean. Rate-limiter fix confirmed working (f8838cb). Trail-stop fix confirmed (f3810be). Full review batch deployed (d9213ce).
+
+## Deploy record — 2026-10-17
+
+Two commits pushed to `main` and deployed to `contabo01:/opt/fubot`
+(`git pull` → `npm run build` → `systemctl restart fubot`).
+
+- **`c8f6f18`** — Performance page wiring (equity curve records total balance
+  not free margin; Monthly Returns derives from `trades`; `mode=live|paper|all`
+  filtering defaulting to live; `/performance/strategies` accepts `days`;
+  range state lifted to one shared selection; stat cards poll) + the test-suite
+  DB leak + the stale `RISK_PERCENT` bound. Caught pre-deploy: production runs
+  `risk_percent=5.0` while `config.py` said `le=2.0`, so the new bounds would
+  have 422'd the operator's own live setting. Both widened to `le=10.0` with a
+  test asserting every currently-live production value is accepted.
+- **`e34e90b`** — **urgent production fix**: `get_lot_size` had been switched
+  from `fapi/v1/exchangeInfo` to `fapi/v2/exchangeInfo`, which does not exist
+  (v2 is the COIN-M path). Combined with the same commit's correct
+  fail-closed `raise`, every order placement aborted with a 404. This shipped
+  in `d9213ce` — the two defects had cancelled out until the raise was added.
+  Verified live on the VPS after deploy: filters load, `round_qty(89.332934) →
+  89.332`, `round_price(83629.37) → 83629.3`.
+
+**Lesson worth keeping:** two bugs, one masking the other. A silently-swallowed
+404 hid a wrong endpoint path; making the failure loud then broke live order
+placement. "Fail closed" is only safe once the call it wraps is known to work —
+the fix for one defect must be re-verified end-to-end, not just unit-tested.
+
+Production audit (read-only, before deploying): 44 trades, all `mode=live`,
+0 corrupt rows, 0 placeholder entries, 0 leaked test rows. **No data cleanup
+needed in production.** The 20 corrupt rows are local-only.
+
+`equity_log` (1,085 rows of free-margin readings, range 28.43–211.24) backed up
+to `~/equity_log_backup_20261017.csv` (local) and `/tmp/eq.csv` (VPS), then
+cleared so the curve restarts on true account balance. New rows are written by
+the deployed code and are NOT comparable to the backed-up ones.
+
+Post-deploy state: service active, `/health` 200, journal clean, one open
+position (DOTUSDT LONG 554.2 @ 1.1718, SL trailed to BE 1.1718, TP 1.24093)
+protected by LIMIT + STOP_MARKET + TAKE_PROFIT_MARKET algo orders.
+**The engine is STOPPED** — a restart does not auto-start it; press
+Start → Live in the dashboard.
+
+303 backend tests pass; frontend builds clean, lint 0 errors.
