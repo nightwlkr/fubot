@@ -19,6 +19,63 @@ DEFAULT_DAILY_LOSS_LIMIT_R = 3.0
 MAX_DAILY_LOSS_LIMIT_R = 20.0
 
 
+def today_utc() -> date:
+    """The trading day.
+
+    Every breaker decision is made in UTC, so every consumer must resolve the
+    day in UTC too. Resolving it LOCALLY is a real divergence, not a cosmetic
+    one: on a UTC+2 host `date.today()` returns YESTERDAY between 22:00 and
+    24:00 UTC, so a consumer resolving it locally reads the previous day's
+    summary while the breaker reads today's -- for two hours every night.
+    """
+    return datetime.now(timezone.utc).date()
+
+
+def limit_r_from(settings: dict) -> float:
+    """Daily loss limit in R (positive), clamped to `(0, MAX]`.
+
+    SINGLE SOURCE for the limit. Shared by the breaker and every display path so
+    a malformed row cannot make the panel disagree with the thing that halts
+    trading. Before this was shared, the dashboard parsed the setting unclamped
+    and rendered "limit 9999R / remaining 9999R" while the breaker -- correctly
+    clamping to 3.0 -- had already stopped the bot for the day.
+
+    Fail-closed: unparseable or out-of-range falls back to the 3.0 default.
+    """
+    raw = (settings or {}).get("daily_loss_limit_r",
+                               -DEFAULT_DAILY_LOSS_LIMIT_R)
+    try:
+        limit = abs(float(raw))
+    except (TypeError, ValueError):
+        logger.error("daily_loss_limit_r=%r is not a number — falling back to "
+                     "%sR", raw, DEFAULT_DAILY_LOSS_LIMIT_R)
+        return DEFAULT_DAILY_LOSS_LIMIT_R
+    if not (0 < limit <= MAX_DAILY_LOSS_LIMIT_R):
+        logger.error("daily_loss_limit_r=%r is out of range (0, %s] — falling "
+                     "back to %sR", raw, MAX_DAILY_LOSS_LIMIT_R,
+                     DEFAULT_DAILY_LOSS_LIMIT_R)
+        return DEFAULT_DAILY_LOSS_LIMIT_R
+    return limit
+
+
+def used_r_from(summary) -> float:
+    """R consumed against today's limit.
+
+    NET semantics, deliberately: only a losing day consumes R, and a winning day
+    can never trip the breaker. Gross-loss counting (wins never offset) was
+    proposed and declined -- at the live 53% loss rate it halts after ~3 losses
+    (roughly 5-6 trades) against a `max_daily_trades` of 12, which would halve
+    the rate at which the per-strategy sample accumulates. See
+    docs/superpowers/specs/2026-10-18-daily-limit-single-source-design.md
+
+    `summary` may be None (no row yet -- the pre-first-trade case) or have a
+    null `total_pnl_r` (a fresh un-flushed Numeric column).
+    """
+    if summary is None:
+        return 0.0
+    return max(0.0, -float(summary.total_pnl_r or 0))
+
+
 class DailyResetService:
     """Tracks cumulative daily PnL in R units, enforces -3R hard stop, resets at UTC midnight."""
 
