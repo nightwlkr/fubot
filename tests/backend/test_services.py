@@ -1278,13 +1278,19 @@ class TestLiveModeSafety:
 
     async def test_trail_stop_cancels_old_sl_before_placing_new(self):
         """BE-trailing must cancel the old exchange SL before placing the new
-        one — otherwise two active SLs remain (observed live on 3 positions)."""
-        from sqlalchemy import select, delete
+        one — otherwise two active SLs remain (observed live on 3 positions).
+
+        The cancel now sweeps the symbol's resting STOP_MARKET orders on the
+        EXCHANGE (via get_open_algo_orders), not the `orders` DB table: the
+        trail path never writes its new algoId back to the table, so the table
+        only ever knew the original entry SL and every trail stacked. This test
+        asserts the exchange sweep cancels the resting stop and keeps the one
+        just placed."""
+        from sqlalchemy import delete
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
         from backend.config import settings as cfg
         from backend.core.position_manager import PositionManager
         from backend.models.position import Position
-        from backend.models.order import Order
         engine = create_async_engine(cfg.DATABASE_URL)
         Session = async_sessionmaker(engine, expire_on_commit=False)
         SYM = "DUPSLTST"
@@ -1292,15 +1298,11 @@ class TestLiveModeSafety:
         placed = []
         try:
             async with Session() as s:
-                await s.execute(delete(Order).where(Order.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 p = Position(symbol=SYM, side="SHORT", entry_price=100.0, quantity=1.0,
                              stop_loss=105.0, take_profit=90.0, status="OPEN")
                 s.add(p); await s.flush()
                 pos_id = p.id
-                # an existing active SL algo order for this position
-                s.add(Order(position_id=pos_id, symbol=SYM, side="BUY",
-                            order_type="STOP_MARKET", quantity=1.0, binance_order_id=555))
                 await s.commit()
 
             class RecBinance:
@@ -1310,6 +1312,14 @@ class TestLiveModeSafety:
                 async def modify_position_stop(self, symbol, side, stop_price, qty):
                     placed.append((symbol, side, stop_price))
                     return {"orderId": 2}
+                async def get_open_algo_orders(self, symbol):
+                    # The exchange has the ORIGINAL stop (555) resting; the new
+                    # stop (2) is placed by modify_position_stop and must be
+                    # kept by the sweep.
+                    return [
+                        {"algoId": 555, "orderType": "STOP_MARKET", "triggerPrice": 105.0},
+                        {"algoId": 2, "orderType": "STOP_MARKET", "triggerPrice": 100.0},
+                    ]
             async def _noop(*a, **k):
                 return None
             alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
@@ -1321,10 +1331,10 @@ class TestLiveModeSafety:
             await pm._trail_stop_to_be(pos_id, 100.0)
 
             assert 555 in cancelled, f"old SL not cancelled before re-placing: {cancelled}"
+            assert 2 not in cancelled, f"the just-placed stop (2) must not be cancelled: {cancelled}"
             assert placed == [(SYM, "SHORT", 100.0)], f"new SL not placed: {placed}"
         finally:
             async with Session() as s:
-                await s.execute(delete(Order).where(Order.symbol == SYM))
                 await s.execute(delete(Position).where(Position.symbol == SYM))
                 await s.commit()
             await engine.dispose()
@@ -1672,3 +1682,82 @@ class TestRateLimiter:
         # (total ~0.03s each). With the fix they interleave on the same wait.
         await _asyncio.gather(worker(1), worker(2), worker(3))
         assert sorted(results) == [1, 2, 3]
+
+
+class TestTrailStopNoStacking:
+    """Regression: BE/profit-trailing must not stack exchange STOP_MARKET orders.
+
+    `_cancel_active_sl` used to look up the stop to cancel via the `orders` DB
+    table, but the trail path (`modify_position_stop`) never writes its new
+    algoId back — so the table only knew the ORIGINAL entry SL. Cancelling it
+    cancelled a dead order and left every trailed stop armed, stacking stops
+    until the widest (the original entry stop) closed the position before any
+    profit-lock stop triggered. Now it sweeps the symbol's resting stops on the
+    exchange and keeps only the one just placed."""
+
+    async def test_cancel_active_sl_sweeps_exchange_stops(self, monkeypatch):
+        from backend.core.position_manager import PositionManager
+
+        cancelled = []
+
+        class FakeBinance:
+            async def get_open_algo_orders(self, symbol):
+                return [
+                    {"algoId": 1, "orderType": "STOP_MARKET", "triggerPrice": 100.0},
+                    {"algoId": 2, "orderType": "STOP_MARKET", "triggerPrice": 101.0},
+                    {"algoId": 3, "orderType": "TAKE_PROFIT_MARKET", "triggerPrice": 110.0},
+                ]
+
+            async def cancel_algo_order(self, symbol, algo_id):
+                cancelled.append(algo_id)
+
+        pm = PositionManager.__new__(PositionManager)
+        pm.session_factory = object()  # non-None so the guard passes
+        pm.binance = FakeBinance()
+
+        # keep_algo_id=2 is the stop just placed; it must NOT be cancelled.
+        # The TP (algoId 3) must NOT be cancelled either — only STOP_MARKET.
+        await pm._cancel_active_sl(position_id=1, symbol="XUSDT", keep_algo_id=2)
+        assert sorted(cancelled) == [1], (
+            f"expected only the stale stop (1) cancelled, got {sorted(cancelled)}")
+
+    async def test_trail_passes_new_algo_id_as_keep(self, monkeypatch):
+        """_trail_stop_to_be must pass modify_position_stop's orderId as keep."""
+        from backend.core.position_manager import PositionManager
+        from backend.models.position import Position
+        from decimal import Decimal
+
+        kept = {}
+
+        class FakeBinance:
+            async def modify_position_stop(self, symbol, side, stop_price, quantity):
+                return {"orderId": 999, "symbol": symbol, "side": "SELL", "status": "NEW"}
+
+        calls = {}
+
+        class FakeSession:
+            async def get(self, model, pid):
+                p = Position(id=pid, symbol="XUSDT", side="LONG", status="OPEN",
+                             entry_price=Decimal("100"), stop_loss=Decimal("99"),
+                             quantity=Decimal("1"))
+                return p
+            async def commit(self): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+
+        class FakeFactory:
+            def __call__(self): return FakeSession()
+
+        async def fake_cancel(position_id, symbol, keep_algo_id=None):
+            calls["keep"] = keep_algo_id
+
+        pm = PositionManager.__new__(PositionManager)
+        pm.session_factory = FakeFactory()
+        pm.binance = FakeBinance()
+        pm._mode = "live"
+        pm.alerts = None
+        pm._cancel_active_sl = fake_cancel
+
+        await pm._trail_stop_to_be(position_id=1, new_stop=Decimal("101"))
+        assert calls.get("keep") == 999, (
+            f"expected keep_algo_id=999 (the new stop), got {calls.get('keep')}")

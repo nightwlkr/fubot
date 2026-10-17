@@ -524,12 +524,13 @@ class PositionManager:
         # leaves it open and unprotected on the exchange (observed live).
         if self._mode == "live" and symbol and qty:
             try:
-                await self.binance.modify_position_stop(symbol, side, new_stop, qty)
+                new_order = await self.binance.modify_position_stop(symbol, side, new_stop, qty)
             except Exception as e:
                 logger.error(f"[{symbol}] Failed to trail exchange stop to BE: {e}")
                 await self._restore_stop(position_id, old_stop)
                 return
-            await self._cancel_active_sl(position_id, symbol)
+            new_algo_id = new_order.get("orderId") if isinstance(new_order, dict) else None
+            await self._cancel_active_sl(position_id, symbol, keep_algo_id=new_algo_id)
 
         if self.alerts:
             await self.alerts.be_trailing(symbol)
@@ -555,31 +556,38 @@ class PositionManager:
         except Exception:
             logger.exception("Failed to revert stop for position %s", position_id)
 
-    async def _cancel_active_sl(self, position_id: int, symbol: str) -> None:
-        """Cancel the position's active STOP_MARKET algo orders (before re-placing).
+    async def _cancel_active_sl(self, position_id: int, symbol: str, keep_algo_id=None) -> None:
+        """Cancel the symbol's resting STOP_MARKET algo orders (before re-placing).
 
-        Prevents duplicate active SL orders when BE-trailing moves the stop —
-        placing a new stop without cancelling the old leaves both active.
+        WHY THIS SWEEPS THE EXCHANGE (not the orders table): the trail path
+        (`modify_position_stop`) posts a new STOP_MARKET but never writes its
+        `algoId` back to the `orders` table, so the table only ever knows about
+        the ORIGINAL entry SL. Cancelling from the table therefore cancelled a
+        dead order and left every trailed stop armed — stacking stops until the
+        widest one (the original entry stop) closed the position before any
+        profit-lock stop could. Sweeping `openAlgoOrders` — the same sweep used
+        on close — cancels every resting stop regardless of how it got there.
+
+        `keep_algo_id` is the stop just placed by this call; it must NOT be
+        cancelled (place-then-cancel would otherwise kill the new stop too).
         """
-        if self.session_factory is None:
+        if self.session_factory is None or self.binance is None:
             return
+        keep = str(keep_algo_id) if keep_algo_id is not None else None
         try:
-            from backend.models.order import Order as OrderModel
-            from sqlalchemy import select
-            async with self.session_factory() as session:
-                rows = (await session.execute(
-                    select(OrderModel).where(
-                        OrderModel.position_id == position_id,
-                        OrderModel.order_type == "STOP_MARKET",
-                    ))).scalars().all()
-            for row in rows:
-                if not row.binance_order_id:
+            for algo in await self.binance.get_open_algo_orders(symbol):
+                if str(algo.get("orderType")) != "STOP_MARKET":
+                    continue
+                algo_id = algo.get("algoId")
+                if algo_id is None or str(algo_id) == keep:
                     continue
                 try:
-                    await self.binance.cancel_algo_order(symbol, int(row.binance_order_id))
-                    logger.info(f"[{symbol}] Cancelled old SL algo order {row.binance_order_id} before re-placing")
+                    await self.binance.cancel_algo_order(symbol, int(algo_id))
+                    logger.info(
+                        f"[{symbol}] Cancelled stale SL algo order {algo_id} "
+                        f"(trigger {algo.get('triggerPrice')}) before re-placing")
                 except Exception as e:
-                    logger.debug(f"[{symbol}] Cancel old SL {row.binance_order_id} (likely filled): {e}")
+                    logger.debug(f"[{symbol}] Cancel stale SL {algo_id} (likely filled): {e}")
         except Exception:
             logger.exception("Failed to cancel active SL for position %s", position_id)
 
