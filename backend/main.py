@@ -3,7 +3,7 @@ import logging
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -245,16 +245,37 @@ if _FRONTEND_DIST.is_dir():
     # forward the 307 manually and 404 for unknown `/api/*` paths so
     # axios treats them as real misses instead of HTML responses.
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def spa_fallback(full_path: str):
+    async def spa_fallback(request: Request, full_path: str):
         from fastapi import HTTPException
         from fastapi.responses import RedirectResponse
         if full_path.startswith(("api/", "ws", "health", "docs", "openapi")):
             if full_path.startswith("api/") and not full_path.endswith("/"):
-                return RedirectResponse(url=f"/{full_path}/", status_code=307)
+                # PRESERVE THE QUERY STRING. A 307 to the slashed form drops
+                # it, which silently discards every filter parameter — the same
+                # failure as Starlette's own redirect_slashes. The four listing
+                # routers now register both "/" and "" so this branch is only
+                # reached for paths with no route at all, but a filter-stripping
+                # redirect should not exist in our own code either.
+                target = f"/{full_path}/"
+                qs = request.url.query
+                if qs:
+                    target = f"{target}?{qs}"
+                return RedirectResponse(url=target, status_code=307)
             raise HTTPException(status_code=404, detail="Not Found")
         idx = _FRONTEND_DIST / "index.html"
         if idx.is_file():
-            return FileResponse(idx)
+            # NO CACHE on the shell. Vite content-hashes the asset filenames, so
+            # index.html is the only thing that can go stale — a cached shell
+            # pins the browser to the previous bundle after a deploy and the
+            # new code silently never runs.
+            return FileResponse(
+                idx,
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         return {"message": "FUBOT API — Automated Binance Futures Trading Bot"}
 else:
     logger.warning("frontend/dist not found at %s — SPA will not be served", _FRONTEND_DIST)

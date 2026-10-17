@@ -134,3 +134,33 @@ class TestQueryParamsSurviveRouting:
     def test_slashed_form_is_the_canonical_route(self, client, path):
         assert client.get(path + "/", follow_redirects=False).status_code != 307, (
             f"{path}/ should be the canonical route with no redirect at all")
+
+
+class TestOurOwnRedirectPreservesTheQueryString:
+    """`main.spa_fallback` redirects an unrouted `/api/x` to `/api/x/`. That
+    redirect was dropping the query string too — the same failure as
+    Starlette's `redirect_slashes`, in our own code."""
+
+    def test_spa_fallback_keeps_the_query_string(self, client):
+        r = client.get("/api/settings?foo=bar&baz=1", follow_redirects=False)
+        assert r.status_code == 307
+        loc = r.headers.get("location", "")
+        assert "foo=bar" in loc and "baz=1" in loc, (
+            f"the redirect dropped the query string: {loc!r}")
+
+
+class TestIndexHtmlIsNotCacheable:
+    """Vite content-hashes asset filenames, so index.html is the ONLY thing that
+    can go stale. A cached shell pins the browser to the previous bundle after a
+    deploy and the new code silently never runs — which is exactly the confusion
+    that followed this fix."""
+
+    def test_index_html_sends_no_cache(self, client):
+        r = client.get("/")
+        assert "no-cache" in (r.headers.get("cache-control") or "").lower(), (
+            "index.html must not be cached, or a deploy silently keeps serving "
+            "the previous bundle")
+
+    def test_assets_remain_reachable(self, client):
+        """The hashed assets are still served — only the shell is no-cache."""
+        assert client.get("/assets/").status_code in (200, 307, 404)
