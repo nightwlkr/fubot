@@ -120,15 +120,11 @@ class DailyResetService:
         written before the schema had bounds) must not be able to switch the
         -3R stop off. Before this, `daily_loss_limit_r=9999` made the limit
         9999R and the hard stop never fired.
+
+        The clamping itself lives in `limit_r_from` so the dashboard and the
+        48h exchange-sync share it verbatim rather than re-deriving it.
         """
-        limit = abs(float(self.settings.get("daily_loss_limit_r", -3.0)))
-        if not (0 < limit <= MAX_DAILY_LOSS_LIMIT_R):
-            logger.error(
-                "daily_loss_limit_r=%r is out of range (0, %s] — falling back "
-                "to %sR", self.settings.get("daily_loss_limit_r"),
-                MAX_DAILY_LOSS_LIMIT_R, DEFAULT_DAILY_LOSS_LIMIT_R)
-            return DEFAULT_DAILY_LOSS_LIMIT_R
-        return limit
+        return limit_r_from(self.settings)
 
     def _zero_stats(self, today) -> dict:
         limit_r = self.get_limit_r()
@@ -147,7 +143,7 @@ class DailyResetService:
 
     async def get_daily_stats(self) -> dict:
         """Returns today's trading stats."""
-        today = datetime.now(timezone.utc).date()
+        today = today_utc()
 
         if self.session_factory is None:
             return self._zero_stats(today)
@@ -162,8 +158,8 @@ class DailyResetService:
 
         if summary:
             # Only LOSSES count toward the daily loss limit — a winning day
-            # must never trip the -3R stop (abs() would count wins as used).
-            used_r = max(0.0, -float(summary.total_pnl_r))
+            # must never trip the -3R stop. The rule lives in `used_r_from`.
+            used_r = used_r_from(summary)
             return {
                 "date": today.isoformat(),
                 "total_trades": summary.total_trades,
@@ -205,9 +201,9 @@ class DailyResetService:
     async def _trigger_daily_stop(self):
         """Emergency stop: bot stops trading for the rest of the day."""
         self._limit_hit_today = True
-        self._limit_hit_date = datetime.now(timezone.utc).date()
+        today = today_utc()
+        self._limit_hit_date = today
 
-        today = datetime.now(timezone.utc).date()
         if self.session_factory is not None:
             async with self.session_factory() as session:
                 result = await session.execute(
@@ -230,7 +226,7 @@ class DailyResetService:
         if self.session_factory is None:
             return
 
-        today = datetime.now(timezone.utc).date()
+        today = today_utc()
         async with self.session_factory() as session:
             result = await session.execute(
                 select(DailySummary).where(DailySummary.date == today)
@@ -275,7 +271,7 @@ class DailyResetService:
         """
         if not self._limit_hit_today:
             return
-        today = datetime.now(timezone.utc).date()
+        today = today_utc()
         if self._limit_hit_date is None or today > self._limit_hit_date:
             logger.info("New UTC day — resetting daily loss limit flag.")
             self._limit_hit_today = False

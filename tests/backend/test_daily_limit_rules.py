@@ -135,3 +135,48 @@ class TestTodayUtc:
                     and node.func.attr == "today"):
                 called.add(ast.unparse(node.func))
         assert "date.today" not in called, f"local day resolution: {sorted(called)}"
+
+
+# --------------------------------------------------------- DailyResetService
+
+class TestServiceDelegatesToHelpers:
+    def test_get_limit_r_returns_exactly_what_limit_r_from_returns(self):
+        """The service must not keep its own copy of the clamping rule. If both
+        exist, they can drift -- which is the bug this whole change removes."""
+        import inspect
+        from backend.core.daily_reset import DailyResetService, limit_r_from
+        src = inspect.getsource(DailyResetService.get_limit_r)
+        assert "limit_r_from" in src, "get_limit_r must delegate to limit_r_from"
+        svc = DailyResetService(settings={"daily_loss_limit_r": 9999})
+        assert svc.get_limit_r() == pytest.approx(limit_r_from({"daily_loss_limit_r": 9999}))
+
+    def test_get_daily_stats_agrees_with_used_r_from(self):
+        # get_daily_stats is a coroutine, so the scenario runs on a fresh loop
+        # (the pattern test_daily_reset.py uses).
+        import asyncio
+        from backend.core.daily_reset import DailyResetService, today_utc, used_r_from
+        svc = DailyResetService(session_factory=None, settings={})
+
+        async def scenario():
+            # No session factory -> the zero-stats path.
+            return await svc.get_daily_stats()
+
+        stats = asyncio.run(scenario())
+        assert stats["used_r"] == pytest.approx(used_r_from(None))
+        assert stats["date"] == today_utc().isoformat()
+
+    def test_the_module_resolves_the_day_in_exactly_one_place(self):
+        """Every breaker decision reads the same trading day. Each call site
+        resolving it separately is how the breaker and a display path ended up
+        disagreeing about which day it was."""
+        import ast
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[2]
+               / "backend/core/daily_reset.py").read_text()
+        inline = [ast.unparse(n) for n in ast.walk(ast.parse(src))
+                  if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                      and n.func.attr == "now"
+                      and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "datetime")]
+        # today_utc() itself is the single remaining site.
+        assert len(inline) == 1, f"day resolved inline elsewhere: {inline}"
