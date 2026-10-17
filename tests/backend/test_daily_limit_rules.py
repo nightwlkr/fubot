@@ -96,6 +96,55 @@ class TestUsedRFrom:
         from backend.core.daily_reset import used_r_from
         assert used_r_from(self._summary(None)) == pytest.approx(0.0)
 
+    @pytest.mark.parametrize("junk", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_pnl_fails_closed_rather_than_freeing_the_day(self, junk):
+        """A NaN total silently yielded used_r 0.0, because max(0.0, nan) is
+        0.0 — disabling the breaker for the day. This is the exact mirror of the
+        NaN-limit case `limit_r_from` already rejects: an unusable number must
+        HALT, never release."""
+        from backend.core.daily_reset import used_r_from
+        used = used_r_from(self._summary(junk))
+        assert used > 3.0, f"a non-finite pnl must exceed any real limit, got {used}"
+
+    def test_a_non_finite_pnl_actually_halts_the_breaker(self):
+        """`used > 3.0` is only meaningful if the breaker's own comparison treats
+        it as over-limit. Closes the gap between the helper's contract and the
+        caller that enforces it: `check_and_enforce_limit` must refuse to trade."""
+        import asyncio
+        from types import SimpleNamespace
+        from backend.core.daily_reset import DailyResetService
+
+        row = SimpleNamespace(total_trades=3, wins=1, losses=2, total_pnl_r=float("nan"),
+                               total_pnl_usdt=float("nan"), daily_loss_limit_hit=False)
+
+        class _Session:
+            async def execute(self, *a, **k):
+                from types import SimpleNamespace
+                return SimpleNamespace(scalar_one_or_none=lambda: row)
+
+            async def commit(self):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        stopped = []
+
+        class _Bot:
+            async def stop(self):
+                stopped.append(True)
+
+        svc = DailyResetService(session_factory=lambda: _Session(),
+                                settings={}, bot_engine=_Bot())
+        # get_daily_stats renders `float(summary.total_pnl_r)` for display, which
+        # is NaN but does not raise, so the breaker path is reached.
+        assert asyncio.run(svc.check_and_enforce_limit()) is False, \
+            "an unreadable daily total must STOP trading, not allow it"
+        assert stopped, "the fail-closed path must trip the daily stop"
+
 
 # -------------------------------------------------------------------- today_utc
 
@@ -440,12 +489,21 @@ class TestDashboardAgreesWithBreaker:
     def test_the_dashboard_module_no_longer_recomputes_the_rules(self):
         """Source contract. `date.today()` and an inline `max(0.0, -...)` are
         exactly how the two divergences were introduced; if either reappears the
-        dashboard starts disagreeing with the breaker again."""
+        dashboard starts disagreeing with the breaker again.
+
+        The clamp check is AST, not a substring: `used_r_from` no longer spells
+        `max(0.0, -float(`, and a text ban on a string the single legitimate
+        implementation no longer contains cannot fail."""
+        import ast
         src = (REPO_ROOT / "backend/routers/dashboard.py").read_text()
         assert "date.today()" not in src, \
             "the trading day must be resolved in UTC via today_utc(), not locally"
-        assert "max(0.0, -float(" not in src, \
-            "used_r must come from used_r_from(), not an inline copy"
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "max"):
+                arg = ast.unparse(node.args[0]) if node.args else ""
+                assert "total_pnl_r" not in arg, \
+                    f"used_r must come from used_r_from(), got max({arg})"
 
     def test_the_dashboard_resolves_no_trading_day_inline(self):
         """AST, not substring: `date.today()` was only the ORIGINAL mistake —
@@ -686,24 +744,27 @@ class TestExchangeSyncLatch:
             "the limit_r param must bind the limit_r_from() result, not a "
             f"literal — got {ast.unparse(value)!r}")
 
-    def test_the_winning_day_is_excluded_by_the_positive_limit_not_a_floor(self):
-        """What the expression actually does, stated plainly.
+    @pytest.mark.parametrize("raw", [-0.5, -3.0, -20.0, -0.0, 9999,
+                                     float("nan"), None, "abc"])
+    def test_the_limit_is_always_positive_for_every_rejected_input(self, raw):
+        """A winning day is excluded from the latch because the limit is
+        strictly positive, not because of a floor in the SQL. That only holds if
+        EVERY input `limit_r_from` can be handed still yields a positive limit —
+        including the ones it rejects. The previous version of this test asserted
+        `3.0 > 0` over a hardcoded tuple, never calling the helper, so it stayed
+        green through a rewrite that returned 0 or -1 for any input."""
+        from backend.core.daily_reset import limit_r_from
+        assert limit_r_from({"daily_loss_limit_r": raw}) > 0, raw
 
-        `COALESCE(-t.total_r, 0)` is NOT a `max(0, ...)`: on a +4.5R day it
-        evaluates to -4.5. The day fails to latch because `limit_r` is strictly
-        POSITIVE, so `-4.5 >= 3.0` is false. The `COALESCE` guards a NULL
-        `total_r` (a day with trades but no summed R), which would otherwise make
-        the comparison NULL and leave `daily_loss_limit_hit` NULL too.
-
-        The equivalence with `used_r_from` rests on `limit_r_from` only ever
-        returning values in (0, MAX] — pinned by TestLimitRFrom above — so both
-        spellings agree on every input the limit can actually take."""
-        from backend.core.daily_reset import (MAX_DAILY_LOSS_LIMIT_R,
-                                              DEFAULT_DAILY_LOSS_LIMIT_R)
-
-        # Every value the clamp can return, across the whole domain it accepts.
-        for limit in (1e-9, 1.0, DEFAULT_DAILY_LOSS_LIMIT_R, MAX_DAILY_LOSS_LIMIT_R):
-            assert limit > 0, "the whole argument above rests on this"
+    def test_the_sync_expression_carries_no_floor_operator(self):
+        """The test name says "not a floor". Assert that too: the COALESCE guards
+        a NULL `total_r`; a winning day is excluded because `limit_r_from`
+        guarantees a strictly positive limit. Do NOT let anyone 'fix' this into
+        GREATEST(0, -total_r) for symmetry with used_r_from — the source comment
+        at backend/routers/settings.py explains why it is not spelled that way."""
+        expr = _latch_expression()
+        assert "GREATEST" not in expr.upper()
+        assert "COALESCE" in expr.upper()
 
     def test_the_expression_excludes_winning_days_and_honours_the_bound_limit(self):
         """Behavioural, against the real DB — but it WRITES nothing.
@@ -715,7 +776,7 @@ class TestExchangeSyncLatch:
         assert textually: that the configured limit is the bound parameter rather
         than a constant, and that a winning day never latches — via the
         POSITIVITY of the limit, not via a floor in the expression (see
-        test_the_winning_day_is_excluded_by_the_positive_limit_not_a_floor).
+        test_the_limit_is_always_positive_for_every_rejected_input).
         """
         from sqlalchemy import text
         from conftest import run_async
@@ -786,13 +847,42 @@ class TestExchangeSyncLatch:
 class TestTheRulesExistInExactlyOnePlace:
     def test_the_used_r_formula_is_written_once_in_the_repo(self):
         """The whole point of the change. A second inline copy is free to drift
-        back out of sync with the breaker, which is the defect this removes."""
-        import pathlib
-        hits = [p for p in (REPO_ROOT / "backend").rglob("*.py")
-                if "max(0.0, -float(" in p.read_text()]
+        back out of sync with the breaker, which is the defect this removes.
+
+        Matched as an AST SHAPE, not as the literal `max(0.0, -float(`: the
+        original substring guard silently passed the day `used_r_from` grew the
+        non-finite guard and hoisted the float() into a local — the formula was
+        unchanged but the string no longer existed, so the guard went green over
+        ZERO matches. What it now asserts is structural: `used_r_from` is
+        defined once and owns the clamp, and no other function anywhere under
+        `backend/` floors a negated daily-pnl expression of its own."""
+        import ast
+        offenders = []
+        homes = []
+        for p in sorted((REPO_ROOT / "backend").rglob("*.py")):
+            tree = ast.parse(p.read_text())
+            homes_here = [n for n in ast.walk(tree)
+                          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                          and n.name == "used_r_from"]
+            for n in homes_here:
+                homes.append(f"{p.name}:{n.lineno}")
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "max"
+                        and any("total_pnl_r" in ast.unparse(a)
+                                or "total_r" in ast.unparse(a) for a in node.args)):
+                    continue
+                owner = next((f for f in homes_here
+                              if f.lineno <= node.lineno <= (f.end_lineno or 0)),
+                             None)
+                if owner is None:
+                    offenders.append(f"{p.name}:{node.lineno}")
         # daily_reset.used_r_from is the single legitimate home.
-        assert [p.name for p in hits] == ["daily_reset.py"], \
-            f"used_r is re-implemented in {[str(p) for p in hits]}"
+        assert len(homes) == 1 and homes[0].startswith("daily_reset.py"), \
+            f"exactly one used_r_from must own the formula, found {homes}"
+        assert offenders == [], \
+            f"the used_r formula is re-implemented outside used_r_from at {offenders}"
 
     def test_no_module_calls_date_today(self):
         """AST, not substring, and that is deliberate: the docstrings introduced

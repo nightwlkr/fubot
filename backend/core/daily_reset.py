@@ -4,6 +4,7 @@ DB access: session factory + short-lived sessions (the service is called from
 both the engine's scan loop and request handlers concurrently).
 """
 import logging
+import math
 from datetime import datetime, date, timezone
 from typing import Any, Callable, Optional
 
@@ -115,10 +116,24 @@ def used_r_from(summary: Optional[Any]) -> float:
     `total_pnl_r`: the column is `Numeric` and only ever holds Decimal/float,
     and raising here fails CLOSED -- the trade check aborts rather than
     proceeding with an unknown used_r.
+
+    A NON-FINITE total is the same threat from the other side, and it fails
+    OPENED silently if it is left to `max()`: `max(0.0, -float("nan"))` is
+    **0.0**, because every comparison against NaN is False. A NaN daily total
+    would therefore read as "nothing consumed" and disable the breaker for the
+    day -- the exact mirror of the NaN-LIMIT case `limit_r_from` already
+    rejects. So the non-finite case is caught here and returned as `inf`, which
+    satisfies `used_r >= limit` on every finite limit and therefore HALTS
+    trading. Unreadable means halted, never released.
     """
     if summary is None:
         return 0.0
-    return max(0.0, -float(summary.total_pnl_r or 0))
+    value = float(summary.total_pnl_r or 0)
+    if not math.isfinite(value):
+        logger.error("daily_summary.total_pnl_r=%r is not finite — failing "
+                     "closed", summary.total_pnl_r)
+        return math.inf
+    return max(0.0, -value)
 
 
 class DailyResetService:

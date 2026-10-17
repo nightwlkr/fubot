@@ -56,8 +56,12 @@ Two secondary defects in the same expression:
 
 - It compares `total_r <= -3.0` rather than mirroring the breaker's own
   `used_r >= limit`, so the two use different comparisons of the same quantity.
-- It has no `max(0, …)` floor. `used_r` is clamped at zero so a winning day
-  cannot trip the breaker; the sync's raw `total_r` comparison is unclamped.
+- It had no NULL guard, so a day with trades but no summed R (`SUM(pnl_r)` over
+  no rows, or all-NULL `pnl_r`) made the comparison NULL and left
+  `daily_loss_limit_hit` NULL too.
+
+  It also had **no floor**, and still does not — but see the correction in
+  §3: the winning day is excluded by the limit's positivity, not by a floor.
 
 ## Considered and rejected
 
@@ -109,6 +113,14 @@ on `/dashboard/today`. `limit_r_from` catches `TypeError`/`ValueError` and falls
 back to `DEFAULT_DAILY_LOSS_LIMIT_R`, matching the existing fail-closed posture
 of the range check.
 
+`used_r_from` gets the mirror-image treatment, for the same reason: an unusable
+number must HALT, never release. `max(0.0, -float("nan"))` is **0.0** — every
+comparison against NaN is False — so a non-finite `total_pnl_r` would read as
+"nothing consumed" and silently disable the breaker for the day. A non-finite
+total therefore returns `inf`, which satisfies `used_r >= limit` on every finite
+limit and stops the bot. This is deliberately the exact opposite of the naive
+reading: "an unreadable total" must never mean "the day is free".
+
 ### 2. Settings source is deliberately left duplicated
 
 The breaker reads the hot-reloaded in-memory settings dict; the dashboard reads
@@ -121,6 +133,26 @@ option. What changes is that both now apply identical clamping, so a malformed
 row cannot make them disagree about the limit. The residual divergence risk is
 recorded in `backend/AGENTS.md` rather than papered over.
 
+### 2b. Known residuals (pre-existing, deliberately not fixed here)
+
+- **The settings source is still duplicated** (above). They agree only because
+  `PUT /settings/trading` mutates the in-memory dict in place — and that mutation
+  sits inside a swallowing `try/except`, so a failed hot-reload can leave the
+  breaker and the dashboard disagreeing.
+- **The sync groups by `DATE(closed_at)` — session-LOCAL — while
+  `daily_summary.date` is written in UTC** by the accumulator. On a host east of
+  UTC (the VPS) the two disagree for ~4 hours a day. The consequence is **not**
+  merely "matches zero rows", and the earlier framing of this residual
+  understated it: a sync run inside that window (22:00–24:00 UTC, reachable only
+  by a manual maintenance `POST`) writes a `daily_summary` row keyed to the LOCAL
+  day, so **`WHERE daily_summary.date = t.d` overwrites TODAY's UTC row with a
+  PARTIAL day** — the trades before the offset that land on the local date and
+  the ones after it that do not. On a losing day that can push `used_r` back
+  **under** the limit, i.e. silently re-open an allowance the breaker had
+  already consumed. Only reachable via a manual sync in that window (the
+  scheduled run is 48h), so it is not a live money path today. The scheduled
+  fix is `DATE(closed_at AT TIME ZONE 'UTC')`.
+
 ### 3. `exchange_sync` binds the limit
 
 ```sql
@@ -129,7 +161,17 @@ daily_loss_limit_hit = (COALESCE(-t.total_r, 0) >= :limit_r)
 
 - `-3.0` literal replaced by a bound parameter, read through `limit_r_from`
 - comparison flipped to mirror the breaker's own `used_r >= limit`
-- `COALESCE(-t.total_r, 0)` supplies the `max(0, …)` floor the raw comparison lacked
+- `COALESCE(-t.total_r, 0)` guards a **NULL** `total_r`, so the comparison — and
+  therefore `daily_loss_limit_hit` — can never come out NULL/indeterminate
+
+**`COALESCE` is not a floor, and must not be read as one.** It does not spell
+`max(0, …)`: on a +4.5R day it evaluates to `-4.5`. The winning day fails to
+latch because `limit_r` is strictly **positive**, so `-4.5 >= 3.0` is false.
+Do **not** rewrite this into `GREATEST(0, -total_r)` "for symmetry" with
+`used_r_from`: the equivalence with the breaker's spelling already holds on
+every input the limit can actually take, because `limit_r_from` only ever
+returns values in `(0, MAX]`. `backend/AGENTS.md` and the source comment in
+`routers/settings.py` record the same rule.
 
 The parameter is sourced from the `daily_loss_limit_r` `Setting` row, the same
 row the dashboard reads.
@@ -150,7 +192,11 @@ row the dashboard reads.
    `daily_loss_limit_r` yields 3.0 everywhere, never an exception and never an
    unbounded limit.
 6. The sync's latch threshold equals the breaker's limit for any setting, and
-   the sync's comparison is floored at zero exactly as `used_r` is.
+   the sync agrees with the breaker on **every** day, winning or losing. The two
+   spellings differ (`used_r` floors at zero, the SQL does not) and are still
+   equivalent because `limit_r` is always strictly positive — see §3. Do not
+   "restore" the floor in the SQL for symmetry; it is unnecessary and the
+   guardrail against it is a test.
 7. Open (unrealised) positions never count toward `used_r`. Only closed trades
    reach `daily_summary`.
 
@@ -161,9 +207,12 @@ New `tests/backend/test_daily_limit_rules.py`:
 - `limit_r_from`: `9999 → 3.0`, `0 → 3.0`, `-5 → 5.0`, `"abc" → 3.0`,
   `20 → 20`, `20.1 → 3.0`, missing key → `3.0`
 - `used_r_from`: winning day → `0.0`, losing day → abs, exactly-zero day → `0.0`,
-  `None` → `0.0`
-- **Source contract:** the literal `max(0.0, -float(` occurs exactly once in the
-  repo — this cannot silently re-duplicate
+  `None` → `0.0`, **non-finite (`nan`/`±inf`) → `inf`, i.e. halted**
+- **Source contract:** the `used_r` formula — matched as an AST shape (a `max()`
+  over a negated daily-pnl expression), not as a literal string, because the
+  non-finite guard hoisted the `float()` into a local and a substring ban would
+  have silently passed over zero matches — occurs exactly once in the repo, and
+  no dashboard module recomputes it
 - **Divergence regression:** with a `9999` setting row — set on **both** the DB
   row and the service's settings dict, so the comparison isolates the clamping
   bug rather than the §2 source split — `/api/dashboard/today` and
@@ -174,7 +223,11 @@ New `tests/backend/test_daily_limit_rules.py`:
   still reads the UTC day's summary
 - **Sync regression:** assert `-3.0` is not a literal in the sync SQL, and that
   moving the configured limit moves the latch threshold
-- **Unclamped-comparison regression:** a winning day must not latch in the sync
+- **Unclamped-comparison regression:** a winning day must not latch in the sync,
+  and the limit must be strictly positive for **every** input `limit_r_from` can
+  be handed — including the ones it rejects — since that positivity is the whole
+  reason the SQL needs no floor. The latch expression must also carry no
+  `GREATEST`.
 
 Existing `test_daily_reset.py` stays green unchanged.
 
