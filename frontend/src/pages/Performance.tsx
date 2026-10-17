@@ -44,8 +44,11 @@ function isLossBucket(bucket: string): boolean {
   return bucket.trim().startsWith('-')
 }
 
-type Range = '7d' | '30d' | '90d' | '365d'
-const RANGE_DAYS: Record<Range, number> = { '7d': 7, '30d': 30, '90d': 90, '365d': 365 }
+type Range = '1d' | '3d' | '7d' | '30d' | '90d' | '365d'
+const RANGE_DAYS: Record<Range, number> = {
+  '1d': 1, '3d': 3, '7d': 7, '30d': 30, '90d': 90, '365d': 365,
+}
+const RANGE_OPTIONS = Object.keys(RANGE_DAYS) as Range[]
 
 function EquityChart({ range, onRangeChange }: { range: Range; onRangeChange: (r: Range) => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -91,7 +94,7 @@ function EquityChart({ range, onRangeChange }: { range: Range; onRangeChange: (r
       <CardHeader>
         <CardTitle>Equity Curve ({range.toUpperCase()})</CardTitle>
         <div className="flex gap-1">
-          {(['7d', '30d', '90d', '365d'] as Range[]).map(r => (
+          {RANGE_OPTIONS.map(r => (
             <button
               key={r}
               onClick={() => onRangeChange(r)}
@@ -176,7 +179,7 @@ function PnLChart({ range, onRangeChange }: { range: Range; onRangeChange: (r: R
             R
           </button>
           <span className="w-2" />
-          {(['7d', '30d', '90d', '365d'] as Range[]).map(r => (
+          {RANGE_OPTIONS.map(r => (
             <button
               key={r}
               onClick={() => onRangeChange(r)}

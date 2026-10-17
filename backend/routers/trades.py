@@ -28,6 +28,56 @@ async def get_current_user_from_cookie(request: Request, db: AsyncSession):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
+def _apply_trade_filters(
+    query,
+    *,
+    symbol: Optional[str],
+    side: Optional[str],
+    outcome: Optional[str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    mode: Optional[str] = None,
+):
+    """Apply the shared Trade-Log filters to a query.
+
+    Used by BOTH `/trades` (for the page and, separately, for the total count)
+    and `/trades/stats` (for the summary cards). They were previously duplicated
+    inline — the same six filters written out three times — which is how the
+    cards drifted out of sync with the table: `/trades/stats` accepted no
+    filters at all, so filtering the table to BTCUSDT still showed "45 trades,
+    40% win rate" from all-time history directly above a 5-row table.
+    """
+    if symbol:
+        query = query.where(Trade.symbol == symbol)
+    if side:
+        query = query.where(Trade.side == side)
+    if outcome == "win":
+        query = query.where(Trade.pnl_r > 0)
+    elif outcome == "loss":
+        query = query.where(Trade.pnl_r < 0)
+    elif outcome == "breakeven":
+        query = query.where(Trade.pnl_r == 0)
+    if mode and mode != "all":
+        query = query.where(Trade.mode == mode)
+    if from_date:
+        try:
+            query = query.where(Trade.closed_at >= datetime.fromisoformat(from_date))
+        except ValueError:
+            pass  # an unparseable date must not 500 the page; ignore it
+    if to_date:
+        try:
+            td = datetime.fromisoformat(to_date)
+            # A bare YYYY-MM-DD parses to midnight at the START of that day, so
+            # a `to_date` of 2026-10-17 would silently exclude every trade from
+            # the 17th. Extend to the next midnight to include the whole day.
+            if len(to_date) == 10:
+                td = td + timedelta(days=1)
+            query = query.where(Trade.closed_at < td)
+        except ValueError:
+            pass
+    return query
+
+
 @router.get("/", response_model=TradeListResponse)
 async def list_trades(
     request: Request,
@@ -42,60 +92,11 @@ async def list_trades(
 ):
     user = await get_current_user_from_cookie(request, db)
 
-    query = select(Trade)
-
-    if symbol:
-        query = query.where(Trade.symbol == symbol)
-    if side:
-        query = query.where(Trade.side == side)
-    if outcome == "win":
-        query = query.where(Trade.pnl_r > 0)
-    elif outcome == "loss":
-        query = query.where(Trade.pnl_r < 0)
-    elif outcome == "breakeven":
-        query = query.where(Trade.pnl_r == 0)
-    if from_date:
-        try:
-            fd = datetime.fromisoformat(from_date)
-            query = query.where(Trade.closed_at >= fd)
-        except ValueError:
-            pass
-    if to_date:
-        try:
-            td = datetime.fromisoformat(to_date)
-            # Include the full end day (fromisoformat gives midnight at start)
-            if len(to_date) == 10:  # YYYY-MM-DD format
-                td = td + timedelta(days=1)
-            query = query.where(Trade.closed_at < td)
-        except ValueError:
-            pass
-
-    # Count total
-    count_query = select(sqlfunc.count()).select_from(Trade)
-    if symbol:
-        count_query = count_query.where(Trade.symbol == symbol)
-    if side:
-        count_query = count_query.where(Trade.side == side)
-    if outcome == "win":
-        count_query = count_query.where(Trade.pnl_r > 0)
-    elif outcome == "loss":
-        count_query = count_query.where(Trade.pnl_r < 0)
-    elif outcome == "breakeven":
-        count_query = count_query.where(Trade.pnl_r == 0)
-    if from_date:
-        try:
-            fd = datetime.fromisoformat(from_date)
-            count_query = count_query.where(Trade.closed_at >= fd)
-        except ValueError:
-            pass
-    if to_date:
-        try:
-            td = datetime.fromisoformat(to_date)
-            if len(to_date) == 10:
-                td = td + timedelta(days=1)
-            count_query = count_query.where(Trade.closed_at < td)
-        except ValueError:
-            pass
+    filters = dict(symbol=symbol, side=side, outcome=outcome,
+                   from_date=from_date, to_date=to_date)
+    query = _apply_trade_filters(select(Trade), **filters)
+    count_query = _apply_trade_filters(
+        select(sqlfunc.count()).select_from(Trade), **filters)
 
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
@@ -133,27 +134,38 @@ async def trade_stats(
     db: AsyncSession = Depends(get_db),
     days: Optional[int] = Query(None, ge=1, le=730),
     mode: Optional[str] = Query("live", pattern="^(live|paper|all)$"),
+    symbol: Optional[str] = Query(None),
+    side: Optional[str] = Query(None),
+    outcome: Optional[str] = Query(None),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
 ):
-    """Headline stats for the Performance page.
+    """Headline stats for the Performance page AND the Trade Log summary cards.
+
+    Accepts the SAME filters as `/trades` plus `days`. Two range controls, two
+    separate bugs of the same shape:
+
+    - `days` so the Performance cards honour the range buttons. Without it they
+      were ALL-TIME while every chart beside them respected 7d/30d/90d/365d.
+    - symbol/side/outcome/from_date/to_date so the Trade Log cards describe the
+      FILTERED set. Without them, filtering the table to one symbol still showed
+      "45 trades, 40% win rate" from all-time history directly above a 5-row
+      table — which reads as "the filters don't work".
 
     Live-only by default: paper fills are not real money and must never be
-    averaged into a live win-rate or R-per-trade figure. Matches the /performance
-    endpoints so the cards and the charts describe the same population.
-
-    `days` exists so the stat cards respect the page's range selection. Without
-    it the cards were ALL-TIME while every chart beside them honoured the
-    7d/30d/90d/365d buttons — so "Win Rate 38%" sat directly above a 7-day
-    chart describing a completely different sample. Omitted, it stays
-    all-time (the historical behaviour for existing API consumers).
+    averaged into a live win-rate or R-per-trade figure.
 
     pnl_r is coerced through float() — the column is Numeric and comes back as
     Decimal, so a NULL would raise TypeError inside the sum().
     """
     user = await get_current_user_from_cookie(request, db)
 
-    query = select(Trade)
-    if mode != "all":
-        query = query.where(Trade.mode == (mode or "live"))
+    query = _apply_trade_filters(
+        select(Trade),
+        symbol=symbol, side=side, outcome=outcome,
+        from_date=from_date, to_date=to_date,
+        mode=mode or "live",
+    )
     if days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         query = query.where(Trade.closed_at >= cutoff)

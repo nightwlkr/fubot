@@ -173,9 +173,15 @@ class TestPerformanceFiltersByMode:
             "mode-filtered, and any such filter would be a no-op"
 
     def test_trade_stats_filters_by_mode(self):
+        """The mode filter now lives in the shared `_apply_trade_filters` helper,
+        so assert on the helper rather than on a literal in trade_stats."""
         import backend.routers.trades as tr
-        src = inspect.getsource(tr.trade_stats)
-        assert "Trade.mode" in src
+        helper = inspect.getsource(tr._apply_trade_filters)
+        assert "Trade.mode ==" in helper
+        assert "mode" in inspect.signature(tr._apply_trade_filters).parameters
+        # And trade_stats must actually route through it with the mode.
+        assert "_apply_trade_filters(" in inspect.getsource(tr.trade_stats)
+        assert "mode=mode" in inspect.getsource(tr.trade_stats)
 
     def test_default_is_live_only(self):
         """Live-only by default: showing paper by default would corrupt real
@@ -223,6 +229,72 @@ class TestRangeReachesEveryChart:
     """`/performance/strategies` had no `days` param, so the R-distribution
     ignored the 7d/30d/90d/365d buttons and always showed all-time while the
     charts beside it respected the selection.
+    """
+
+class TestTradeLogFiltersReachBothEndpoints:
+    """The Trade Log's summary cards fetched `/trades/stats` with NO parameters,
+    so they described all-time history while the table beside them was filtered.
+    Filtering to one symbol left "45 trades / 40% win rate" above a 5-row table -
+    which reads as "the filters don't work" even though every backend filter was
+    individually correct (verified against production: symbol/side/outcome/
+    from_date/to_date all returned distinct, correct counts).
+    """
+
+    def test_stats_accepts_the_same_filters_as_the_listing(self):
+        import backend.routers.trades as tr
+        list_params = set(inspect.signature(tr.list_trades).parameters)
+        stats_params = set(inspect.signature(tr.trade_stats).parameters)
+        for f in ("symbol", "side", "outcome", "from_date", "to_date"):
+            assert f in list_params, f"/trades must accept {f}"
+            assert f in stats_params, (
+                f"/trades/stats must accept {f} or the cards ignore that filter")
+
+    def test_both_endpoints_share_one_filter_implementation(self):
+        """The six filters were written out twice inside list_trades (once for
+        the page, once for the count) and a third time in trade_stats - three
+        copies that can drift. They must all go through one helper."""
+        import backend.routers.trades as tr
+        helper = inspect.getsource(tr._apply_trade_filters)
+        for token in ("Trade.symbol ==", "Trade.side ==",
+                      "Trade.pnl_r > 0", "Trade.pnl_r < 0",
+                      "Trade.pnl_r == 0", "Trade.closed_at >=",
+                      "Trade.closed_at <"):
+            assert token in helper, f"the shared helper must handle {token}"
+        list_src = inspect.getsource(tr.list_trades)
+        assert list_src.count("_apply_trade_filters(") == 2, (
+            "both the page query and the total-count query use the helper")
+        assert "Trade.symbol ==" not in list_src, (
+            "filters must not be re-implemented inline in list_trades")
+
+    def test_frontend_sends_filters_to_the_stats_endpoint(self):
+        from pathlib import Path
+        tsx = (Path(__file__).resolve().parents[2]
+               / "frontend/src/pages/TradeLog.tsx").read_text()
+        idx = tsx.index("ENDPOINTS.tradeStats")
+        assert "{ params }" in tsx[idx:idx + 120], (
+            "the summary cards must request /trades/stats with the same params "
+            "as /trades, or the table and the cards describe different samples")
+
+    def test_to_date_includes_the_whole_end_day(self):
+        """`datetime.fromisoformat('2026-10-17')` is midnight at the START of
+        that day, so `closed_at < that` excluded every trade from the 17th."""
+        import backend.routers.trades as tr
+        helper = inspect.getsource(tr._apply_trade_filters)
+        assert "timedelta(days=1)" in helper
+        assert "len(to_date) == 10" in helper
+
+    def test_unparseable_date_does_not_break_the_query(self):
+        """A bad date string must not raise out of the endpoint and 500 the page."""
+        import backend.routers.trades as tr
+        helper = inspect.getsource(tr._apply_trade_filters)
+        assert helper.count("except ValueError") == 2, (
+            "both from_date and to_date must swallow an unparseable value")
+
+
+class TestRangeButtonsAndStatCardsShareARange:
+    """The 5 headline cards were all-time while every chart beside them honoured
+    the 7d/30d/90d/365d buttons - so "Win Rate 38%" sat directly above a 7-day
+    chart describing a completely different sample.
     """
 
     def test_stat_cards_also_respect_the_range(self):
