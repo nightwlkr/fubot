@@ -12,6 +12,7 @@ from backend.routers.position_pricing import (
     apply_pricing, fetch_pricing, get_engine_mode,
 )
 from backend.schemas.position import PositionResponse, PositionListResponse, PositionUpdateRequest
+from backend.routers.trades import symbol_filter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/positions", tags=["positions"])
@@ -129,7 +130,9 @@ async def list_positions(
     if status:
         query = query.where(Position.status == status)
     if symbol:
-        query = query.where(Position.symbol == symbol)
+        _sym = symbol_filter(Position.symbol, symbol)
+        if _sym is not None:
+            query = query.where(_sym)
 
     query = query.order_by(Position.opened_at.desc())
 

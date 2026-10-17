@@ -65,6 +65,8 @@ export default function TradeLog() {
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [total, setTotal] = useState(0)
+  // Distinct symbols present in the filtered set, for the Symbol datalist.
+  const [symbols, setSymbols] = useState<string[]>([])
 
   const fetchTrades = useCallback(async (showLoader = true) => {
     if (showLoader) setIsLoading(true)
@@ -91,6 +93,10 @@ export default function TradeLog() {
       setTotal(Number(tradesRes.data.total) || 0)
       setTotalPages(Number(tradesRes.data.pages) || 1)
       setStats(statsRes.data)
+      const seen = Array.isArray(tradesRes.data.trades)
+        ? tradesRes.data.trades.map((t: Trade) => t.symbol)
+        : []
+      setSymbols([...new Set(seen)].sort())
     } catch (err) {
       console.error('Failed to fetch trades:', err)
     } finally {
@@ -227,11 +233,18 @@ export default function TradeLog() {
             <label className="text-xs text-muted block mb-1">Symbol</label>
             <input
               type="text"
-              placeholder="BTCUSDT"
+              list="tl-symbols"
+              placeholder="BTC, btcusdt…"
               value={symbol}
               onChange={(e) => { setSymbol(e.target.value); setPage(1) }}
               className="w-full bg-surface2 border border-border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary/50"
             />
+            {/* Prefix search, case-insensitive — "fil", "FIL" and "FILUSDT" all
+                find FILUSDT. The datalist suggests real symbols so the exact
+                ticker never has to be guessed. */}
+            <datalist id="tl-symbols">
+              {symbols.map(s => <option key={s} value={s} />)}
+            </datalist>
           </div>
           <div>
             <label className="text-xs text-muted block mb-1">Side</label>

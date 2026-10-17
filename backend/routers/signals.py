@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models.signal import Signal
 from backend.schemas.signal import SignalResponse, SignalListResponse
+from backend.routers.trades import symbol_filter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/signals", tags=["signals"])
@@ -70,7 +71,9 @@ async def list_signals(
     if status:
         query = query.where(Signal.status == status)
     if symbol:
-        query = query.where(Signal.symbol == symbol)
+        _sym = symbol_filter(Signal.symbol, symbol)
+        if _sym is not None:
+            query = query.where(_sym)
     if strategy:
         query = query.where(Signal.strategy_type == strategy)
 
@@ -95,7 +98,9 @@ async def active_signals(
     query = select(Signal).where(Signal.status == "PENDING")
 
     if symbol:
-        query = query.where(Signal.symbol == symbol)
+        _sym = symbol_filter(Signal.symbol, symbol)
+        if _sym is not None:
+            query = query.where(_sym)
 
     query = query.order_by(Signal.created_at.desc()).limit(100)
 

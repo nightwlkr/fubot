@@ -17,6 +17,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/trades", tags=["trades"])
 
 
+def symbol_filter(column, symbol: Optional[str]):
+    """Case-insensitive PREFIX match on a symbol column; None when blank.
+
+    Operators type "fil", "FIL", "filusdt" or "FILUSDT" and reasonably expect
+    all four to find FILUSDT. An exact `==` match silently returns everything-
+    unfiltered (or nothing) for the first three, which reads as "the filter is
+    broken" — the same class of symptom as the query-param bugs.
+
+    PREFIX rather than substring: symbols share bases (BTC/BTCUSDT, and dozens
+    ending in USDT), so a substring search for "usd" would match every row. A
+    prefix is the predictable behaviour and still satisfies "FIL" -> FILUSDT.
+
+    LIKE wildcards in the user's input are escaped, so typing "50%" searches for
+    the literal characters instead of turning into a wildcard pattern.
+    """
+    if not symbol or not symbol.strip():
+        return None
+    term = symbol.strip()
+    escaped = (term.replace("\\", "\\\\")
+                   .replace("%", "\\%")
+                   .replace("_", "\\_"))
+    return column.ilike(f"{escaped}%")
+
+
 async def get_current_user_from_cookie(request: Request, db: AsyncSession):
     from backend.services import auth_service
     token = auth_service.get_token_from_request(request)
@@ -47,8 +71,9 @@ def _apply_trade_filters(
     filters at all, so filtering the table to BTCUSDT still showed "45 trades,
     40% win rate" from all-time history directly above a 5-row table.
     """
-    if symbol:
-        query = query.where(Trade.symbol == symbol)
+    _sym = symbol_filter(Trade.symbol, symbol)
+    if _sym is not None:
+        query = query.where(_sym)
     if side:
         query = query.where(Trade.side == side)
     if outcome == "win":

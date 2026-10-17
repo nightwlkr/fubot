@@ -255,7 +255,7 @@ class TestTradeLogFiltersReachBothEndpoints:
         copies that can drift. They must all go through one helper."""
         import backend.routers.trades as tr
         helper = inspect.getsource(tr._apply_trade_filters)
-        for token in ("Trade.symbol ==", "Trade.side ==",
+        for token in ("symbol_filter(Trade.symbol", "Trade.side ==",
                       "Trade.pnl_r > 0", "Trade.pnl_r < 0",
                       "Trade.pnl_r == 0", "Trade.closed_at >=",
                       "Trade.closed_at <"):

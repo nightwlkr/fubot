@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models.order import Order
 from backend.schemas.order import OrderResponse, OrderListResponse, OrderCancelResponse
+from backend.routers.trades import symbol_filter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -66,7 +67,9 @@ async def list_orders(
     if status:
         query = query.where(Order.status == status)
     if symbol:
-        query = query.where(Order.symbol == symbol)
+        _sym = symbol_filter(Order.symbol, symbol)
+        if _sym is not None:
+            query = query.where(_sym)
 
     query = query.order_by(Order.created_at.desc()).limit(limit)
 

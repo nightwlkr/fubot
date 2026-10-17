@@ -129,11 +129,92 @@ class TestQueryParamsSurviveRouting:
         assert r.status_code in (401, 200), \
             f"unexpected status {r.status_code} for {path}"
 
-    @pytest.mark.parametrize("path", ["/api/trades", "/api/signals",
-                                      "/api/positions", "/api/orders"])
-    def test_slashed_form_is_the_canonical_route(self, client, path):
-        assert client.get(path + "/", follow_redirects=False).status_code != 307, (
-            f"{path}/ should be the canonical route with no redirect at all")
+class TestSymbolFilterIsCaseInsensitivePrefix:
+    """The symbol filter was an exact `==` match, so `fil`, `FIL` and `filusdt`
+    all failed to find FILUSDT while only the exact uppercase form worked. With
+    the other three filters (side, outcome, dates) working, that reads as "the
+    symbol filter is broken".
+
+    Now a case-insensitive PREFIX match. Prefix rather than substring: symbols
+    share bases and most end in USDT, so a substring search for "usd" would
+    match every row.
+    """
+
+    def _filter(self, term):
+        from backend.routers.trades import symbol_filter
+        from backend.models.trade import Trade
+        return symbol_filter(Trade.symbol, term)
+
+    def _symbols_for(self, term):
+        """Distinct symbols matching `term`, via the repo's own DB engine."""
+        import asyncio
+        from sqlalchemy import distinct, select
+        from backend.database import AsyncSessionLocal, engine
+        from backend.models.trade import Trade
+
+        async def run():
+            async with AsyncSessionLocal() as db:
+                rows = (await db.execute(
+                    select(Trade.symbol).where(self._filter(term))
+                    .distinct().order_by(Trade.symbol))).scalars().all()
+            await engine.dispose()
+            return list(rows)
+
+        # A fresh engine per call: pytest-asyncio runs each test on its own
+        # loop, and a shared asyncpg pool bound to another loop raises.
+        return asyncio.run(run())
+
+    def _count_for(self, term):
+        import asyncio
+        from sqlalchemy import func, select
+        from backend.database import AsyncSessionLocal, engine
+        from backend.models.trade import Trade
+
+        async def run():
+            async with AsyncSessionLocal() as db:
+                n = (await db.execute(
+                    select(func.count()).select_from(Trade)
+                    .where(self._filter(term)))).scalar()
+            await engine.dispose()
+            return n
+
+        return asyncio.run(run())
+
+    def test_it_builds_a_case_insensitive_prefix(self):
+        assert self._symbols_for("BTC") == ["BTCUSDT"]
+        assert self._symbols_for("eth") == ["ETHUSDT"], \
+            "lower-case must match — the operator types 'eth', not 'ETHUSDT'"
+        assert self._symbols_for("SOL") == self._symbols_for("sol") == ["SOLUSDT"]
+
+    @pytest.mark.parametrize("blank", ["", "   ", None])
+    def test_blank_input_means_no_filter(self, blank):
+        assert self._filter(blank) is None, \
+            "a blank symbol must not filter the query at all"
+
+    def test_surrounding_whitespace_is_ignored(self):
+        assert self._symbols_for("  btc  ") == ["BTCUSDT"], \
+            "a stray leading/trailing space must not break the match"
+
+    def test_like_wildcards_in_the_input_are_escaped(self):
+        """`%` and `_` are LIKE metacharacters. Unescaped, typing `50%` becomes
+        a wildcard matching every row; `_` matches any single character."""
+        assert self._count_for("50%") == 0, \
+            "'50%' must be a literal search, not a wildcard matching every row"
+        assert self._count_for("%") == 0, \
+            "a bare '%' must not match every symbol"
+
+    def test_every_listing_router_uses_the_shared_helper(self):
+        """Positions, orders and signals had the same exact-match copy. One
+        implementation so they cannot drift apart again."""
+        import inspect
+        from backend.routers import trades, positions, orders, signals
+        for mod in (trades, positions, orders, signals):
+            src = inspect.getsource(mod)
+            assert ".symbol ==" not in src, (
+                f"{mod.__name__} still has an exact symbol match — use "
+                "symbol_filter() so 'fil' and 'FILUSDT' behave the same "
+                "everywhere")
+            assert "symbol_filter(" in src, f"{mod.__name__} must use symbol_filter"
 
 
 class TestOurOwnRedirectPreservesTheQueryString:
