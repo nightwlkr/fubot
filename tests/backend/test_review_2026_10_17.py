@@ -432,6 +432,68 @@ class TestRateLimitIsNotFlat:
 
 
 # ---------------------------------------------------------------------------
+# 8. Binance endpoint paths — the mistake that broke live order placement
+# ---------------------------------------------------------------------------
+
+def _requested_exchangeinfo_paths() -> list[str]:
+    """Every fapi exchangeInfo path actually passed to a request helper.
+
+    Matches `_public_request("...")` call arguments rather than raw text, so a
+    comment explaining the v2/v1 mistake does not read as a usage of v2.
+    """
+    import re
+    import backend.services.binance_service as bs
+    return re.findall(r'_public_request\(\s*"(fapi/[^"]*exchangeInfo)"',
+                      inspect.getsource(bs))
+
+
+class TestFapiEndpointPaths:
+    """`get_lot_size` was rewritten (correctly) to RAISE instead of returning {},
+    and in the same edit its path was changed from `fapi/v1/exchangeInfo` to
+    `fapi/v2/exchangeInfo`.
+
+    /fapi/v2/exchangeInfo DOES NOT EXIST — v2 is the COIN-M path (dapi); USDⓈ-M
+    futures serves it at v1. So it 404s, and because the function now raises,
+    every order placement aborted with:
+
+        Live order flow failed: Client error '404 Not Found' for url
+        'https://fapi.binance.com/fapi/v2/exchangeInfo'
+
+    This shipped to production in d9213ce. The two mistakes cancelled out
+    before that (a 404 was swallowed into an unrounded order), which is exactly
+    why fixing the fail-open exposed the wrong path.
+    """
+
+    def test_get_lot_size_requests_the_v1_path(self):
+        import backend.services.binance_service as bs
+        src = inspect.getsource(bs.BinanceService.get_lot_size)
+        assert '"fapi/v1/exchangeInfo"' in src, \
+            "get_lot_size must request /fapi/v1/exchangeInfo"
+
+    def test_get_symbol_info_requests_the_v1_path(self):
+        import backend.services.binance_service as bs
+        src = inspect.getsource(bs.BinanceService.get_symbol_info)
+        assert '"fapi/v1/exchangeInfo"' in src
+
+    def test_no_v2_exchangeInfo_is_ever_requested(self):
+        """v2 is the COIN-M (dapi) path; USDⓈ-M futures serves exchangeInfo at
+        v1. Requesting v2 returns 404 — and since get_lot_size now raises
+        (correctly), that aborts every order placement."""
+        paths = _requested_exchangeinfo_paths()
+        assert paths, "expected at least one exchangeInfo request"
+        assert all(p == "fapi/v1/exchangeInfo" for p in paths), \
+            f"only fapi/v1/exchangeInfo exists on fapi, found: {paths}"
+
+    def test_raise_and_correct_path_are_both_covered(self):
+        """Guards the pairing: raising on failure is right, but it is only safe
+        while the path is one that exists."""
+        import backend.services.binance_service as bs
+        src = inspect.getsource(bs.BinanceService.get_lot_size)
+        assert "raise BinanceAPIError" in src, "must still raise (fail closed)"
+        assert '"fapi/v1/exchangeInfo"' in src, "on a path that actually exists"
+
+
+# ---------------------------------------------------------------------------
 # 7. The failed-flow handler must not orphan a position it left open
 # ---------------------------------------------------------------------------
 

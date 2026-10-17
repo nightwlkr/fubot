@@ -259,8 +259,12 @@ class BinanceService:
         return result
 
     async def get_symbol_info(self, symbol: str) -> dict:
-        """GET /fapi/v2/exchangeInfo — filtered for one symbol."""
-        data = await self._public_request("fapi/v2/exchangeInfo")
+        """GET /fapi/v1/exchangeInfo — filtered for one symbol.
+
+        v1, not v2: /fapi/v2/exchangeInfo does not exist (v2 is the COIN-M
+        path). It 404s.
+        """
+        data = await self._public_request("fapi/v1/exchangeInfo")
         for s in data.get("symbols", []):
             if s["symbol"] == symbol:
                 filters = {f["filterType"]: f for f in s.get("filters", [])}
@@ -424,7 +428,13 @@ class BinanceService:
         if cached is not None:
             return cached
 
-        info = await self._public_request("fapi/v2/exchangeInfo")
+        # NOTE the version: USDⓈ-M futures exposes exchangeInfo at
+        # /fapi/v1/exchangeInfo. There is NO /fapi/v2/exchangeInfo on fapi —
+        # v2 is the COIN-M path (dapi). Using v2 404s, and because get_lot_size
+        # now RAISES (correctly) instead of returning {}, every order placement
+        # aborts with "Live order flow failed: 404". This shipped live in
+        # d9213ce — see the comment on the raise below.
+        info = await self._public_request("fapi/v1/exchangeInfo")
         for s in info.get("symbols", []):
             if s.get("symbol") == symbol:
                 lot = {}
