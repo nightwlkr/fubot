@@ -35,13 +35,17 @@ the day. The safety net holds; the panel denies it fired.
 `daily_reset` resolves today as `datetime.now(timezone.utc).date()`. Both
 dashboard endpoints resolve it as `date.today()` — **local** time.
 
-The VPS runs `Europe/Berlin` (UTC+2). For two hours every night, 22:00–24:00 UTC,
-`date.today()` returns *yesterday's* date. In that window the breaker reads
-today's `daily_summary` row while `/dashboard/overview` and `/dashboard/today`
-read yesterday's — so the panel shows a stale day that may be under the limit
-while the breaker is enforcing today's. This is live now: at time of writing it
-is 21:05 UTC / 23:05 CEST, and in 55 minutes the dashboard silently starts
-reporting the previous day.
+The VPS runs `Europe/Berlin` (UTC+2) — **east** of UTC, so local time runs
+*ahead*. For two hours every night, 22:00–24:00 UTC, `date.today()` returns
+**tomorrow's** date, not yesterday's. The dashboard then queries
+`DailySummary.date == tomorrow`, a row that **does not exist yet**, so `daily` is
+`None` and the endpoint renders a **freshly zeroed day** — `used_r = 0.0`,
+`remaining_r` at full limit — while the breaker is enforcing today's real,
+possibly over-limit, row.
+
+This is worse than reading a stale day: a full-looking limit bar is the most
+reassuring thing the panel can show, and it is exactly what it shows for two
+hours every night.
 
 ### Failure 3 — the 48h sync ignores the configured limit entirely
 

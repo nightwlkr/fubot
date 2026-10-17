@@ -458,8 +458,10 @@ replace:
 with:
 
 ```python
-    # UTC, not local: the breaker resolves the trading day in UTC. On a UTC+2
-    # host `date.today()` returns yesterday between 22:00-24:00 UTC.
+    # UTC, not local: the breaker resolves the trading day in UTC. On a host
+    # EAST of UTC (the VPS is Europe/Berlin, UTC+2) local time runs ahead, so a
+    # local resolution returns TOMORROW between 22:00-24:00 UTC -- a row that
+    # does not exist yet, i.e. a freshly zeroed day.
     today = today_utc()
 ```
 
@@ -695,27 +697,51 @@ Append to `tests/backend/test_daily_limit_rules.py`:
 ```python
 # ------------------------------------------------- re-duplication guard
 
+def _local_day_calls(root):
+    """`file:line` for every real `date.today()` CALL under `root`, by AST.
+
+    NOT a substring scan. The explanatory docstrings introduced by this very
+    change NAME `date.today()` in order to warn against it, so a text ban would
+    fail on the documentation of the fix itself. Walking the AST for a
+    zero-arg `.today()` attribute call is what actually distinguishes a call
+    from the phrase inside a docstring.
+    """
+    import ast
+    out = []
+    for p in root.rglob("*.py"):
+        try:
+            tree = ast.parse(p.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "today"
+                    and not node.func.args):
+                out.append(f"{p}:{node.lineno}")
+    return out
+
+
 class TestTheRulesExistInExactlyOnePlace:
     def test_the_used_r_formula_is_written_once_in_the_repo(self):
         """The whole point of the change. A second inline copy is free to drift
         back out of sync with the breaker, which is the defect this removes."""
         import pathlib
-        root = pathlib.Path("backend")
-        hits = [p for p in root.rglob("*.py")
+        hits = [p for p in pathlib.Path("backend").rglob("*.py")
                 if "max(0.0, -float(" in p.read_text()]
         # daily_reset.used_r_from is the single legitimate home.
         assert [p.name for p in hits] == ["daily_reset.py"], \
             f"used_r is re-implemented in {[str(p) for p in hits]}"
 
-    def test_no_module_resolves_the_trading_day_locally(self):
-        """`date.today()` currently exists in exactly two places — both the
-        dashboard lines this change fixes — so scanning the whole backend tree
-        is safe and needs no exclusions."""
+    def test_no_module_calls_date_today(self):
         import pathlib
-        offenders = [str(p) for p in pathlib.Path("backend").rglob("*.py")
-                     if "date.today()" in p.read_text()]
-        assert offenders == [], f"local-day resolution found in {offenders}"
+        offenders = _local_day_calls(pathlib.Path("backend"))
+        assert offenders == [], f"local-day resolution found at {offenders}"
 ```
+
+`test_the_used_r_formula_is_written_once_in_the_repo` **does** stay a substring
+scan, and that is correct: `max(0.0, -float(` is an expression no docstring
+would naturally contain, so there is no false-positive risk.
 
 - [ ] **Step 2: Run the new test file**
 
@@ -727,10 +753,24 @@ Expected: PASS
 
 Run: `PYTHONPATH=. pytest tests/backend/ -q`
 
-Expected: PASS, **more than the 421 that passed before this change** — the new
-module adds tests. Any failure in `test_daily_reset.py` is a regression in the
-breaker itself: stop and investigate rather than adjusting that file, which is
-deliberately unmodified by this plan.
+Expected: **430 passed, 4 failed** in the worktree — the 4 failures are
+pre-existing and environmental, verified identical on the pre-task commit
+`d2371c6`:
+
+```
+tests/backend/test_api_smoke.py::test_health_and_root
+tests/backend/test_api_smoke.py::test_spa_served_and_api_still_wins
+tests/backend/test_endpoint_slashes.py::TestOurOwnRedirectPreservesTheQueryString::test_spa_fallback_keeps_the_query_string
+tests/backend/test_endpoint_slashes.py::TestIndexHtmlIsNotCacheable::test_index_html_sends_no_cache
+```
+
+All four require `frontend/dist`, which is untracked build output absent from a
+fresh worktree. **Do not attempt to fix them and do not count them as
+regressions.** The number that must grow is the passing count, from 430.
+
+Any failure in `test_daily_reset.py` or `test_defects_2026_10_17.py` IS a
+regression in the breaker itself: stop and investigate rather than adjusting
+those files, which are deliberately unmodified by this plan.
 
 - [ ] **Step 4: Verify the suite does not leak rows**
 
