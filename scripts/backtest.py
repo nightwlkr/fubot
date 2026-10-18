@@ -34,6 +34,8 @@ async def main() -> None:
     ap.add_argument("--neutral", action="store_true", help="allow NEUTRAL-bias trades")
     ap.add_argument("--strength", default="MODERATE", choices=["WEAK", "MODERATE", "STRONG"])
     ap.add_argument("--no-volume", action="store_true", help="disable the volume-confirmation filter")
+    ap.add_argument("--end-days-ago", type=int, default=0,
+                    help="shift the window backward N days (disjoint out-of-sample slices)")
     args = ap.parse_args()
 
     symbols = ([s.strip() for s in args.symbols.split(",")]
@@ -60,7 +62,8 @@ async def main() -> None:
     total_net_r = 0.0
     total_closed = 0
     for sym in symbols:
-        res = await run_backtest(sym, days=args.days, settings=settings)
+        res = await run_backtest(sym, days=args.days, settings=settings,
+                                 end_days_ago=args.end_days_ago)
         s = res.summary()
         total_r += s["total_r"]
         total_net_r += s["net_r"]

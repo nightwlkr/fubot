@@ -500,7 +500,7 @@ class LookaheadProbeBacktester(Backtester):
 
 
 async def run_backtest(symbol: str, days: int = 30, settings: Optional[dict] = None,
-                       binance=None) -> BacktestResult:
+                       binance=None, end_days_ago: int = 0) -> BacktestResult:
     """Fetch a full `days` window (paginated) and run the backtest.
 
     All three intervals are pinned to ONE `[start, end)` window and fetched
@@ -514,6 +514,12 @@ async def run_backtest(symbol: str, days: int = 30, settings: Optional[dict] = N
         created = True
     try:
         start_ms, end_ms = window_for_days(days)
+        if end_days_ago:
+            # Shift the window BACKWARD so an earlier slice can be tested on its
+            # own. This is what makes an out-of-sample split possible: the two
+            # halves must be disjoint windows, not one window sampled twice.
+            end_ms -= end_days_ago * 86_400_000
+            start_ms -= end_days_ago * 86_400_000
         series = {}
         for tf in ("1h", "5m", "15m"):
             series[tf] = await fetch_klines(
