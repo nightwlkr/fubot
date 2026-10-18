@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import select
 
 from backend.models.daily_summary import DailySummary
+from backend.core import risk_units
 
 logger = logging.getLogger(__name__)
 
@@ -267,9 +268,17 @@ class DailyResetService:
             await self.alerts.daily_limit_hit(stats["used_r"], stats["limit_r"])
 
     async def update_daily_summary(self, pnl_r: float, pnl_usdt: float) -> None:
-        """Called after each trade closes to update the daily summary."""
+        """Called after each trade closes to update the daily summary.
+
+        `pnl_r` may be None, meaning the trade's 1R could not be established
+        (no frozen `initial_risk_distance` — see `core/risk_units`). It is
+        charged a full -1R here rather than skipped: a trade the breaker cannot
+        measure must never pass the limit for free. Applied at this single
+        choke point so every caller is covered by the same rule.
+        """
         if self.session_factory is None:
             return
+        pnl_r = risk_units.daily_r_contribution(pnl_r)
 
         today = today_utc()
         async with self.session_factory() as session:

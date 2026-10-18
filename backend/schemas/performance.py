@@ -18,7 +18,7 @@ class PnLPoint(BaseModel):
     is ONLY realized PnL from closed trades — the strategy's actual performance.
     """
     date: str
-    pnl_r: float      # cumulative R up to this trade
+    pnl_r: float | None   # cumulative R; None = a prior trade had unknown R
     pnl_usdt: float   # cumulative USD up to this trade
 
 

@@ -21,6 +21,7 @@ from typing import Optional
 from sqlalchemy import select, update
 from backend.models.position import Position as PositionModel
 from backend.models.signal import Signal as SignalModel
+from backend.core import risk_units
 
 logger = logging.getLogger(__name__)
 
@@ -770,7 +771,8 @@ class StrategyService:
 
         close_side = "SELL" if (pos.get("side") or "LONG") == "LONG" else "BUY"
         try:
-            await self.binance.place_market_order(symbol, close_side, qty)
+            await self.binance.place_market_order(
+                symbol, close_side, qty, reduce_only=True)
             logger.error(
                 "[%s] Live flow failed with an UNPROTECTED %s %s on the exchange "
                 "— flattened at market", symbol, pos.get("side"), qty)
@@ -809,8 +811,18 @@ class StrategyService:
                             int(row.opened_at.timestamp() * 1000) if row.opened_at else None,
                         )
                         pnl_usdt = float(income.get("totalPnl", 0) or 0)
-                        if row.initial_risk_distance and float(row.initial_risk_distance) > 0:
-                            pnl_r = pnl_usdt / (float(row.quantity) * float(row.initial_risk_distance))
+                        distance = risk_units.risk_distance(
+                            entry_price=row.entry_price, stop_loss=row.stop_loss,
+                            frozen=row.initial_risk_distance)
+                        computed_r = risk_units.pnl_r_from(
+                            pnl_usdt, row.quantity, distance)
+                        if computed_r is None:
+                            logger.error(
+                                "[%s] flatten close cannot establish 1R "
+                                "(frozen risk=%s) — R recorded as unknown, so "
+                                "the daily breaker charges a full -1R",
+                                row.symbol, row.initial_risk_distance)
+                        pnl_r = computed_r if computed_r is not None else 0.0
                     except Exception:
                         logger.debug("Could not fetch income for flatten close of %s", row.symbol)
 

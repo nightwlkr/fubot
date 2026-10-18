@@ -15,7 +15,7 @@ class Trade(Base):
     exit_price: Mapped[float] = mapped_column(Numeric, nullable=False)
     quantity: Mapped[float] = mapped_column(Numeric, nullable=False)
     pnl_usdt: Mapped[float] = mapped_column(Numeric, nullable=False)
-    pnl_r: Mapped[float] = mapped_column(Numeric, nullable=False)
+    pnl_r: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     exit_reason: Mapped[str] = mapped_column(String(30), nullable=False)
     strategy_type: Mapped[str] = mapped_column(String(20), nullable=False)
     # 'live' or 'paper'. Set from BotEngine._mode at the time the trade is recorded.

@@ -45,3 +45,7 @@ frontend/dist/
 frontend/*.tsbuildinfo
 backup_history*.json
 .coverage
+
+# Environment-specific frontend config — tracked by mistake until 2026-10-19.
+# Not secret (VITE_* is inlined into the public bundle) but not portable either.
+frontend/.env

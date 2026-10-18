@@ -8,6 +8,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
+from backend.core import risk_units
 from backend.models.equity_log import EquityLog
 from backend.models.daily_summary import DailySummary
 from backend.models.trade import Trade
@@ -113,7 +114,9 @@ async def pnl_curve(
     cum_usd = 0.0
     points: list[PnLPoint] = []
     for t in rows:
-        cum_r += float(t.pnl_r or 0)
+        # NULL pnl_r = unknown 1R. Charging a full -1R keeps the curve
+        # fail-closed; `or 0` would render an unmeasurable trade as breakeven.
+        cum_r += risk_units.daily_r_contribution(t.pnl_r)
         cum_usd += float(t.pnl_usdt or 0)
         points.append(PnLPoint(
             date=t.closed_at.isoformat(),
@@ -154,11 +157,14 @@ async def monthly_returns(
         m = monthly.setdefault(month_key, {
             "pnl_r": 0.0, "trades": 0, "wins": 0, "losses": 0,
         })
-        m["pnl_r"] += float(t.pnl_r or 0)
+        # Charge unknown-R rows a full -1R, then classify from that single
+        # value -- so wins+losses+breakevens still reconciles to trades.
+        r = risk_units.daily_r_contribution(t.pnl_r)
+        m["pnl_r"] += r
         m["trades"] += 1
-        if float(t.pnl_r or 0) > 0:
+        if r > 0:
             m["wins"] += 1
-        elif float(t.pnl_r or 0) < 0:
+        elif r < 0:
             m["losses"] += 1
 
     return MonthlyResponse(data=[
@@ -195,7 +201,11 @@ async def strategy_performance(
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         query = query.where(Trade.closed_at >= cutoff)
     result = await db.execute(query)
-    trades = [float(t.pnl_r) for t in result.scalars().all()]
+    # A NULL pnl_r is an UNMEASURED trade, not a 0R one. Charging it the
+    # worst-case single-trade loss keeps the expectancy fail-closed instead
+    # of silently flattering the average by dropping it.
+    trades = [risk_units.daily_r_contribution(t.pnl_r)
+              for t in result.scalars().all()]
 
     edges = [
         ("-3R or worse", lambda r: r <= -3.0),
@@ -253,7 +263,9 @@ async def strategy_breakdown(
     for t in result.scalars().all():
         name = t.strategy_type or "UNKNOWN"
         # Both columns are Numeric -> Decimal; coerce before any arithmetic.
-        r = float(t.pnl_r or 0)
+        # Unknown-R rows are charged a full -1R rather than dropped, so a
+        # strategy cannot look better by having unreadable trades.
+        r = risk_units.daily_r_contribution(t.pnl_r)
         usd = float(t.pnl_usdt or 0)
         b = buckets.setdefault(name, {
             "n": 0, "wc": 0, "lc": 0, "be": 0,

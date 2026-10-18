@@ -344,7 +344,13 @@ async def exchange_sync(
         try:
             opened_at = trade.closed_at - timedelta(minutes=5)  # approximate open time
             start_ms = int(opened_at.timestamp() * 1000)
-            income = await binance.get_position_income(trade.symbol, start_time=start_ms)
+            # Bound the END of the window too. Without it the query runs to "now",
+            # so on a symbol the bot has since re-entered it sweeps in the NEXT
+            # position's commission and funding as well — which, now that fees
+            # are actually counted, would charge one trade another's costs.
+            end_ms = int((trade.closed_at + timedelta(minutes=15)).timestamp() * 1000)
+            income = await binance.get_position_income(
+                trade.symbol, start_time=start_ms, end_time=end_ms)
 
             if income.get("events", 0) == 0:
                 continue  # no income events — keep synthetic PnL
@@ -468,8 +474,13 @@ async def exchange_sync(
             COUNT(*) FILTER (WHERE pnl_r > 0) as wins,
             COUNT(*) FILTER (WHERE pnl_r < 0) as losses,
             COUNT(*) FILTER (WHERE pnl_r = 0) as bes,
-            COALESCE(SUM(pnl_r),0) as total_r, COALESCE(SUM(pnl_usdt),0) as total_usdt,
-            COALESCE(MIN(pnl_r),0) as worst_r, COALESCE(MAX(pnl_r),0) as best_r
+            -- Inner COALESCE prices a NULL (unknown 1R) row at a full -1R so the
+            -- recompute can never treat an unmeasurable trade as free; the outer
+            -- one only guards an empty result set.
+            COALESCE(SUM(COALESCE(pnl_r,-1)),0) as total_r,
+            COALESCE(SUM(pnl_usdt),0) as total_usdt,
+            COALESCE(MIN(COALESCE(pnl_r,-1)),0) as worst_r,
+            COALESCE(MAX(COALESCE(pnl_r,-1)),0) as best_r
             FROM trades
             WHERE (closed_at AT TIME ZONE 'UTC')::date >= :first_day
             GROUP BY (closed_at AT TIME ZONE 'UTC')::date) t

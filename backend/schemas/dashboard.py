@@ -101,7 +101,7 @@ class TradeItem(BaseModel):
     exit_price: float
     quantity: float
     pnl_usdt: float
-    pnl_r: float
+    pnl_r: float | None = None   # None = unknown 1R, not breakeven
     exit_reason: str
     strategy_type: str
     closed_at: datetime

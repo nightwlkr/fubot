@@ -12,7 +12,10 @@ class TradeResponse(BaseModel):
     exit_price: float
     quantity: float
     pnl_usdt: float
-    pnl_r: float
+    # None means 1R could not be established (no frozen
+    # initial_risk_distance) -- NOT zero. Do not coalesce to 0.0: that
+    # registers an unmeasurable loss as a breakeven.
+    pnl_r: float | None = None
     exit_reason: str
     strategy_type: str
     created_at: datetime

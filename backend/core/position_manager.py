@@ -14,9 +14,10 @@ from sqlalchemy import update
 from backend.models.position import Position
 from backend.models.trade import Trade
 from backend.models.signal import Signal
-from backend.services.binance_service import BinanceService
+from backend.services.binance_service import BinanceAPIError, BinanceService
 from backend.core.daily_reset import DailyResetService
 from backend.core.websocket_manager import ws_manager
+from backend.core import risk_units
 from backend.services.alert_service import AlertService
 
 logger = logging.getLogger(__name__)
@@ -758,12 +759,21 @@ class PositionManager:
             # (entry-to-original-SL), NOT the live stop_loss. BE-trailing moves
             # stop_loss toward entry; using it would shrink the denominator and
             # inflate |R| (a breakeven stop-out would read as a huge R move).
-            if row.initial_risk_distance is not None and float(row.initial_risk_distance) > 0:
-                risk_distance = float(row.initial_risk_distance)
-            else:
-                risk_distance = abs(entry - float(row.stop_loss)) if row.stop_loss else 0.01
-            risk_amount = risk_distance * qty
-            pnl_r = pnl_usdt / risk_amount if risk_amount > 0 else 0.0
+            #
+            # When the frozen distance is unavailable (adopted positions have
+            # none) this records NULL — "unknown" — rather than substituting the
+            # live, possibly trailed stop. The daily breaker prices NULL at a
+            # full -1R via `risk_units.daily_r_contribution`, so an unmeasurable
+            # trade tightens the limit instead of passing it free.
+            distance = risk_units.risk_distance(
+                entry_price=entry, stop_loss=row.stop_loss,
+                frozen=row.initial_risk_distance)
+            pnl_r = risk_units.pnl_r_from(pnl_usdt, qty, distance)
+            if pnl_r is None:
+                logger.error("[%s] cannot establish 1R for %s (frozen risk=%s) — "
+                             "recording R as unknown; the daily breaker will "
+                             "charge this a full -1R", row.symbol, row.id,
+                             row.initial_risk_distance)
 
             # Get strategy type from signal
             strategy_type = "UNKNOWN"
@@ -942,9 +952,37 @@ class PositionManager:
         """
         close_side = "SELL" if side == "LONG" else "BUY"
         try:
-            await self.binance.place_market_order(symbol, close_side, qty)
+            await self.binance.place_market_order(
+                symbol, close_side, qty, reduce_only=True)
             logger.info(f"[{symbol}] Live market close placed: {close_side} {qty}")
             return True
+        except BinanceAPIError as e:
+            # -2021 is what reduceOnly raises when there is nothing left to
+            # reduce — i.e. our own TP/SL beat us to it and the symbol is ALREADY
+            # flat. That is the outcome we wanted, not a failure: reporting it as
+            # one would re-arm an emergency stop against a flat account and
+            # escalate a successful close into an alert. Confirm, then succeed.
+            if e.code == -2021:
+                try:
+                    positions = await self.binance.get_all_open_positions()
+                    still_open = any(
+                        (p.get("symbol") or "").upper() == symbol.upper()
+                        and abs(float(p.get("quantity") or 0)) > 0
+                        for p in (positions or []))
+                except Exception as check_exc:
+                    logger.error(
+                        "[%s] Close rejected as reduceOnly and flatness could "
+                        "NOT be confirmed (%s) — treating as failure",
+                        symbol, check_exc)
+                    return False
+                if not still_open:
+                    logger.info(
+                        "[%s] Close rejected as reduceOnly and the position is "
+                        "flat — the exchange's own stop/TP filled first. "
+                        "Treating as closed.", symbol)
+                    return True
+            logger.error(f"[{symbol}] Live market close failed: {e}")
+            return False
         except Exception as e:
             logger.error(f"[{symbol}] Live market close failed: {e}")
             return False

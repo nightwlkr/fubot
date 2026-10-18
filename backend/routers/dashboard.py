@@ -122,7 +122,9 @@ async def dashboard_overview(
     trade_result = await db.execute(select(Trade))
     trades = trade_result.scalars().all()
     total = len(trades)
-    wins = sum(1 for t in trades if t.pnl_r > 0)
+    # pnl_r may be NULL (unknown 1R). `None > 0` raises TypeError in py3,
+    # and a NULL row is neither a win nor a loss -- it is unmeasured.
+    wins = sum(1 for t in trades if t.pnl_r is not None and t.pnl_r > 0)
     win_rate = (wins / total * 100) if total > 0 else 0.0
     best_trade = max((t.pnl_r for t in trades), default=0.0)
     worst_trade = min((t.pnl_r for t in trades), default=0.0)
