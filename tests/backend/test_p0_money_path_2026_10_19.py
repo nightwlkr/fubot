@@ -248,6 +248,39 @@ class TestOrderPostsAreNotBlindlyRetried:
         assert len(ids) == 2, "each order POST must carry a client order id"
         assert ids[0] != ids[1], "client order ids must be unique per order"
 
+    @pytest.mark.parametrize("call,args", [
+        ("place_limit_order", ("BTCUSDT", "BUY", 100.0, 1.0)),
+        ("modify_position_stop", ("BTCUSDT", "LONG", 95.0, 1.0)),
+        ("place_take_profit_order", ("BTCUSDT", "LONG", 115.0, 1.0)),
+    ])
+    async def test_limit_and_protective_orders_also_carry_client_ids(self, call, args):
+        """A duplicated resting LIMIT entry, or a duplicated protective stop, is
+        just as unmanaged as a duplicated market order — the id is what lets a
+        reconcile find and cancel the orphan."""
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(200, json={
+                "orderId": 1, "algoId": 1, "executedQty": "1",
+                "avgPrice": "100", "cumQuote": "100", "status": "FILLED",
+                "algoStatus": "NEW",
+            })
+
+        svc = _signed_service(handler)
+        svc.get_lot_size = lambda symbol: _async_value(
+            {"stepSize": "0.001", "minQty": "0.001"})
+        try:
+            await getattr(svc, call)(*args)
+        finally:
+            await svc.close()
+
+        assert seen, f"{call} made no request"
+        assert "newClientOrderId=" in seen[0], (
+            f"{call} posts an order without a client order id, so a timed-out "
+            "one cannot be reconciled or de-duplicated"
+        )
+
 
 class TestNoSecretFragmentIsLogged:
     """`auth_service` logged `FUBOT_SECRET_KEY[:4]` on every failed login — so

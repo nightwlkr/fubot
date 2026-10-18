@@ -565,7 +565,8 @@ class BinanceService:
         data = await self._signed_request(
             "POST", "fapi/v1/order",
             {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
-             "quantity": qty, "price": px},
+             "quantity": qty, "price": px,
+             "newClientOrderId": self._next_client_order_id()},
             weight=2,
         )
         return {
@@ -739,7 +740,8 @@ class BinanceService:
             "POST", "fapi/v1/algoOrder",
             {"symbol": symbol, "side": close_side, "type": "STOP_MARKET",
              "triggerPrice": price, "quantity": qty, "reduceOnly": "true",
-             "algoType": "CONDITIONAL"},
+             "algoType": "CONDITIONAL",
+             "newClientOrderId": self._next_client_order_id()},
             weight=2,
         )
         return {
@@ -759,7 +761,8 @@ class BinanceService:
             "POST", "fapi/v1/algoOrder",
             {"symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
              "triggerPrice": price, "quantity": qty, "reduceOnly": "true",
-             "algoType": "CONDITIONAL"},
+             "algoType": "CONDITIONAL",
+             "newClientOrderId": self._next_client_order_id()},
             weight=2,
         )
         return {
