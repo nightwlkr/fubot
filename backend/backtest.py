@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SIGNAL_MAX_AGE_MIN = 60
 
 
-def fill_at_midpoint(k5m: list[dict], signal_idx: int,
+def fill_at_midpoint(series: list[dict], signal_idx: int,
                      zone_lo: float, zone_hi: float,
                      max_age_ms: int) -> Optional[tuple[int, float]]:
     """First bar at/after `signal_idx` whose range touches the zone midpoint.
@@ -42,13 +42,22 @@ def fill_at_midpoint(k5m: list[dict], signal_idx: int,
     not the bar's open — that is what a resting LIMIT at the midpoint gets.
     Scanning starts at `signal_idx + 1`: the signal bar is already closed when
     the signal exists, so filling on it would be lookahead.
+
+    `series` is the signal's OWN interval (1h, 5m or 15m) — not necessarily 5m.
+    The expiry deadline is measured from the signal bar's CLOSE, matching live:
+    `evaluate_signal` only learns the signal once its bar has closed, and
+    `signal_max_age_minutes` counts from there. Measuring from `open_time`
+    instead grants up to a full extra bar of life that live never had.
     """
     midpoint = (zone_lo + zone_hi) / 2.0
-    if not 0 <= signal_idx < len(k5m):
+    if not 0 <= signal_idx < len(series):
         return None
-    deadline = k5m[signal_idx]["open_time"] + max_age_ms
-    for i in range(signal_idx + 1, len(k5m)):
-        c = k5m[i]
+    signal_close = series[signal_idx].get("close_time")
+    if signal_close is None:
+        return None  # fail closed: an unreadable signal age is not a fresh signal
+    deadline = signal_close + max_age_ms
+    for i in range(signal_idx + 1, len(series)):
+        c = series[i]
         if c["open_time"] > deadline:
             return None
         if c["low"] <= midpoint <= c["high"]:
@@ -58,7 +67,23 @@ def fill_at_midpoint(k5m: list[dict], signal_idx: int,
 
 def rr_at_fill(sl: float, tp: float, direction: str,
                fill: float, rr_min: float) -> float:
-    """R:R actually achieved at `fill`, mirroring the live re-check."""
+    """R:R actually achieved at `fill`, mirroring the live re-check.
+
+    Direction-AGNOSTIC by design, and the reason is load-bearing. The live
+    equivalent (`RiskService.validate_rr_ratio`) is SIDE-AWARE, and its `abs()`
+    predecessor scored a LONG whose stop sat ABOVE its entry at 93:1 — the
+    historical shape this codebase calls out in `backend/AGENTS.md`. But that
+    inversion is caught EARLIER and by a different rule: live gate 4b requires
+    the stop to be strictly on the correct side of the price, and the bot
+    flattens at market when it is not ("Setup void after fill").
+
+    This function is a pure re-measurement of the ratio at a price that is
+    inside the zone, so a stop on the wrong side cannot survive to reach it.
+    Adding a signed side check here would duplicate gate 4b, and — because a
+    wrong-side stop makes `reward/risk` LARGE — would in practice reject
+    nothing that gate 4b had not already rejected. `rr_min` is accepted so the
+    caller reads as the live gate it mirrors; it is not needed for the ratio.
+    """
     risk = abs(fill - sl)
     if risk <= 0:
         return 0.0
@@ -75,6 +100,13 @@ class BacktestTrade:
     stop: float
     take_profit: float
     entry_idx: int
+    # `entry_idx` indexes the signal's OWN interval, so it is meaningless
+    # without knowing which. Both of these are required to interpret it — an
+    # index into k1h and an index into k5m are not comparable, and reading
+    # `k1h[t.entry_idx]` for a 5m signal silently returns the wrong bar.
+    timeframe: str = "1h"
+    # open_time of the bar the signal came from; the fill is strictly after it.
+    signal_open_time: int = 0
     exit_idx: Optional[int] = None
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None  # TP_HIT / SL_HIT
@@ -159,6 +191,11 @@ class Backtester:
         self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
         self.signal_max_age_ms = int(
             self.settings.get("signal_max_age_minutes", DEFAULT_SIGNAL_MAX_AGE_MIN)) * 60_000
+        # Strategy toggles, matching the live setting names so the same settings
+        # dict drives both (see `_detect_candidates` for why these matter).
+        self.fvg_enabled = bool(self.settings.get("strategy_fvg_enabled", True))
+        self.three_candle_enabled = bool(self.settings.get("strategy_3candle_enabled", True))
+        self.choch_enabled = bool(self.settings.get("strategy_choch_enabled", True))
         self._strength_rank = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
 
     def _source_index(self, candles: list[dict], at_ms: int) -> int:
@@ -171,7 +208,7 @@ class Backtester:
         return last_closed_before(candles, at_ms)
 
     def _detect_candidates(self, k1h: list[dict], k5m: list[dict], k15m: list[dict],
-                           at_idx: int) -> list[tuple]:
+                           at_idx: int) -> tuple[list[tuple], object]:
         """Detect + evaluate signals using only candles knowable at `at_idx`.
 
         Mirrors signal_service.scan_symbol: 1h context (ATR/trend), FVG on 1h,
@@ -184,8 +221,16 @@ class Backtester:
         different periods — so the trend filter read a different month than the
         entries it filtered.
 
-        Returns `(strategy, direction, evaluation, vol_source, timeframe, zone)`
-        where `zone` is the entry ZONE `(lo, hi)` the live bot rests its LIMIT
+        NOTE the 1h view is `k1h[:k1h_idx + 1]` and `k1h_idx` is the last bar
+        CLOSED at `at_idx`'s open_time — i.e. bar `at_idx` itself is EXCLUDED,
+        because it is still forming. Anything computed from the returned bias
+        therefore shares the detector's exact view; computing the bias in the
+        caller from `k1h[:at_idx + 1]` gave the filters one bar the detector
+        could not see, which is lookahead in the filter.
+
+        Returns `(candidates, bias)` where each candidate is
+        `(strategy, direction, evaluation, vol_source, timeframe, zone)` and
+        `zone` is the entry ZONE `(lo, hi)` the live bot rests its LIMIT
         midpoint inside — not the point estimate. All three detectors expose a
         real zone, so no synthetic fallback is needed here.
         """
@@ -194,37 +239,47 @@ class Backtester:
         k5m_idx = self._source_index(k5m, at_ms)
         k15m_idx = self._source_index(k15m, at_ms)
         if k1h_idx < 0 or k5m_idx < 0 or k15m_idx < 0:
-            return []
+            return [], None
 
         # need enough history for indicators
         k1h_u = k1h[:k1h_idx + 1]
         if len(k1h_u) < 60:
-            return []
+            return [], None
         k5m_u = k5m[:k5m_idx + 1]
         k15m_u = k15m[:k15m_idx + 1]
         atr = calculate_atr(k1h_u, 14) or 0.0
         bias = analyze_trend_bias([c["close"] for c in k1h_u])
 
+        # Strategy toggles, mirroring signal_service.scan_symbol. Without them a
+        # backtest cannot isolate one strategy's fill path: `run` takes a single
+        # position per detection bar and candidates are appended FVG, 3CANDLE,
+        # CHOC — the same order live uses — so FVG starves the others on any
+        # data where it fires often. Live has had these gates since DECISION.md
+        # D1; the harness silently did not, which is why FVG-only results could
+        # never be checked against a 3CANDLE-only or CHOC-only run.
         cands: list[tuple] = []
-        for f in detect_fvg(k1h_u, ""):
-            e = evaluate_fvg_entry(f, atr, self.rr_min)
-            if e["is_valid"]:
-                cands.append(("FVG", "LONG" if f.direction == "BULLISH" else "SHORT", e,
-                              k1h_u, "1h", (f.zone_min, f.zone_max)))
-        for p in detect_three_candles(k5m_u, "", "5m"):
-            e = evaluate_three_candle_entry(p, atr, self.rr_min)
-            if e["is_valid"]:
-                cands.append(("3CANDLE", "LONG" if p.direction == "BULLISH" else "SHORT", e,
-                              k5m_u, "5m", (p.entry_zone_min, p.entry_zone_max)))
-        for ch in detect_choch(k15m_u, "", "15m", atr, self.rr_min):
-            if ch.is_valid:
-                e = {"entry_price": (ch.pullback_entry_zone[0] + ch.pullback_entry_zone[1]) / 2,
-                     "stop_loss": ch.stop_loss, "take_profit": ch.take_profit,
-                     "rr_ratio": ch.rr_ratio or 0.0, "is_valid": True}
-                cands.append(("CHOC", "LONG" if ch.direction == "BULLISH" else "SHORT", e,
-                              k15m_u, "15m", (ch.pullback_entry_zone[0],
-                                              ch.pullback_entry_zone[1])))
-        return cands
+        if self.fvg_enabled:
+            for f in detect_fvg(k1h_u, ""):
+                e = evaluate_fvg_entry(f, atr, self.rr_min)
+                if e["is_valid"]:
+                    cands.append(("FVG", "LONG" if f.direction == "BULLISH" else "SHORT", e,
+                                  k1h_u, "1h", (f.zone_min, f.zone_max)))
+        if self.three_candle_enabled:
+            for p in detect_three_candles(k5m_u, "", "5m"):
+                e = evaluate_three_candle_entry(p, atr, self.rr_min)
+                if e["is_valid"]:
+                    cands.append(("3CANDLE", "LONG" if p.direction == "BULLISH" else "SHORT", e,
+                                  k5m_u, "5m", (p.entry_zone_min, p.entry_zone_max)))
+        if self.choch_enabled:
+            for ch in detect_choch(k15m_u, "", "15m", atr, self.rr_min):
+                if ch.is_valid:
+                    e = {"entry_price": (ch.pullback_entry_zone[0] + ch.pullback_entry_zone[1]) / 2,
+                         "stop_loss": ch.stop_loss, "take_profit": ch.take_profit,
+                         "rr_ratio": ch.rr_ratio or 0.0, "is_valid": True}
+                    cands.append(("CHOC", "LONG" if ch.direction == "BULLISH" else "SHORT", e,
+                                  k15m_u, "15m", (ch.pullback_entry_zone[0],
+                                                  ch.pullback_entry_zone[1])))
+        return cands, bias
 
     def _passes_filters(self, direction: str, rr: float, entry: float, sl: float,
                         bias, vol_candles: list[dict], skip: dict) -> bool:
@@ -265,50 +320,83 @@ class Backtester:
             return False
         return True
 
+    def _resolve_exit(self, trade: BacktestTrade, series: list[dict]) -> None:
+        """Walk the trade's OWN interval forward from the bar after the fill,
+        closing on whichever of SL/TP the range reaches first.
+
+        The exit MUST run on the same interval as the entry. Evaluating a 5m
+        entry against 1h bars had two defects: an SL hit ten minutes after a
+        mid-hour fill is invisible inside an hourly range, and the first bar
+        checked can OPEN before the fill — lookahead on the exit path, which the
+        previous docstring denied while doing it.
+
+        Both legs are checked on the same bar, so a bar whose range spans stop
+        AND target is resolved conservatively (stop first), as before.
+
+        KNOWN LIMITATION, stated rather than hidden: this resolves each trade to
+        completion before the outer loop advances, so it is correct on interval
+        and strictly post-fill, but it is not an event loop — overlapping
+        positions cannot overlap in time, and `max_open > 1` is not honoured.
+        A full multi-position exit model is scoped follow-up work.
+        """
+        t = trade
+        for j in range(t.entry_idx + 1, len(series)):
+            c = series[j]
+            hi, lo = c["high"], c["low"]
+            if t.direction == "LONG":
+                if lo <= t.stop:
+                    self._close(t, j, t.stop, "SL_HIT")
+                    return
+                if hi >= t.take_profit:
+                    self._close(t, j, t.take_profit, "TP_HIT")
+                    return
+            else:
+                if hi >= t.stop:
+                    self._close(t, j, t.stop, "SL_HIT")
+                    return
+                if lo <= t.take_profit:
+                    self._close(t, j, t.take_profit, "TP_HIT")
+                    return
+        # Ran out of data with the trade still open: leave `exit_idx` None so
+        # `BacktestResult.open` counts it and it stays out of expectancy.
+
     def run(self, symbol: str, k1h: list[dict], k5m: list[dict], k15m: list[dict],
             max_open: int = 1) -> BacktestResult:
-        """Walk candles forward; on each 1h close detect signals, simulate
-        SL/TP exits against subsequent 1h candles. No lookahead: a signal is
-        only ever evaluated against candles that had CLOSED, it fills on a LATER
-        bar of its OWN interval, and it is only checked against candles after
-        the entry."""
+        """Walk the 1h series forward; on each bar detect signals, then resolve
+        each fill to its exit on the signal's OWN interval.
+
+        No-lookahead guarantees, precisely:
+          - detection uses only candles CLOSED at the detection bar's open_time,
+            so the still-forming 1h bar is excluded from the detectors AND from
+            the bias the filters read (they share one truncated view);
+          - a fill lands strictly AFTER the signal bar, on the signal's own
+            interval, at the zone midpoint;
+          - the exit scan starts strictly after the fill bar, on that same
+            interval.
+
+        See `_resolve_exit` for what this deliberately does NOT model.
+        """
         result = BacktestResult(symbol=symbol, candles=len(k1h))
-        open_trade: Optional[BacktestTrade] = None
         vol_stride = 10  # re-evaluate volume every N candles (matches scan cadence)
 
         for i in range(60, len(k1h)):
-            # --- 1. manage an open trade against this candle's range ---
-            if open_trade is not None:
-                hi, lo = k1h[i]["high"], k1h[i]["low"]
-                t = open_trade
-                if t.direction == "LONG":
-                    # check SL first (conservative: stop before target if both hit)
-                    if lo <= t.stop:
-                        self._close(t, i, t.stop, "SL_HIT")
-                    elif hi >= t.take_profit:
-                        self._close(t, i, t.take_profit, "TP_HIT")
-                else:
-                    if hi >= t.stop:
-                        self._close(t, i, t.stop, "SL_HIT")
-                    elif lo <= t.take_profit:
-                        self._close(t, i, t.take_profit, "TP_HIT")
-                if not open_trade.open:
-                    open_trade = None
-
-            # --- 2. detect new signals (skip if a trade is open) ---
-            if open_trade is not None:
-                continue
             if i % vol_stride != 0:
                 continue
 
-            bias = analyze_trend_bias([c["close"] for c in k1h[:i + 1]])
-            cands = self._detect_candidates(k1h, k5m, k15m, i)
+            cands, bias = self._detect_candidates(k1h, k5m, k15m, i)
+            if bias is None:
+                continue
             for strategy, direction, e, vol_src, tf, zone in cands:
-                entry = e["entry_price"]
                 sl = e["stop_loss"]
                 tp = e["take_profit"]
                 zone_lo, zone_hi = zone
-                vol_candles = (k1h if tf == "1h" else k5m)
+                # Live gates the PRE-fill chain on the zone MIDPOINT, because
+                # that is the price the LIMIT will actually rest at. The
+                # detector's point estimate (`e["entry_price"]`) is a different
+                # number — 3CANDLE's is c1.high while the zone is
+                # c1.low..c1.high — so filtering on it gated on a price the
+                # order would never be at.
+                entry = (zone_lo + zone_hi) / 2.0
                 vol_window = vol_src[-15:-5] if len(vol_src) > 15 else vol_src
                 if not self._passes_filters(direction, e["rr_ratio"], entry, sl,
                                             bias, vol_window, result.skipped):
@@ -329,7 +417,9 @@ class Backtester:
                     continue
                 trade = BacktestTrade(
                     symbol=symbol, strategy=strategy, direction=direction,
-                    entry=fill, stop=sl, take_profit=tp, entry_idx=fill_idx)
+                    entry=fill, stop=sl, take_profit=tp, entry_idx=fill_idx,
+                    timeframe=tf,
+                    signal_open_time=tf_candles[sig_idx]["open_time"])
                 # pnl_r uses the frozen entry-to-stop distance (mirrors
                 # positions.initial_risk_distance)
                 risk_dist = abs(fill - sl)
@@ -337,8 +427,9 @@ class Backtester:
                     continue
                 trade._risk_dist = risk_dist  # type: ignore[attr-defined]
                 result.trades.append(trade)
-                open_trade = trade
-                break  # one open position at a time (max_open=1)
+                self._resolve_exit(trade, tf_candles)
+                break  # one position at a time (max_open is not honoured; see
+                       # `_resolve_exit`'s KNOWN LIMITATION)
 
         return result
 

@@ -283,54 +283,132 @@ class TestBacktester:
     _MS_1H = 60 * 60 * 1000
     _T0 = 1_700_000_000_000
 
-    # A repeating 4-bar block that is a genuine BULLISH 3-candle sweep:
-    # c2 wicks below c1's low, closes back inside c1's range, and c3 closes
-    # above c1's high. Entry zone is c1's low..high (99..102).
+    # A seeded random walk, NOT a repeating block.
     #
-    # The previous fixture was a MONOTONIC RAMP, which contains no 3-candle
-    # pattern, no FVG and no CHoCH at all — zero detections on any interval. It
-    # only ever produced "trades" because the misaligned proportional-index
-    # slices concatenated unrelated bars and manufactured patterns out of the
-    # seams. A fixture that cannot detect a signal proves nothing about fills.
-    _BLOCK = [
-        (100.0, 102.0, 99.0, 101.0),
-        (101.0, 101.5, 98.0, 100.0),
-        (100.0, 103.0, 100.0, 103.0),
-        (103.0, 104.0, 102.5, 103.5),
-    ]
+    # Two earlier fixtures were structurally blind and neither test suite said so:
+    #   - a MONOTONIC RAMP: no 3-candle pattern, no FVG, no CHoCH on any
+    #     interval. Its "trades" were manufactured out of the seams where the
+    #     misaligned proportional-index slices concatenated unrelated bars.
+    #   - a repeating 4-bar BLOCK: plenty of 3-candle and FVG detections, but
+    #     ZERO CHoCH, because `candles[i]["high"] == candles[i-4]["high"]` for
+    #     every i, so no bar is strictly higher than its neighbours on both
+    #     sides and `find_pivot_highs_lows` returns empty. `detect_choch` then
+    #     bails at its `len(highs) < 2` guard. That left the 15m fill path — the
+    #     exact path defect 4 was about — completely untested.
+    #
+    # The walk is deterministic (fixed seed) and non-periodic, which is the
+    # property pivots need. `_series()` folds one 5m path into 15m and 1h so
+    # all three intervals share a single coherent price history, as real klines
+    # do — deriving each interval independently also made k1h opens identical
+    # to k5m opens, which silently defeated one of the fill assertions.
+    _SEED = 26
+    _DRIFT = -0.05
+    _VOL = 0.8
 
     @classmethod
-    def _candles(cls, n=120, step_ms=None):
-        """Synthetic series on a real WALL-CLOCK grid.
+    def _path(cls, n):
+        """A deterministic pseudo-random OHLC path of 5m bars."""
+        import random
+        rnd = random.Random(cls._SEED)
+        px, out = 100.0, []
+        for _ in range(n):
+            o = px
+            c = o + rnd.gauss(cls._DRIFT, cls._VOL)
+            h = max(o, c) + abs(rnd.gauss(0, cls._VOL * 0.5))
+            l = min(o, c) - abs(rnd.gauss(0, cls._VOL * 0.5))
+            out.append((o, h, l, c))
+            px = c
+        return out
+
+    @staticmethod
+    def _fold(path, stride):
+        """Aggregate `stride` consecutive 5m bars into one coarser candle."""
+        return [(path[i][0],
+                 max(g[1] for g in path[i:i + stride]),
+                 min(g[2] for g in path[i:i + stride]),
+                 path[i + stride - 1][3])
+                for i in range(0, len(path) - stride + 1, stride)]
+
+    @classmethod
+    def _candles(cls, bars, step_ms, start_idx=0):
+        """Attach a real WALL-CLOCK grid to an OHLC sequence.
 
         The harness truncates each interval by time, not by proportional index,
         so a fixture without wall-clock times is not a weaker test — it is not
-        runnable at all. The old `close_time` was a naive datetime repeating
-        every 24 bars by `i % 24` and could never order two series.
+        runnable at all. The original `close_time` was a naive datetime
+        repeating every 24 bars by `i % 24` and could never order two series.
         """
-        step_ms = step_ms or cls._MS_1H
-        out = []
-        for i in range(n):
-            o, h, l, c = cls._BLOCK[i % len(cls._BLOCK)]
-            open_time = cls._T0 + i * step_ms
-            out.append({"open_time": open_time,
-                        "open": o, "high": h, "low": l,
-                        "close": c, "volume": 1000.0,
-                        "close_time": open_time + step_ms - 1})
-        return out
+        return [{"open_time": cls._T0 + (start_idx + i) * step_ms,
+                 "open": o, "high": h, "low": l, "close": c, "volume": 1000.0,
+                 "close_time": cls._T0 + (start_idx + i) * step_ms + step_ms - 1}
+                for i, (o, h, l, c) in enumerate(bars)]
 
     @classmethod
     def _series(cls):
-        """The three intervals a `run` needs, spanning the SAME wall clock."""
-        return (cls._candles(120, cls._MS_1H),
-                cls._candles(480, cls._MS_5M),
-                cls._candles(160, cls._MS_15M))
+        """The three intervals a `run` needs, spanning the SAME wall clock.
+
+        1440 5m bars = 5 days, folding to 480 15m and 120 1h. All three start
+        at the same wall clock, so `_source_index` maps 1h bar i to exactly
+        12*i 5m bars and 4*i 15m bars."""
+        p5 = cls._path(1440)
+        return (cls._candles(cls._fold(p5, 12), cls._MS_1H),
+                cls._candles(p5, cls._MS_5M),
+                cls._candles(cls._fold(p5, 3), cls._MS_15M))
 
     @classmethod
     def _bt(cls, **overrides):
         from backend.backtest import Backtester
         return Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
-                                    "trade_neutral_markets": True, **overrides})
+                                    "trade_neutral_markets": True,
+                                    "volume_filter_enabled": False, **overrides})
+
+    @classmethod
+    def _trades_all_strategies(cls):
+        """(strategy, timeframe) pairs for one run per strategy, all three on.
+
+        A single run cannot do this: `run` opens at most one position per
+        detection bar and appends candidates FVG, 3CANDLE, CHOC — the same order
+        live uses — so on this data FVG takes the slot and the other two are
+        never reached. Isolating each via the live strategy toggles is the only
+        way to exercise all three fill paths."""
+        k1h, k5m, k15m = cls._series()
+        out = {}
+        for name, ov in (
+            ("FVG", {"strategy_3candle_enabled": False, "strategy_choch_enabled": False}),
+            ("3CANDLE", {"strategy_fvg_enabled": False, "strategy_choch_enabled": False}),
+            ("CHOC", {"strategy_fvg_enabled": False, "strategy_3candle_enabled": False}),
+        ):
+            r = cls._bt(**ov).run("X", k1h, k5m, k15m)
+            assert r.trades, f"{name} produced no trades — fixture cannot test its fill"
+            out[name] = r.trades
+        return k1h, k5m, k15m, out
+
+    def test_every_strategy_detects_on_the_fixture(self):
+        """The fixture must exercise all THREE detectors on all THREE intervals.
+
+        Two earlier fixtures were structurally blind and neither suite said so: a
+        monotonic ramp detects nothing at all, and a repeating 4-bar block
+        detects plenty of 3-candle and FVG signals but ZERO CHoCH — because
+        `candles[i]["high"] == candles[i-4]["high"]` disqualifies every pivot,
+        so `find_pivot_highs_lows` returns empty and `detect_choch` bails at its
+        `len(highs) < 2` guard. That left the 15m fill path untested, which is
+        precisely the path defect 4 was about."""
+        from backend.indicators.atr import calculate_atr
+        from backend.indicators.choch import detect_choch
+        from backend.indicators.fvg import detect_fvg
+        from backend.indicators.pivots import find_pivot_highs_lows
+        from backend.indicators.three_candle import detect_three_candles
+        k1h, k5m, k15m = self._series()
+        for tf, series in (("1h", k1h), ("5m", k5m), ("15m", k15m)):
+            atr = calculate_atr(series, 14) or 0.0
+            highs, lows = find_pivot_highs_lows(series)
+            assert len(highs) >= 2 and len(lows) >= 2, (
+                f"{tf}: no pivots, so detect_choch returns [] at its guard "
+                f"(got {len(highs)} highs / {len(lows)} lows)")
+            assert detect_fvg(series), f"{tf}: no FVG"
+            assert detect_three_candles(series), f"{tf}: no 3-candle pattern"
+            assert any(c.is_valid for c in
+                       detect_choch(series, "X", tf, atr, 3.0)), f"{tf}: no valid CHoCH"
 
     def test_backtest_deterministic(self):
         """Same input → identical result (pure function over candles)."""
@@ -341,31 +419,57 @@ class TestBacktester:
         assert r1.summary() == r2.summary(), "backtest must be deterministic"
 
     def test_backtest_no_lookahead(self):
-        """A fill happens on a LATER bar of the signal's OWN interval, at a price
-        that bar actually reached.
+        """A fill lands on a LATER bar of the signal's OWN interval, at a price
+        that bar's range actually reached.
 
-        This used to assert `t.entry == k1h[t.entry_idx]["open"]` — the 1h-open
-        fill that WAS defect 4. It also silently gave 5m/15m signals an entry on
-        the 1h series. The property that actually matters now is that the entry
-        is a real traded price of the fill bar, and that the fill bar is not the
-        signal bar."""
-        from backend.backtest import Backtester
-        k1h, k5m, k15m = self._series()
-        r = self._bt().run("X", k1h, k5m, k15m)
-        assert r.trades, "fixture must still produce trades or this proves nothing"
-        by_open_time = {}
-        for series in (k1h, k5m, k15m):
-            for i, c in enumerate(series):
-                by_open_time[c["open_time"]] = (i, c)
-        for t in r.trades:
-            assert t.entry_idx >= 0
-            # The fill bar is a real bar on SOME interval, and the entry is a
-            # price that bar's range actually reached (a resting LIMIT fill).
-            hit = [c for _, c in by_open_time.values()
-                   if c["low"] <= t.entry <= c["high"]]
-            assert hit, f"entry {t.entry} was never inside any bar's range"
-            # Never a 1h open: that was the whole defect.
-            assert t.entry not in [c["open"] for c in k1h]
+        The previous version of this test asserted `t.entry == k1h[t.entry_idx]
+        ["open"]` — which pinned defect 4 directly, and was green only because it
+        asserted the bug. Its replacement (which any of the three series could
+        satisfy, and whose "not a 1h open" half was defeated by the fixture
+        giving every interval the same opens) is written as a property that can
+        actually fail: index the RIGHT series by `t.timeframe`, and require the
+        fill bar to be strictly later than the signal bar.
+
+        Covering every strategy is the point — a 1h-only assertion is exactly
+        what let the 15m path go untested."""
+        series_by_tf = {"1h": None, "5m": None, "15m": None}
+        k1h, k5m, k15m, per_strategy = self._trades_all_strategies()
+        series_by_tf.update({"1h": k1h, "5m": k5m, "15m": k15m})
+        seen = set()
+        for trades in per_strategy.values():
+            for t in trades:
+                seen.add(t.timeframe)
+                series = series_by_tf[t.timeframe]
+                bar = series[t.entry_idx]
+                assert bar["low"] <= t.entry <= bar["high"], (
+                    f"{t.strategy}: entry {t.entry} is outside the FILL bar's "
+                    f"range {bar['low']}..{bar['high']}")
+                assert bar["open_time"] > t.signal_open_time, (
+                    f"{t.strategy}: filled on/before the signal bar")
+        assert seen == {"1h", "5m", "15m"}, \
+            f"the fill property must be checked on all three intervals, saw {seen}"
+
+    def test_the_exit_is_resolved_on_the_trades_own_interval(self):
+        """`entry_idx` and `exit_idx` index the SAME series, and the exit bar is
+        strictly after the fill bar.
+
+        They used to be on incomparable scales: `entry_idx` indexed k5m/k15m
+        while `_close(t, i, ...)` wrote `exit_idx = i` indexing k1h, so any
+        consumer doing `k1h[t.entry_idx]` — which the old no-lookahead assertion
+        did — read a completely unrelated bar. Worse, the exit scan could start
+        on a bar that OPENED before the fill, which is lookahead on the exit."""
+        k1h, k5m, k15m, per_strategy = self._trades_all_strategies()
+        by_tf = {"1h": k1h, "5m": k5m, "15m": k15m}
+        for trades in per_strategy.values():
+            for t in trades:
+                if t.exit_idx is None:
+                    continue
+                series = by_tf[t.timeframe]
+                assert t.exit_idx < len(series), "exit_idx must index its own series"
+                assert series[t.exit_idx]["open_time"] > series[t.entry_idx]["open_time"], \
+                    "the exit bar must open strictly after the fill bar"
+                # R is computed from the frozen entry-to-stop distance.
+                assert t.pnl_r != 0.0 or t.exit_price in (t.stop, t.take_profit)
 
     def test_backtest_reports_expectancy(self):
         k1h, k5m, k15m = self._series()
