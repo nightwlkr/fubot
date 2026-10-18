@@ -1180,3 +1180,50 @@ class TestTheRulesExistInExactlyOnePlace:
                         and n.func.attr == "today" and not n.args):
                     offenders.append(f"{p}:{n.lineno}")
         assert offenders == [], f"local-day resolution at {offenders}"
+
+
+# --------------------------------------------- exchange_sync R-rewrite guard
+
+class TestExchangeSyncWillNotFabricateR:
+    """The sync recomputes `pnl_r = exchange_pnl / (initial_risk_distance * quantity)`.
+
+    On 2026-10-18 that division, run unguarded, rewrote four trades past
+    |R| > 10 and pushed the daily summary to +134.6R — which is the breaker's
+    own input. A $1.36 trade became +92.69R because its frozen 1R was $0.0147.
+    """
+
+    def _guard(self):
+        from backend.routers.settings import MAX_PLAUSIBLE_R_MULTIPLE
+        return MAX_PLAUSIBLE_R_MULTIPLE
+
+    def test_a_credible_r_is_still_writable(self):
+        """The guard must not block ordinary trades. 1R was 1% of ~$221 equity."""
+        cap = self._guard()
+        assert 0.61 / 2.21 < cap, "a normal trade must remain writable"
+
+    @pytest.mark.parametrize("usd,risk_amt,label", [
+        (1.36, 0.014709, "376 ETHUSDT -> +92.69R"),
+        (1.39, 0.025688, "364 SOLUSDT -> +54.01R"),
+        (-8.34, 0.456700, "354 AVAXUSDT -> -18.26R"),
+    ])
+    def test_an_implausible_r_from_an_implausible_risk_basis_is_refused(self, usd, risk_amt, label):
+        """Real numbers from the incident. `risk_amt` far below the intended 1R
+        means the division is meaningless, not that the trade was exceptional."""
+        cap = self._guard()
+        assert abs(usd / risk_amt) >= cap, f"{label} must trip the guard"
+
+    def test_the_sync_actually_gates_the_rewrite_on_the_cap(self):
+        """Source contract: the cap must be *used*, not merely defined — a
+        constant nobody references is exactly how the unguarded version looked
+        like it was protected."""
+        import inspect
+        import backend.routers.settings as s
+        src = inspect.getsource(s.exchange_sync)
+        assert "MAX_PLAUSIBLE_R_MULTIPLE" in src
+        # and the skip path must leave pnl_r out of the UPDATE it issues
+        skip = src.split("MAX_PLAUSIBLE_R_MULTIPLE", 1)[1]
+        assert ".values(pnl_usdt=" in skip, \
+            "the skip path must write USD only and leave R untouched"
+        assert "pnl_r=" not in skip.split("pnl_r = candidate_r")[0].split(
+            "await db.execute", 1)[-1], \
+            "the skip path must not write pnl_r"

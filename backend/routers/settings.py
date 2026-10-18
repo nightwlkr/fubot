@@ -24,6 +24,12 @@ from backend.encryption import encrypt, decrypt, mask_key
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
 
+# Ceiling on an R multiple that `exchange_sync` will write. The strategy's R:R is
+# 3:1, so a real trade lands well inside single digits; anything at or above this
+# means the division used an implausible risk basis, not that the trade was
+# exceptional. See the guard in `exchange_sync`.
+MAX_PLAUSIBLE_R_MULTIPLE = 10.0
+
 
 async def get_current_user_from_cookie(request: Request, db: AsyncSession):
     from backend.services import auth_service
@@ -348,14 +354,39 @@ async def exchange_sync(
 
             # Only fix if significantly different (> $0.01)
             if abs(exchange_pnl - db_pnl) > 0.01:
-                # Recalculate R from the position's frozen risk distance
+                # Recalculate R from the position's frozen risk distance.
+                #
+                # GUARD (2026-10-18): this used to divide unconditionally by
+                # `risk_amt`. On positions whose stored risk basis is far below
+                # the intended 1R that produced absurd multiples — a $1.36 trade
+                # became +92.69R because its frozen 1R was $0.0147. One sync run
+                # put four trades past |R| > 10 and the daily summary read
+                # +134.6R, which is the breaker's OWN input.
+                #
+                # The division is only sound if the risk basis is credible. When
+                # it is not, the USD correction is still applied but R is LEFT
+                # ALONE: an unreadable risk basis must not silently become a
+                # fabricated multiple.
                 pnl_r = float(trade.pnl_r)
                 if trade.position_id:
                     pos = await db.get(Position, trade.position_id)
                     if pos and pos.initial_risk_distance and float(pos.initial_risk_distance) > 0:
                         risk_amt = float(pos.initial_risk_distance) * float(trade.quantity)
-                        if risk_amt > 0:
-                            pnl_r = exchange_pnl / risk_amt
+                        candidate_r = exchange_pnl / risk_amt
+                        if abs(candidate_r) >= MAX_PLAUSIBLE_R_MULTIPLE:
+                            logger.warning(
+                                "Exchange sync: SKIPPING R rewrite for %s trade "
+                                "%s — %.2fR implied from a frozen 1R of $%.4f is "
+                                "not credible; keeping the recorded %.2fR",
+                                trade.symbol, trade.id, candidate_r, risk_amt,
+                                float(trade.pnl_r))
+                            await db.execute(
+                                update(Trade).where(Trade.id == trade.id)
+                                .values(pnl_usdt=round(exchange_pnl, 4))
+                            )
+                            fixed += 1
+                            continue
+                        pnl_r = candidate_r
 
                 await db.execute(
                     update(Trade).where(Trade.id == trade.id)
