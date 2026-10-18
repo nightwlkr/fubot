@@ -691,3 +691,41 @@ class TestCostModel:
         s = res.summary()
         assert "net_r" in s and "expectancy_net_r" in s
         assert s["net_r"] < s["total_r"]
+
+
+# ------------------------------------------------------- 6. lookahead detectability
+
+class TestLookaheadIsDetectable:
+    """A "we use only candles[0..i]" comment is a claim, not a guarantee.
+
+    This is the defect that inflated OB+FVG expectancy from +0.315R to +0.402R
+    in the first harness. The test proves the suite CAN detect lookahead: a
+    deliberately-lookaheaded probe must produce different numbers. If they ever
+    match, the suite has lost the ability to see the bug.
+    """
+
+    def test_a_lookaheaded_variant_produces_different_numbers(self):
+        import backend.backtest as bt
+        k1h, k5m, k15m = _mtf_series(200)
+        # Permissive filters so the fixture actually TRADES. A read-only sawtooth
+        # (`close = 100 + (i%17)*0.5 - (i%7)*0.3`) is periodic with period lcm=119,
+        # so the trend bias is flat, no FVG gap ever forms, and BOTH variants
+        # return (0.0, 0) — the comparison would hold for the wrong reason, and a
+        # future change that restored the bias would look like a detection.
+        base = {"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
+                "trade_neutral_markets": True, "volume_filter_enabled": False}
+
+        honest = bt.Backtester(settings=base).run("X", k1h, k5m, k15m).summary()
+        broken = bt.LookaheadProbeBacktester(settings=base).run("X", k1h, k5m, k15m).summary()
+        # Precondition, asserted explicitly rather than assumed: a guard over two
+        # empty runs is not a guard.
+        assert honest["closed"] and broken["closed"], \
+            "both variants must actually trade, or the divergence below is vacuous"
+        assert (honest["total_r"], honest["closed"]) != (broken["total_r"], broken["closed"]), \
+            "a lookaheaded variant produced IDENTICAL results — the suite can no " \
+            "longer detect lookahead, so every no-lookahead claim is unfalsifiable"
+        # And the direction matches the historical bug: the lookaheaded probe is
+        # BETTER than the honest harness. Lookahead inflates expectancy, so a suite
+        # that saw the probe lose would be reading the wrong signal.
+        assert broken["total_r"] > honest["total_r"], \
+            "lookahead must inflate R; a probe that scores worse is not this defect"

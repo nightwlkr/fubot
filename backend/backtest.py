@@ -479,6 +479,20 @@ class Backtester:
         t.finalise()
 
 
+class LookaheadProbeBacktester(Backtester):
+    """Deliberately broken variant used ONLY by tests.
+
+    Detects against the END of the series instead of the bar at hand, which is
+    the exact shape of the original OB+FVG lookahead bug (an FVG at 1h bar `i`
+    is only knowable at that hour's CLOSE). It exists so the test suite can
+    prove it is capable of detecting lookahead at all — a suite that cannot
+    fail this way cannot be trusted when it says "no lookahead".
+    """
+
+    def _detect_candidates(self, k1h, k5m, k15m, at_idx):
+        return super()._detect_candidates(k1h, k5m, k15m, len(k1h) - 1)
+
+
 async def run_backtest(symbol: str, days: int = 30, settings: Optional[dict] = None,
                        binance=None) -> BacktestResult:
     """Fetch historical klines and run a backtest. `binance` is a BinanceService
