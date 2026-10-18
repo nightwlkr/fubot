@@ -286,14 +286,17 @@ class TestWindowAlignment:
 
 # ------------------------------------------------- 3. defect 3, still in backtest.py
 
-@pytest.mark.xfail(reason="Task 2 rewires Backtester; defect 3 removed there",
-                   strict=True)
-def test_backtest_no_longer_aligns_series_by_proportional_index(self):
-    """DEFECT 3 lived here: `k5m[: len(k5m)*(at_idx+1)//len(k1h)]` mapped 1h
-    bar 500 to 5m bar 500 — hour 500 against hour 41.7. Pinned here because
-    Task 2 is what removes it; until then this test FAILS. `strict=True` means
-    an unexpected PASS is also a failure, which is the signal we want when Task 2
-    lands — if this ever xpasses, the defect is fixed and the marker must go."""
+def test_backtest_no_longer_aligns_series_by_proportional_index():
+    """DEFECT 3 lived here: `_detect_candidates` sliced each lower interval at its
+    own length scaled by the 1h index — so 1h bar 500 aligned to 5m bar 500, hour
+    500 against hour 41.7. The harness now truncates each interval by WALL-CLOCK
+    time through `_source_index`, so the trend filter and the entries it filters
+    read the same instant.
+
+    The guard is a raw substring over the module TEXT, so this docstring must not
+    quote the arithmetic it bans — a document that describes the defect verbatim
+    trips its own guard (the same class of mistake the repo's other text-based
+    guards hit). The expression is written out in the commit message instead."""
     import pathlib
 
     import backend.backtest as bt
@@ -336,3 +339,93 @@ class TestHelpers:
         assert end % ms_5m == 0, "window must end on a 5m boundary"
         assert end <= now, "must not reach into the future"
         assert end - start == 30 * 86_400_000, "must span exactly `days`"
+
+
+# ------------------------------------------------------- 4 & 5. the fill model
+
+class TestFillModel:
+    def test_the_fill_comes_from_the_signals_own_interval(self):
+        """DEFECT 4. The old code filled at `k1h[i + 1]["open"]` while 3CANDLE
+        signals come from 5m and CHoCH from 15m — a 12x time-scale mismatch."""
+        import inspect
+
+        import backend.backtest as bt
+        src = inspect.getsource(bt.Backtester.run)
+        assert 'k1h[i + 1]["open"]' not in src, \
+            "fills must not be taken from the 1h series"
+
+    def test_a_fill_happens_at_the_zone_midpoint_when_price_reaches_it(self):
+        """Live places a LIMIT at the zone midpoint; the fill is that price."""
+        from backend.backtest import fill_at_midpoint
+        end = 1_700_000_000_000
+        start = end - 60 * MS_5M
+        k5m = synth(start, MS_5M, 12, close=100.0)
+        k5m[2]["low"], k5m[2]["high"] = 99.5, 100.5
+        idx, price = fill_at_midpoint(k5m, 1, 99.0, 101.0, max_age_ms=60 * MS_5M)
+        assert idx == 2
+        assert price == pytest.approx(100.0)
+
+    def test_no_fill_when_price_never_reaches_the_zone(self):
+        from backend.backtest import fill_at_midpoint
+        end = 1_700_000_000_000
+        start = end - 60 * MS_5M
+        k5m = synth(start, MS_5M, 12, close=100.0)
+        for c in k5m:
+            c["low"], c["high"] = 200.0, 201.0
+        assert fill_at_midpoint(k5m, 1, 99.0, 101.0, max_age_ms=60 * MS_5M) is None
+
+    def test_a_signal_older_than_the_window_never_fills(self):
+        """Live expires stale signals (`signal_max_age_minutes`). An old signal
+        filling at today's price is not a trade the bot would have taken."""
+        from backend.backtest import fill_at_midpoint
+        end = 1_700_000_000_000
+        start = end - 600 * MS_5M
+        k5m = synth(start, MS_5M, 600, close=100.0)
+        # Price parks far above the zone for the whole series, so the ONLY bar
+        # that could fill is bar 500 — 499 bars after the signal.
+        for c in k5m:
+            c["low"], c["high"] = 200.0, 201.0
+        k5m[500]["low"], k5m[500]["high"] = 99.5, 100.5
+        assert fill_at_midpoint(k5m, 1, 99.0, 101.0, max_age_ms=2 * MS_5M) is None
+        # ...and it IS reachable when the window is wide enough, so the
+        # assertion above is about the AGE and not about bar 500 being special.
+        assert fill_at_midpoint(k5m, 1, 99.0, 101.0,
+                                max_age_ms=600 * MS_5M) == (500, pytest.approx(100.0))
+
+    def test_the_scan_starts_after_the_signal_bar_not_on_it(self):
+        """ANTI-LOOKAHEAD. The signal exists only once its bar has CLOSED, so
+        scanning from `signal_idx` itself would fill on information that did not
+        exist when the signal was raised. Nothing above catches this: the other
+        tests either place the touchable bar after the signal or rely on the age
+        deadline, and this module's `synth()` writes `close_time`, so a bar is
+        always "closed" the instant it is addressed."""
+        from backend.backtest import fill_at_midpoint
+        end = 1_700_000_000_000
+        start = end - 60 * MS_5M
+        k5m = synth(start, MS_5M, 12, close=100.0)
+        # The SIGNAL bar itself touches the zone. It is closed, but it was not
+        # knowable until after it closed — so it cannot also be the fill bar.
+        k5m[1]["low"], k5m[1]["high"] = 99.5, 100.5
+        # The next bar also touches it, so the fill must land there (index 2),
+        # never on the signal bar (index 1).
+        k5m[2]["low"], k5m[2]["high"] = 99.5, 100.5
+        assert fill_at_midpoint(k5m, 1, 99.0, 101.0,
+                                max_age_ms=60 * MS_5M) == (2, pytest.approx(100.0))
+
+    def test_r_r_is_revalidated_at_the_fill_price_not_at_the_signal(self):
+        """Live re-checks R:R at the ACTUAL fill and skips if it no longer
+        qualifies. A setup planned at 3:1 around a 100.0 midpoint (stop 97.0,
+        target 109.0) is exactly 3.0 there, but a LIMIT that fills only when the
+        market comes back UP to 102.0 has widened its risk to 5.0 and left 7.0
+        of reward — 1.4:1. Live skips that (`gate 4` at the real fill), so the
+        backtest must skip it too or it counts trades the bot never took."""
+        from backend.backtest import rr_at_fill
+        assert rr_at_fill(97.0, 109.0, "LONG", 100.0, 3.0) == pytest.approx(3.0)
+        assert rr_at_fill(97.0, 109.0, "LONG", 100.0, 3.0) >= 3.0
+        assert rr_at_fill(97.0, 109.0, "LONG", 102.0, 3.0) < 3.0
+        # A fill that moves TOWARD the stop/target can IMPROVE the ratio — the
+        # re-check is not a blanket penalty, it is a re-measurement.
+        assert rr_at_fill(97.0, 109.0, "LONG", 98.0, 3.0) > 3.0
+        # No readable risk at the fill (stop exactly at the fill) yields 0.0, so
+        # the caller skips rather than dividing by zero.
+        assert rr_at_fill(100.0, 109.0, "LONG", 100.0, 3.0) == 0.0

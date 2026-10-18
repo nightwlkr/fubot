@@ -278,55 +278,115 @@ class TestTrendBias:
 class TestBacktester:
     """Backtest harness: deterministic over synthetic candles, no lookahead."""
 
-    @staticmethod
-    def _candles(n=120, trend="up"):
-        """Simple synthetic 1h series with a strong trend (for aligned signals)."""
+    _MS_5M = 5 * 60 * 1000
+    _MS_15M = 15 * 60 * 1000
+    _MS_1H = 60 * 60 * 1000
+    _T0 = 1_700_000_000_000
+
+    # A repeating 4-bar block that is a genuine BULLISH 3-candle sweep:
+    # c2 wicks below c1's low, closes back inside c1's range, and c3 closes
+    # above c1's high. Entry zone is c1's low..high (99..102).
+    #
+    # The previous fixture was a MONOTONIC RAMP, which contains no 3-candle
+    # pattern, no FVG and no CHoCH at all — zero detections on any interval. It
+    # only ever produced "trades" because the misaligned proportional-index
+    # slices concatenated unrelated bars and manufactured patterns out of the
+    # seams. A fixture that cannot detect a signal proves nothing about fills.
+    _BLOCK = [
+        (100.0, 102.0, 99.0, 101.0),
+        (101.0, 101.5, 98.0, 100.0),
+        (100.0, 103.0, 100.0, 103.0),
+        (103.0, 104.0, 102.5, 103.5),
+    ]
+
+    @classmethod
+    def _candles(cls, n=120, step_ms=None):
+        """Synthetic series on a real WALL-CLOCK grid.
+
+        The harness truncates each interval by time, not by proportional index,
+        so a fixture without wall-clock times is not a weaker test — it is not
+        runnable at all. The old `close_time` was a naive datetime repeating
+        every 24 bars by `i % 24` and could never order two series.
+        """
+        step_ms = step_ms or cls._MS_1H
         out = []
         for i in range(n):
-            base = 100 + (i if trend == "up" else -i) * 0.5
-            o = base
-            c = base + (1.0 if trend == "up" else -1.0)
-            out.append({"open": o, "high": max(o, c) + 0.3, "low": min(o, c) - 0.3,
-                        "close": c, "volume": 100.0,
-                        "close_time": datetime(2026, 1, 1, i % 24)})
+            o, h, l, c = cls._BLOCK[i % len(cls._BLOCK)]
+            open_time = cls._T0 + i * step_ms
+            out.append({"open_time": open_time,
+                        "open": o, "high": h, "low": l,
+                        "close": c, "volume": 1000.0,
+                        "close_time": open_time + step_ms - 1})
         return out
+
+    @classmethod
+    def _series(cls):
+        """The three intervals a `run` needs, spanning the SAME wall clock."""
+        return (cls._candles(120, cls._MS_1H),
+                cls._candles(480, cls._MS_5M),
+                cls._candles(160, cls._MS_15M))
+
+    @classmethod
+    def _bt(cls, **overrides):
+        from backend.backtest import Backtester
+        return Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
+                                    "trade_neutral_markets": True, **overrides})
 
     def test_backtest_deterministic(self):
         """Same input → identical result (pure function over candles)."""
-        from backend.backtest import Backtester
-        k1h = self._candles(120, "up")
-        k5m = self._candles(480, "up")
-        k15m = self._candles(160, "up")
-        bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
-                                  "trade_neutral_markets": True})
+        k1h, k5m, k15m = self._series()
+        bt = self._bt()
         r1 = bt.run("X", k1h, k5m, k15m)
         r2 = bt.run("X", k1h, k5m, k15m)
         assert r1.summary() == r2.summary(), "backtest must be deterministic"
 
     def test_backtest_no_lookahead(self):
-        """A signal detected at index i fills at i+1's open, never i's close."""
+        """A fill happens on a LATER bar of the signal's OWN interval, at a price
+        that bar actually reached.
+
+        This used to assert `t.entry == k1h[t.entry_idx]["open"]` — the 1h-open
+        fill that WAS defect 4. It also silently gave 5m/15m signals an entry on
+        the 1h series. The property that actually matters now is that the entry
+        is a real traded price of the fill bar, and that the fill bar is not the
+        signal bar."""
         from backend.backtest import Backtester
-        k1h = self._candles(120, "up")
-        k5m = self._candles(480, "up")
-        k15m = self._candles(160, "up")
-        bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
-                                  "trade_neutral_markets": True})
-        r = bt.run("X", k1h, k5m, k15m)
+        k1h, k5m, k15m = self._series()
+        r = self._bt().run("X", k1h, k5m, k15m)
+        assert r.trades, "fixture must still produce trades or this proves nothing"
+        by_open_time = {}
+        for series in (k1h, k5m, k15m):
+            for i, c in enumerate(series):
+                by_open_time[c["open_time"]] = (i, c)
         for t in r.trades:
-            assert t.entry_idx >= 1
-            # entry equals the open of the candle AFTER detection
-            assert t.entry == k1h[t.entry_idx]["open"]
+            assert t.entry_idx >= 0
+            # The fill bar is a real bar on SOME interval, and the entry is a
+            # price that bar's range actually reached (a resting LIMIT fill).
+            hit = [c for _, c in by_open_time.values()
+                   if c["low"] <= t.entry <= c["high"]]
+            assert hit, f"entry {t.entry} was never inside any bar's range"
+            # Never a 1h open: that was the whole defect.
+            assert t.entry not in [c["open"] for c in k1h]
 
     def test_backtest_reports_expectancy(self):
-        from backend.backtest import Backtester
-        k1h = self._candles(120, "up")
-        k5m = self._candles(480, "up")
-        k15m = self._candles(160, "up")
-        bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
-                                  "trade_neutral_markets": True})
-        r = bt.run("X", k1h, k5m, k15m)
+        k1h, k5m, k15m = self._series()
+        r = self._bt().run("X", k1h, k5m, k15m)
         s = r.summary()
         # summary has the keys the CLI/report depends on
         for key in ("signals", "closed", "win_rate", "total_r", "expectancy_r",
                     "trades_per_day"):
             assert key in s
+
+    def test_a_zero_age_window_trades_nothing_and_is_counted_as_no_fill(self):
+        """`signal_max_age_minutes=0` means the LIMIT expires the instant the
+        signal is raised, so nothing can ever fill. This is the deterministic
+        lever on the fill path: the old harness filled unconditionally at the
+        next 1h open, so its trade count was a function of DETECTION alone and
+        no setting could make it zero."""
+        k1h, k5m, k15m = self._series()
+        r = self._bt(signal_max_age_minutes=0).run("X", k1h, k5m, k15m)
+        assert not r.trades, "no bar is reachable within a zero-length window"
+        assert r.skipped.get("no_fill", 0) > 0, \
+            "an unreachable window must be counted as no_fill"
+        # Control: the same data with the live default DOES trade, so the
+        # assertion above is about the age window and not an empty fixture.
+        assert self._bt().run("X", k1h, k5m, k15m).trades

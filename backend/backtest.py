@@ -21,8 +21,49 @@ from backend.indicators.three_candle import detect_three_candles, evaluate_three
 from backend.indicators.choch import detect_choch
 from backend.indicators.trend import analyze_trend_bias
 from backend.indicators.volume_profile import get_volume_confirmed_filter
+from backend.backtest_data import last_closed_before
 
 logger = logging.getLogger(__name__)
+
+
+# Live entry semantics, mirrored so the backtest measures what the bot does.
+# `StrategyService._enter_with_limit` places a LIMIT at the entry-zone midpoint,
+# waits up to `signal_max_age_minutes`, then RE-VALIDATES R:R at the price that
+# actually filled and skips the signal if it no longer qualifies.
+DEFAULT_SIGNAL_MAX_AGE_MIN = 60
+
+
+def fill_at_midpoint(k5m: list[dict], signal_idx: int,
+                     zone_lo: float, zone_hi: float,
+                     max_age_ms: int) -> Optional[tuple[int, float]]:
+    """First bar at/after `signal_idx` whose range touches the zone midpoint.
+
+    Returns `(bar_index, fill_price)` or None. The fill price is the MIDPOINT,
+    not the bar's open — that is what a resting LIMIT at the midpoint gets.
+    Scanning starts at `signal_idx + 1`: the signal bar is already closed when
+    the signal exists, so filling on it would be lookahead.
+    """
+    midpoint = (zone_lo + zone_hi) / 2.0
+    if not 0 <= signal_idx < len(k5m):
+        return None
+    deadline = k5m[signal_idx]["open_time"] + max_age_ms
+    for i in range(signal_idx + 1, len(k5m)):
+        c = k5m[i]
+        if c["open_time"] > deadline:
+            return None
+        if c["low"] <= midpoint <= c["high"]:
+            return i, midpoint
+    return None
+
+
+def rr_at_fill(sl: float, tp: float, direction: str,
+               fill: float, rr_min: float) -> float:
+    """R:R actually achieved at `fill`, mirroring the live re-check."""
+    risk = abs(fill - sl)
+    if risk <= 0:
+        return 0.0
+    reward = abs(tp - fill)
+    return reward / risk
 
 
 @dataclass
@@ -116,45 +157,73 @@ class Backtester:
         self.min_strength = str(self.settings.get("trade_min_trend_strength", "MODERATE")).upper()
         self.volume_filter_enabled = bool(self.settings.get("volume_filter_enabled", True))
         self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
+        self.signal_max_age_ms = int(
+            self.settings.get("signal_max_age_minutes", DEFAULT_SIGNAL_MAX_AGE_MIN)) * 60_000
         self._strength_rank = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
 
+    def _source_index(self, candles: list[dict], at_ms: int) -> int:
+        """Index in `candles` of the last bar fully closed at `at_ms`.
+
+        This is the whole point of the fix: it maps a wall-clock instant into
+        whichever interval the signal came from, instead of the old proportional
+        index arithmetic that stitched together series spanning different periods.
+        """
+        return last_closed_before(candles, at_ms)
+
     def _detect_candidates(self, k1h: list[dict], k5m: list[dict], k15m: list[dict],
-                           at_idx: int) -> list[tuple[str, str, dict]]:
-        """Detect + evaluate signals using only candles up to at_idx (no lookahead).
+                           at_idx: int) -> list[tuple]:
+        """Detect + evaluate signals using only candles knowable at `at_idx`.
 
         Mirrors signal_service.scan_symbol: 1h context (ATR/trend), FVG on 1h,
         3-candle on 5m, CHoCH on 15m.
+
+        Each interval's "up to now" view is truncated by WALL-CLOCK TIME via
+        `_source_index`, not by proportional index arithmetic. The old code
+        scaled each lower series' length by the 1h index, which mapped 1h bar 500
+        (hour 500) onto 5m bar 500 (hour 41.7) whenever the two series spanned
+        different periods — so the trend filter read a different month than the
+        entries it filtered.
+
+        Returns `(strategy, direction, evaluation, vol_source, timeframe, zone)`
+        where `zone` is the entry ZONE `(lo, hi)` the live bot rests its LIMIT
+        midpoint inside — not the point estimate. All three detectors expose a
+        real zone, so no synthetic fallback is needed here.
         """
-        k1h_u = k1h[:at_idx + 1]
+        at_ms = k1h[at_idx]["open_time"]
+        k1h_idx = self._source_index(k1h, at_ms)
+        k5m_idx = self._source_index(k5m, at_ms)
+        k15m_idx = self._source_index(k15m, at_ms)
+        if k1h_idx < 0 or k5m_idx < 0 or k15m_idx < 0:
+            return []
+
         # need enough history for indicators
+        k1h_u = k1h[:k1h_idx + 1]
         if len(k1h_u) < 60:
             return []
+        k5m_u = k5m[:k5m_idx + 1]
+        k15m_u = k15m[:k15m_idx + 1]
         atr = calculate_atr(k1h_u, 14) or 0.0
         bias = analyze_trend_bias([c["close"] for c in k1h_u])
 
-        # 5m/15m aligned to the same wall-clock index (approximate: use the
-        # tail of each series ending at the same relative point)
-        k5m_u = k5m[: len(k5m) * (at_idx + 1) // len(k1h)] or k5m
-        k15m_u = k15m[: len(k15m) * (at_idx + 1) // len(k1h)] or k15m
-
-        cands = []
+        cands: list[tuple] = []
         for f in detect_fvg(k1h_u, ""):
             e = evaluate_fvg_entry(f, atr, self.rr_min)
             if e["is_valid"]:
                 cands.append(("FVG", "LONG" if f.direction == "BULLISH" else "SHORT", e,
-                              k1h_u, "1h"))
+                              k1h_u, "1h", (f.zone_min, f.zone_max)))
         for p in detect_three_candles(k5m_u, "", "5m"):
             e = evaluate_three_candle_entry(p, atr, self.rr_min)
             if e["is_valid"]:
                 cands.append(("3CANDLE", "LONG" if p.direction == "BULLISH" else "SHORT", e,
-                              k5m_u, "5m"))
+                              k5m_u, "5m", (p.entry_zone_min, p.entry_zone_max)))
         for ch in detect_choch(k15m_u, "", "15m", atr, self.rr_min):
             if ch.is_valid:
                 e = {"entry_price": (ch.pullback_entry_zone[0] + ch.pullback_entry_zone[1]) / 2,
                      "stop_loss": ch.stop_loss, "take_profit": ch.take_profit,
                      "rr_ratio": ch.rr_ratio or 0.0, "is_valid": True}
                 cands.append(("CHOC", "LONG" if ch.direction == "BULLISH" else "SHORT", e,
-                              k15m_u, "15m"))
+                              k15m_u, "15m", (ch.pullback_entry_zone[0],
+                                              ch.pullback_entry_zone[1])))
         return cands
 
     def _passes_filters(self, direction: str, rr: float, entry: float, sl: float,
@@ -199,9 +268,10 @@ class Backtester:
     def run(self, symbol: str, k1h: list[dict], k5m: list[dict], k15m: list[dict],
             max_open: int = 1) -> BacktestResult:
         """Walk candles forward; on each 1h close detect signals, simulate
-        SL/TP exits against subsequent 1h candles. No lookahead: a signal
-        detected at index i fills at i+1's open and is only checked against
-        candles after the entry."""
+        SL/TP exits against subsequent 1h candles. No lookahead: a signal is
+        only ever evaluated against candles that had CLOSED, it fills on a LATER
+        bar of its OWN interval, and it is only checked against candles after
+        the entry."""
         result = BacktestResult(symbol=symbol, candles=len(k1h))
         open_trade: Optional[BacktestTrade] = None
         vol_stride = 10  # re-evaluate volume every N candles (matches scan cadence)
@@ -233,20 +303,33 @@ class Backtester:
 
             bias = analyze_trend_bias([c["close"] for c in k1h[:i + 1]])
             cands = self._detect_candidates(k1h, k5m, k15m, i)
-            for strategy, direction, e, vol_src, tf in cands:
+            for strategy, direction, e, vol_src, tf, zone in cands:
                 entry = e["entry_price"]
                 sl = e["stop_loss"]
                 tp = e["take_profit"]
+                zone_lo, zone_hi = zone
                 vol_candles = (k1h if tf == "1h" else k5m)
                 vol_window = vol_src[-15:-5] if len(vol_src) > 15 else vol_src
                 if not self._passes_filters(direction, e["rr_ratio"], entry, sl,
                                             bias, vol_window, result.skipped):
                     continue
-                # fill at the NEXT candle's open (no lookahead)
-                fill = k1h[i + 1]["open"] if i + 1 < len(k1h) else entry
+                # Live fill semantics: a LIMIT resting at the zone midpoint on
+                # the signal's OWN interval, not the next 1h open. Filling on the
+                # wrong interval was a 12x time-scale mismatch.
+                tf_candles = {"1h": k1h, "5m": k5m, "15m": k15m}[tf]
+                sig_idx = self._source_index(tf_candles, k1h[i]["open_time"])
+                filled = fill_at_midpoint(
+                    tf_candles, sig_idx, zone_lo, zone_hi, self.signal_max_age_ms)
+                if filled is None:
+                    result.skipped["no_fill"] = result.skipped.get("no_fill", 0) + 1
+                    continue
+                fill_idx, fill = filled
+                if rr_at_fill(sl, tp, direction, fill, self.rr_min) < self.rr_min:
+                    result.skipped["rr_at_fill"] = result.skipped.get("rr_at_fill", 0) + 1
+                    continue
                 trade = BacktestTrade(
                     symbol=symbol, strategy=strategy, direction=direction,
-                    entry=fill, stop=sl, take_profit=tp, entry_idx=i + 1)
+                    entry=fill, stop=sl, take_profit=tp, entry_idx=fill_idx)
                 # pnl_r uses the frozen entry-to-stop distance (mirrors
                 # positions.initial_risk_distance)
                 risk_dist = abs(fill - sl)
