@@ -24,6 +24,7 @@ from backend.services.order_service import OrderService
 from backend.services.risk_service import get_risk_service
 from backend.services.signal_service import SignalService
 from backend.services.strategy_service import StrategyService, set_strategy_service
+from backend.core.bot_mode import normalise_bot_mode
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +135,10 @@ async def init_bot(app: FastAPI) -> None:
         from sqlalchemy import select
         result = await db.execute(select(Setting).where(Setting.key == "bot_mode"))
         saved_mode = result.scalar_one_or_none()
-        if saved_mode and saved_mode.value in ("paper", "live"):
-            bot_settings["bot_mode"] = saved_mode.value
+        # normalise_bot_mode so a JSON-quoted '"live"' is honoured rather than
+        # discarded — see backend/core/bot_mode.py.
+        bot_settings["bot_mode"] = normalise_bot_mode(
+            saved_mode.value if saved_mode else None)
 
     signal_service = SignalService(
         session_factory=AsyncSessionLocal, binance=binance, settings=bot_settings
