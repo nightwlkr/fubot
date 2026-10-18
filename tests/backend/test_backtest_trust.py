@@ -624,3 +624,70 @@ class TestFillModel:
         # No readable risk at the fill (stop exactly at the fill) yields 0.0, so
         # the caller skips rather than dividing by zero.
         assert rr_at_fill(100.0, 109.0, "LONG", 100.0, 3.0) == 0.0
+
+# ------------------------------------------------------------- 2. the cost model
+
+class TestCostModel:
+    def test_costs_are_actually_charged(self):
+        """DEFECT 2. There was no fee modelling at all: expectancy was GROSS.
+        Panel cycle 1 concluded fee drag, not exit geometry, is the binding
+        constraint, so a gross-only harness rates losing strategies as winners."""
+        import inspect
+        import backend.backtest as bt
+        assert "FEE_ROUND_TRIP" in inspect.getsource(bt), \
+            "the harness must charge round-trip costs"
+
+    def test_net_r_is_never_better_than_gross(self):
+        from backend.backtest import BacktestTrade
+        t = BacktestTrade(symbol="X", strategy="S", direction="LONG",
+                          entry=100.0, stop=99.0, take_profit=103.0,
+                          entry_idx=0)
+        t.exit_idx, t.exit_price, t.exit_reason = 5, 103.0, "TP_HIT"
+        t._risk_dist = 1.0
+        t.finalise()
+        assert t.net_r <= t.pnl_r, "costs can only reduce"
+        assert t.net_r < t.pnl_r, "a zero-cost harness is the defect"
+
+    def test_a_wide_stop_pays_more_in_fees_than_a_tight_one(self):
+        """Fees are a fraction of NOTIONAL, but R divides by the risk distance.
+        The same 0.07% therefore costs more R when the stop is tight — which is
+        exactly the effect cycle 1 measured (fee drag 4x at tight stops)."""
+        from backend.backtest import fee_in_r
+        tight = fee_in_r(entry=100.0, risk_dist=0.5)
+        wide = fee_in_r(entry=100.0, risk_dist=5.0)
+        assert tight > wide
+        assert tight == pytest.approx(100.0 * 0.0007 / 0.5)
+
+    def test_the_real_close_path_charges_the_cost(self):
+        """The two tests above call `finalise()` themselves, so they stay green
+        if `_close` forgets to — and a harness that never calls it reports gross
+        expectancy from `run()`. Drive the actual exit scan."""
+        from backend.backtest import Backtester, BacktestTrade
+        series = [
+            {"open_time": 0, "close_time": MS_5M - 1,
+             "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0},
+            {"open_time": MS_5M, "close_time": 2 * MS_5M - 1,
+             "open": 100.0, "high": 103.5, "low": 99.5, "close": 103.0},
+        ]
+        t = BacktestTrade(symbol="X", strategy="S", direction="LONG",
+                          entry=100.0, stop=99.0, take_profit=103.0,
+                          entry_idx=0, timeframe="5m")
+        t._risk_dist = 1.0
+        Backtester()._resolve_exit(t, series)
+        assert t.exit_reason == "TP_HIT"
+        assert t.pnl_r == pytest.approx(3.0)
+        assert t.net_r == pytest.approx(3.0 - 100.0 * 0.0007 / 1.0)
+
+    def test_the_summary_reports_net_and_flags_it_as_the_number_to_trust(self):
+        from backend.backtest import BacktestResult, BacktestTrade
+        res = BacktestResult(symbol="X", candles=100)
+        t = BacktestTrade(symbol="X", strategy="S", direction="LONG",
+                          entry=100.0, stop=99.0, take_profit=103.0,
+                          entry_idx=0)
+        t.exit_idx, t.exit_price, t.exit_reason = 5, 103.0, "TP_HIT"
+        t._risk_dist = 1.0
+        t.finalise()
+        res.trades.append(t)
+        s = res.summary()
+        assert "net_r" in s and "expectancy_net_r" in s
+        assert s["net_r"] < s["total_r"]

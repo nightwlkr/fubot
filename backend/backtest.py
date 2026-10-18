@@ -22,8 +22,21 @@ from backend.indicators.choch import detect_choch
 from backend.indicators.trend import analyze_trend_bias
 from backend.indicators.volume_profile import get_volume_confirmed_filter
 from backend.backtest_data import last_closed_before
+from backend.backtest_data import FEE_ROUND_TRIP
 
 logger = logging.getLogger(__name__)
+
+
+def fee_in_r(entry: float, risk_dist: float) -> float:
+    """Round-trip cost expressed in R.
+
+    Fees are a fraction of NOTIONAL; R divides by the risk distance. So the same
+    0.07% costs 4x more R at a 0.5% stop than at a 2% stop — the effect panel
+    cycle 1 measured as the dominant cost drag.
+    """
+    if risk_dist <= 0:
+        return float("inf")
+    return (entry * FEE_ROUND_TRIP) / risk_dist
 
 
 # Live entry semantics, mirrored so the backtest measures what the bot does.
@@ -111,10 +124,19 @@ class BacktestTrade:
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None  # TP_HIT / SL_HIT
     pnl_r: float = 0.0
+    # Gross minus round-trip costs. The harness used to report `pnl_r` alone,
+    # so expectancy was GROSS and a strategy that only loses money after the
+    # 0.07% round trip read as an edge.
+    net_r: float = 0.0
 
     @property
     def open(self) -> bool:
         return self.exit_idx is None
+
+    def finalise(self) -> None:
+        """Compute net R once the exit is known."""
+        risk = getattr(self, "_risk_dist", abs(self.entry - self.stop))
+        self.net_r = self.pnl_r - fee_in_r(self.entry, risk)
 
 
 @dataclass
@@ -139,6 +161,16 @@ class BacktestResult:
     @property
     def total_r(self) -> float:
         return sum(t.pnl_r for t in self.closed)
+
+    @property
+    def total_net_r(self) -> float:
+        return sum(t.net_r for t in self.closed)
+
+    @property
+    def expectancy_net_r(self) -> float:
+        """Average NET R per closed trade — the number to trust."""
+        n = len(self.closed)
+        return (self.total_net_r / n) if n else 0.0
 
     @property
     def win_rate(self) -> float:
@@ -169,6 +201,10 @@ class BacktestResult:
             "win_rate": round(self.win_rate, 1),
             "total_r": round(self.total_r, 2),
             "expectancy_r": round(self.expectancy_r, 3),
+            "net_r": round(self.total_net_r, 2),
+            "expectancy_net_r": round(self.expectancy_net_r, 3),
+            "fee_round_trip": FEE_ROUND_TRIP,
+            "trust": "net_r is the number to trust; total_r is gross of costs",
             "trades_per_day": round(self.trades_per_day, 1),
             "skipped": self.skipped,
         }
@@ -440,6 +476,7 @@ class Backtester:
         risk_dist = getattr(t, "_risk_dist", abs(t.entry - t.stop))
         t.pnl_r = ((price - t.entry) if t.direction == "LONG"
                    else (t.entry - price)) / risk_dist
+        t.finalise()
 
 
 async def run_backtest(symbol: str, days: int = 30, settings: Optional[dict] = None,
