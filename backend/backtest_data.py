@@ -46,15 +46,16 @@ def bars_expected(interval: str, days: int) -> int:
     return BARS_PER_DAY[interval] * days
 
 
-def page_ranges(start_ms: int, end_ms: int,
+def page_ranges(start_ms: int, end_ms: int, interval: str = "5m",
                 page_size: int = PAGE_SIZE) -> list[tuple[int, int]]:
     """Contiguous, ascending [start, end) ranges covering the whole window.
 
-    Steps by `page_size` 5m-bars regardless of the interval being fetched, so a
-    45-day window yields ~9 pages instead of the single truncated page the old
-    code got.
+    Steps by `page_size` bars OF `interval`. Stepping by a fixed 5m duration
+    regardless of interval was wrong: a 1500-bar page is 5.2 days on 5m but
+    62 days on 1h, so a single page covered the whole window for coarse
+    intervals while truncating fine ones.
     """
-    step = page_size * INTERVAL_MS["5m"]
+    step = page_size * INTERVAL_MS[interval]
     out, cur = [], start_ms
     while cur < end_ms:
         nxt = min(cur + step, end_ms)
@@ -100,17 +101,25 @@ async def fetch_klines(fetch_page: Callable[[str, str, int, int], list[dict]],
 
     `fetch_page(symbol, interval, start_ms, end_ms)` returns one page. Injected so
     tests can drive paging without the network.
+
+    Advances through every range `page_ranges` produces rather than stopping on a
+    short page. A `len(page) < PAGE_SIZE` break assumed the remote returns exactly
+    `PAGE_SIZE` on any non-final page, which is false whenever the server honours
+    the requested time range: on a coarse interval a full range yields far fewer
+    bars than the cap, so that heuristic truncated 1h/15m/4h/1d to a single page.
+    An empty page is likewise NOT a terminator -- stopping there would silently
+    truncate, which is the exact defect class this module exists to prevent. The
+    loop is bounded because `page_ranges` is a finite list, so the worst case of a
+    misbehaving remote is a few extra requests, never a hang.
     """
+    ranges = page_ranges(start_ms, end_ms, interval)
     out: dict[int, dict] = {}
-    for a, b in page_ranges(start_ms, end_ms):
+    for n, (a, b) in enumerate(ranges):
         page = await fetch_page(symbol, interval, a, b)
-        if not page:
-            break
         for c in page:
             out[c["open_time"]] = c
-        if len(page) < PAGE_SIZE:
-            break
-        await asyncio.sleep(sleep)
+        if n < len(ranges) - 1:
+            await asyncio.sleep(sleep)
     return [out[t] for t in sorted(out)]
 
 

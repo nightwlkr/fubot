@@ -80,6 +80,93 @@ class TestPagination:
             assert (a1, b1) < (a2, b2), "pages must ascend"
 
 
+# ------------------------------------------------------------ 1. real paging
+
+def range_fetch_page(calls: list | None = None):
+    """A `fetch_page` that HONOURS the requested range, like a real endpoint.
+
+    Returns every bar of `interval` whose open_time falls in [a, b). This is the
+    behaviour that broke the `len(page) < PAGE_SIZE` heuristic: on a coarse
+    interval a whole range yields far fewer than 1500 bars, which a naive
+    implementation reads as "last page".
+    """
+    from backend.backtest_data import INTERVAL_MS
+
+    async def fetch_page(symbol: str, interval: str, a: int, b: int):
+        if calls is not None:
+            calls.append((symbol, interval, a, b))
+        ms = INTERVAL_MS[interval]
+        first = -(-a // ms) * ms  # first bar with open_time >= a
+        return [
+            {"open_time": t, "open": 100.0, "high": 101.0, "low": 99.0,
+             "close": 100.0, "volume": 1000.0, "close_time": t + ms - 1}
+            for t in range(first, b, ms)
+        ]
+    return fetch_page
+
+
+class TestFetchKlines:
+    @pytest.mark.parametrize("interval", ["1h", "5m", "15m"])
+    def test_every_interval_gets_its_full_window(self, interval):
+        """The defect this pins: `page_ranges` stepped by a fixed 5m duration, so
+        a 1500-bar page was 5.2 days on 5m but 62 days on 1h. Combined with a
+        `len(page) < PAGE_SIZE` break, every interval but 5m stopped after ONE
+        page -- a 45-day window returned 500/125 bars of 15m/1h instead of
+        4320/1080. Recreates defect 3 (mismatched spans) at smaller scale."""
+        import asyncio
+        from backend.backtest_data import bars_expected, fetch_klines
+        end = 1_700_000_000_000
+        start = end - 45 * 86_400_000
+        got = asyncio.run(fetch_klines(range_fetch_page(), "BTCUSDT",
+                                       interval, start, end, sleep=0.0))
+        assert len(got) == bars_expected(interval, 45), \
+            f"{interval}: got {len(got)} bars, want {bars_expected(interval, 45)}"
+
+    def test_result_is_ascending_and_deduplicated(self):
+        """Overlapping ranges must not duplicate, and output must ascend."""
+        import asyncio
+        from backend.backtest_data import fetch_klines
+        end = 1_700_000_000_000
+        start = end - 10 * 86_400_000
+        got = asyncio.run(fetch_klines(range_fetch_page(), "BTCUSDT",
+                                       "15m", start, end, sleep=0.0))
+        times = [c["open_time"] for c in got]
+        assert times == sorted(times), "output must ascend by open_time"
+        assert len(times) == len(set(times)), "overlapping pages must not duplicate"
+
+    def test_an_empty_page_mid_window_neither_hangs_nor_truncates_silently(self):
+        """A short or empty page is NOT a terminator. Breaking on one is the exact
+        silent-truncation defect; the loop must instead keep advancing through the
+        finite ranges and return everything it did get."""
+        import asyncio
+        from backend.backtest_data import fetch_klines
+
+        from backend.backtest_data import bars_expected, page_ranges
+        calls: list = []
+        inner = range_fetch_page()
+
+        # 5m over 12 days spans 3 pages, so page 2 is genuinely mid-window.
+        end = 1_700_000_000_000
+        start = end - 12 * 86_400_000
+        pages = page_ranges(start, end, "5m")
+        assert len(pages) >= 3, "this test needs a multi-page window"
+
+        async def flaky(symbol, interval, a, b):
+            calls.append((symbol, interval, a, b))
+            if len(calls) == 2:
+                return []          # a mid-window hole
+            return await inner(symbol, interval, a, b)
+
+        got = asyncio.run(fetch_klines(flaky, "BTCUSDT", "5m",
+                                       start, end, sleep=0.0))
+        assert len(calls) == len(pages), "must walk every range, hole or not"
+        assert got, "must return what it did get"
+        assert len(got) < bars_expected("5m", 12), \
+            "the hole must cost bars -- if not, the stub is not being exercised"
+        assert max(c["open_time"] for c in got) >= pages[-1][0], \
+            "paging continued past the hole; it did not stop there"
+
+
 # ------------------------------------------------- 3. multi-timeframe alignment
 
 class TestWindowAlignment:
@@ -125,6 +212,20 @@ class TestWindowAlignment:
             "the candle straddling `end` must have been dropped"
         assert aligned[-1]["close_time"] < end, \
             "a candle still forming at `end` must not be in the data"
+
+    def test_alignment_sorts_a_descending_series(self):
+        """The spec mandates that align_window "sorts ascending", but nothing
+        tested it: `synth()` only ever emits ascending candles, so deleting the
+        `sorted()` call left the whole suite green. Paginated fetches can arrive
+        out of order, so the ordering is load-bearing rather than cosmetic."""
+        from backend.backtest_data import align_window
+        end = 1_700_000_000_000
+        start = end - 3 * 86_400_000
+        candles = synth(start, MS_5M, 100)
+        shuffled = list(reversed(candles))
+        aligned = align_window({"5m": shuffled}, start, end)["5m"]
+        times = [c["open_time"] for c in aligned]
+        assert times == sorted(times), "align_window must sort ascending"
 
     def test_alignment_joins_on_open_time_not_index(self):
         """The actual bug: index-proportional slicing. Two series that start at
