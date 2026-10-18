@@ -382,8 +382,39 @@ async def exchange_sync(
     limit_r = limit_r_from({"daily_loss_limit_r": raw_limit}
                            if raw_limit is not None else {})
 
-    # Recalculate daily summaries for affected dates
+    # Recalculate daily summaries for affected dates.
+    #
+    # Two things about this statement are load-bearing and both were wrong until
+    # 2026-10-18. Read them before editing.
+    #
+    # 1. The day key is `(closed_at AT TIME ZONE 'UTC')::date`, NOT a bare
+    #    `DATE(closed_at)`. `closed_at` is `timestamptz`, so `DATE()` resolves it
+    #    in the SESSION `TimeZone` -- on the production VPS `Europe/Berlin`
+    #    (UTC+2) -- while `daily_summary.date` is written in UTC by
+    #    `DailyResetService.update_daily_summary`. They disagree for the four
+    #    hours a day between 22:00 and 24:00 UTC. The consequence was worse than
+    #    "matches no rows": the group key became the LOCAL day, so
+    #    `WHERE daily_summary.date = t.d` matched TODAY'S UTC row and overwrote
+    #    it with a PARTIAL day, which on a losing day pushed `used_r` back UNDER
+    #    the limit and silently re-opened an allowance the breaker had consumed.
+    #
+    # 2. The window is filtered on the DATE (`:first_day`), not on the 48h
+    #    timestamp. `closed_at >= :cutoff` is a timestamp comparison, so a sync
+    #    at 23:02 on Oct 17 used a cutoff of Oct 15 23:02 and recomputed Oct 15
+    #    from only the trades after 23:02. This statement SETS absolute
+    #    aggregates, so that is not a stale day -- it is a COMPLETE day
+    #    overwritten with a PARTIAL one, silently dropping trades out of the very
+    #    total the daily-loss breaker reads. The date filter widens the window to
+    #    up to ~72h of days. That is the correct trade: understating a losing day
+    #    is the failure mode that matters, and recomputing a couple of extra
+    #    whole days is harmless (the statement is idempotent -- it overwrites).
+    #
+    # `:cutoff` is still bound for the per-trade income-API loop above, which
+    # filters individual trades and is affected by neither bug.
+    # Pinned by TestExchangeSyncGroupsByTheUtcDay and
+    # TestExchangeSyncSourceContract in tests/backend/test_daily_limit_rules.py.
     from sqlalchemy import text
+    first_day = (datetime.now(timezone.utc) - timedelta(hours=48)).date()
     await db.execute(text("""
         UPDATE daily_summary SET
             total_trades = t.cnt, wins = t.wins, losses = t.losses, breakeven = t.bes,
@@ -402,15 +433,17 @@ async def exchange_sync(
             -- with used_r_from: it would be equivalent, and the shared clamp is
             -- what actually keeps the two answers equal.
             daily_loss_limit_hit = (COALESCE(-t.total_r, 0) >= :limit_r)
-        FROM (SELECT DATE(closed_at) as d, COUNT(*) as cnt,
+        FROM (SELECT (closed_at AT TIME ZONE 'UTC')::date as d, COUNT(*) as cnt,
             COUNT(*) FILTER (WHERE pnl_r > 0) as wins,
             COUNT(*) FILTER (WHERE pnl_r < 0) as losses,
             COUNT(*) FILTER (WHERE pnl_r = 0) as bes,
             COALESCE(SUM(pnl_r),0) as total_r, COALESCE(SUM(pnl_usdt),0) as total_usdt,
             COALESCE(MIN(pnl_r),0) as worst_r, COALESCE(MAX(pnl_r),0) as best_r
-            FROM trades WHERE closed_at >= :cutoff GROUP BY DATE(closed_at)) t
+            FROM trades
+            WHERE (closed_at AT TIME ZONE 'UTC')::date >= :first_day
+            GROUP BY (closed_at AT TIME ZONE 'UTC')::date) t
         WHERE daily_summary.date = t.d
-    """), {"cutoff": cutoff, "limit_r": limit_r})
+    """), {"first_day": first_day, "limit_r": limit_r})
     await db.commit()
 
     logger.info(f"Exchange sync by user '{user.username}': checked {checked}, fixed {fixed}")

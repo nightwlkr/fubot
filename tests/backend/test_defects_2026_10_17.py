@@ -418,7 +418,6 @@ class TestFlattenNotifiesTheDailyAccumulator:
         from backend.services.strategy_service import StrategyService
 
         today = datetime.now(timezone.utc).date()
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
         Session, engine = _own_session_factory()
         try:
             # Today's summary is shared state. test_daily_reset.py already wipes
@@ -448,8 +447,14 @@ class TestFlattenNotifiesTheDailyAccumulator:
             assert after_increment["total_pnl_r"] == pytest.approx(-0.05)
 
             async with Session() as session:
+                # `:first_day` is the UTC DATE 48h back, not the 48h timestamp:
+                # the recompute filters on the day so no boundary day is
+                # truncated to a partial aggregate (see the note in
+                # `exchange_sync`). Both bounds are UTC so the date matches the
+                # one `update_daily_summary` wrote.
+                first_day = (datetime.now(timezone.utc) - timedelta(days=2)).date()
                 await session.execute(text(_exchange_sync_recompute_sql()),
-                                      {"cutoff": cutoff, "limit_r": 3.0})
+                                      {"first_day": first_day, "limit_r": 3.0})
                 await session.commit()
 
             after_recompute = await daily.get_daily_stats()
@@ -485,8 +490,26 @@ class TestFlattenNotifiesTheDailyAccumulator:
         import backend.routers.settings as settings_router
         src = inspect.getsource(settings_router.exchange_sync)
         assert "UPDATE daily_summary SET" in src
-        assert "FROM (SELECT DATE(closed_at) as d, COUNT(*)" in src
-        assert "update_daily_summary" not in src, \
+        # The day key must resolve in UTC. This is deliberately NOT a
+        # literal-SQL assertion: pinning the exact statement text is precisely
+        # what let the session-local `DATE(closed_at)` bug survive — the test
+        # asserted the buggy string and passed. The structural checks on the
+        # subquery live in `test_daily_limit_rules.py`.
+        subquery = src.split("FROM (SELECT", 1)[1]
+        assert "FROM trades" in subquery, \
+            "the recompute must keep deriving its aggregate from `trades`"
+        assert "AT TIME ZONE 'UTC'" in subquery, \
+            "the per-day aggregate must be keyed on the UTC date, since that is " \
+            "what update_daily_summary writes the row under"
+        # Must never CALL the accumulator. Checked as a call, not as a substring:
+        # the statement's comment names `update_daily_summary` in order to explain
+        # why the key must be UTC, so a text ban fails on its own documentation.
+        import ast
+        import textwrap
+        called = {n.func.attr for n in ast.walk(
+            ast.parse(textwrap.dedent(inspect.getsource(settings_router.exchange_sync))))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        assert "update_daily_summary" not in called, \
             "exchange_sync must never call the accumulator — that would double count"
 
     def test_close_position_row_notifies_the_daily_service(self):
