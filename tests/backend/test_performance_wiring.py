@@ -125,8 +125,15 @@ class TestMonthlyReturnsDeriveFromTrades:
     def test_monthly_sums_pnl_r_from_trade_rows(self):
         from backend.routers.performance import monthly_returns
         src = inspect.getsource(monthly_returns)
-        assert "float(t.pnl_r or 0)" in src
+        # Derives from Trade rows, never daily_summary (the defect this class
+        # was written for).
         assert 't.closed_at.strftime("%Y-%m")' in src
+        # A NULL pnl_r means 1R was unestablishable, NOT breakeven. `or 0`
+        # silently renders an unmeasurable trade as 0R; the fail-closed charge
+        # of a full -1R is required instead.
+        assert "float(t.pnl_r or 0)" not in src, \
+            "monthly must not coalesce an unknown-R trade to breakeven"
+        assert "daily_r_contribution" in src
 
     def test_monthly_counts_wins_for_the_win_rate(self):
         from backend.routers.performance import monthly_returns
