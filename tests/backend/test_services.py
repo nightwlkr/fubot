@@ -98,7 +98,7 @@ class FakeBinance:
     async def get_account_balance(self):
         return [{"asset": "USDT", "availableBalance": "10000"}]
 
-    async def place_market_order(self, symbol, side, quantity):
+    async def place_market_order(self, symbol, side, quantity, reduce_only=False):
         self.calls.append(("MARKET", side, quantity))
         return {"orderId": 101, "status": "FILLED",
                 "executedQty": str(quantity), "avgPrice": str(self.price)}
@@ -348,7 +348,7 @@ class TestStrategyServiceEvaluateSignal:
         async def no_stops(symbol):
             return []
 
-        async def market_close(symbol, side, qty):
+        async def market_close(symbol, side, qty, reduce_only=False):
             closed.append((symbol, side, qty))
             return {"orderId": 7}
 
@@ -378,7 +378,7 @@ class TestStrategyServiceEvaluateSignal:
         async def has_stop(symbol):
             return [{"algoId": 1, "orderType": "STOP_MARKET"}]
 
-        async def market_close(symbol, side, qty):
+        async def market_close(symbol, side, qty, reduce_only=False):
             closed.append((symbol, side, qty))
 
         binance.place_take_profit_order = tp_boom
@@ -1010,7 +1010,7 @@ class TestLiveModeSafety:
                 async def cancel_algo_order(self, symbol, algo_id):
                     cancelled.append(algo_id)
                     return {}
-                async def place_market_order(self, symbol, side, qty):
+                async def place_market_order(self, symbol, side, qty, reduce_only=False):
                     market_closed.append((symbol, side, qty))
                     return {"orderId": 2}
             async def _noop(*a, **k):
@@ -1068,7 +1068,7 @@ class TestLiveModeSafety:
                 async def cancel_algo_order(self, symbol, algo_id):
                     cancelled.append(algo_id)
                     return {}
-                async def place_market_order(self, symbol, side, qty):
+                async def place_market_order(self, symbol, side, qty, reduce_only=False):
                     market_closed.append((symbol, side, qty))
                     return {"orderId": 2}
             async def _noop(*a, **k):
@@ -1226,7 +1226,7 @@ class TestLiveModeSafety:
                 async def get_position(self, symbol):
                     # exchange still holds the position the engine thinks it closed
                     return {"symbol": symbol, "side": "SHORT", "quantity": 5.0}
-                async def place_market_order(self, symbol, side, qty):
+                async def place_market_order(self, symbol, side, qty, reduce_only=False):
                     market_closed.append((symbol, side, qty))
                     return {"orderId": 9}
             async def _noop(*a, **k):

@@ -76,7 +76,13 @@ async def authenticate(
     if user is None or not verify_password(password, user.password_hash):
         # Increment failed attempt
         _failed_attempts.setdefault(ip, []).append(now)
-        logger.warning(f"Failed login attempt for user='{username}' from ip='{ip}' (masked key: {settings.FUBOT_SECRET_KEY[:4]}****)")
+        # NEVER log any part of FUBOT_SECRET_KEY. Even a masked prefix is a
+        # credential fragment: it narrows an offline brute force and lands in
+        # journalctl, which is world-readable to anyone with the `adm`/`systemd-journal`
+        # group. This line fired on every failed login, i.e. on every password
+        # guess against the endpoint, so it was writing the prefix on demand.
+        logger.warning(
+            f"Failed login attempt for user='{username}' from ip='{ip}'")
         return None
 
     # Success — clear failed attempts

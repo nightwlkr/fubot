@@ -3,9 +3,10 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -230,6 +231,18 @@ class BinanceService:
             except (httpx.HTTPStatusError, BinanceAPIError):
                 raise
             except Exception as e:
+                if method.upper() == "POST":
+                    # A transport error on a POST leaves the exchange state
+                    # UNKNOWN: the order may have been accepted and simply not
+                    # answered. Resending it would place a DUPLICATE (there is
+                    # no client-order-id dedupe on Binance's side). Note a 429
+                    # is NOT this branch — it `continue`s above, and a rejected
+                    # request genuinely did not execute, so retrying is safe.
+                    logger.error(
+                        "%s %s failed in transit (%s) — NOT retried: the request "
+                        "may already have executed. Reconcile before retrying.",
+                        method, path, e)
+                    raise
                 if attempt == 2:
                     logger.error(f"Request failed after 3 attempts: {e}")
                     raise
@@ -636,19 +649,51 @@ class BinanceService:
             raise ValueError(f"Price {price} below minPrice {min_price}")
         return rounded
 
-    async def place_market_order(self, symbol: str, side: str, quantity: float) -> dict:
+    def _next_client_order_id(self) -> str:
+        """A unique `newClientOrderId` for an order POST.
+
+        Without it, a POST that times out is indistinguishable from one that never
+        landed: retrying risks a duplicate position, and `GET /fapi/v1/order
+        ?origClientOrderId=` has nothing to look up. Binance matches
+        `^[.A-Z:/a-z0-9_-]{1,36}$`, and rejects a repeated id, which turns our own
+        retry-after-timeout into a hard error rather than a second fill.
+        """
+        return f"fubot-{uuid.uuid4().hex[:20]}"
+
+    async def place_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        reduce_only: bool = False,
+    ) -> dict:
         """POST /fapi/v1/order — MARKET. Rounds quantity to LOT_SIZE step.
-        
+
         Returns avgPrice (actual fill price) from Binance — use this instead of
         the planned entry price. Binance fills at market, which can drift from
         the signal's entry-zone midpoint.
+
+        `reduce_only` MUST be true for every CLOSING order (flatten, manual
+        close, `close_all`, `_ensure_flat`). Between our DB read and this order
+        the exchange's own TP/SL may already have filled, leaving the symbol flat;
+        an unreduced MARKET then opens a fresh position in the opposite direction
+        that no code path manages. With `reduceOnly=true` the same race makes the
+        order a harmless rejection instead. It must be false for entries —
+        Binance rejects reduceOnly on an order that would open exposure.
         """
         lot = await self.get_lot_size(symbol)
         qty = self._round_qty(quantity, lot)
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": "MARKET",
+            "quantity": qty,
+            "newClientOrderId": self._next_client_order_id(),
+        }
+        if reduce_only:
+            params["reduceOnly"] = "true"
         data = await self._signed_request(
-            "POST", "fapi/v1/order",
-            {"symbol": symbol, "side": side, "type": "MARKET", "quantity": qty},
-            weight=2,
+            "POST", "fapi/v1/order", params, weight=2,
         )
         return {
             "orderId": data.get("orderId"),
@@ -764,39 +809,55 @@ class BinanceService:
         ]
 
     async def get_position_income(
-        self, symbol: str, income_type: str = "REALIZED_PNL", start_time: int | None = None
+        self,
+        symbol: str,
+        income_type: Optional[str] = None,
+        start_time: int | None = None,
+        end_time: int | None = None,
     ) -> dict:
-        """GET /fapi/v1/income — fetch realized PnL + fees for a symbol.
-        
-        Binance returns income events (REALIZED_PNL, COMMISSION, FUNDING_FEE).
-        This fetches events and sums them to get the actual PnL including
-        fees. Use this after closing a position to record exchange-truth PnL.
-        
+        """GET /fapi/v1/income — realized PnL NET of commission and funding.
+
+        Binance emits several income types per trade: ``REALIZED_PNL`` (gross),
+        ``COMMISSION`` (negative) and ``FUNDING_FEE`` (negative for longs paid).
+        Only the first is money the trader keeps; the other two are the cost of
+        having the position at all.
+
+        The window is deliberately queried UNFILTERED and classified here. Passing
+        ``incomeType`` to Binance makes the server return only that one type, so the
+        ``COMMISSION``/``FUNDING_FEE`` branches below become unreachable and
+        ``totalPnl`` silently degrades to GROSS — which is how every live
+        ``pnl_usdt``, ``pnl_r`` and the -3R breaker ended up fee-blind for a month.
+        ``income_type`` remains only as a client-side filter for narrow queries.
+
         Args:
-            symbol: Trading pair (e.g., "BTCUSDT")
-            income_type: Filter by type, default "REALIZED_PNL" (includes fees)
-            start_time: Epoch ms — only sum events from this instant. Pass the
-                POSITION's open time; without it the 7-day window would also
-                sum a previous position's PnL on the same symbol.
-        
+            symbol: Trading pair (e.g. "BTCUSDT").
+            income_type: Optional client-side filter, e.g. "REALIZED_PNL". None
+                (the default) keeps all three cost types and is what callers
+                booking a close should use.
+            start_time: Epoch ms, inclusive. Pass the POSITION's open time;
+                without it the 7-day fallback also covers earlier positions on
+                the same symbol.
+            end_time: Epoch ms, inclusive. Defaults to now. Pass ``closed_at + a
+                few minutes`` when recomputing history, so a later position on the
+                same symbol cannot donate its fees to this close.
+
         Returns:
-            {"totalPnl": float, "realizedPnl": float, "fees": float, "funding": float}
+            {"totalPnl": net, "realizedPnl": gross, "fees": <0, "funding": <0}
         """
-        # Last 7 days of income (or since the given instant)
-        end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
         if start_time is None:
-            start_time = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
-        
-        data = await self._signed_request(
-            "GET", "fapi/v1/income",
-            {
-                "symbol": symbol,
-                "incomeType": income_type,
-                "startTime": start_time,
-                "endTime": end_time,
-                "limit": 1000,
-            }
-        )
+            start_time = int(
+                (datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
+        if end_time is None:
+            end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+        params = {
+            "symbol": symbol,
+            "startTime": start_time,
+            "endTime": end_time,
+            "limit": 1000,
+        }
+        # NOTE: incomeType is deliberately NOT sent. See the docstring.
+        data = await self._signed_request("GET", "fapi/v1/income", params)
         
         # Sum income events
         realized_pnl = 0.0
@@ -806,13 +867,16 @@ class BinanceService:
         for item in data:
             income = float(item.get("income", 0))
             itype = item.get("incomeType", "")
-            
+            if income_type is not None and itype != income_type:
+                continue
+
             if itype == "REALIZED_PNL":
                 realized_pnl += income
             elif itype == "COMMISSION":
                 fees += income  # negative
             elif itype == "FUNDING_FEE":
                 funding += income
+            # TRANSFER / WELCOME_BONUS / anything else is not PnL — skipped.
         
         total = realized_pnl + fees + funding
         

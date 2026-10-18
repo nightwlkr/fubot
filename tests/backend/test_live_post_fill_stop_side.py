@@ -112,7 +112,7 @@ class FakeBinance:
     async def get_open_algo_orders(self, symbol):
         return []
 
-    async def place_market_order(self, symbol, side, quantity):
+    async def place_market_order(self, symbol, side, quantity, reduce_only=False):
         self.calls.append(("MARKET", side, quantity))
         self.open_qty = 0.0
         return {"orderId": 7, "status": "FILLED"}
