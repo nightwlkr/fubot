@@ -37,12 +37,6 @@ BARS_PER_DAY = {tf: 86_400_000 // ms for tf, ms in INTERVAL_MS.items()}
 # a result size — the window, not the page, decides how much history we get.
 PAGE_SIZE = 1500
 
-# Round trip: LIMIT entry (maker) + market exit (taker).
-# MISPLACED HERE: this is a Task 3 cost-model constant, not a data-layer one.
-# Task 3 moves it to the harness that actually charges it. Do not read it before then.
-FEE_ROUND_TRIP = 0.0007
-
-
 def bars_expected(interval: str, days: int) -> int:
     """How many bars a full `days` window holds on `interval`."""
     return BARS_PER_DAY[interval] * days

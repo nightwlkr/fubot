@@ -128,3 +128,35 @@ async def test_closing_orders_are_reduce_only():
     assert stop["side"] == "SELL" and tp["side"] == "SELL"  # LONG closes with SELL
     assert "type=STOP_MARKET" in order_urls[0] and "reduceOnly=true" in order_urls[0]
     assert "type=TAKE_PROFIT_MARKET" in order_urls[1] and "reduceOnly=true" in order_urls[1]
+
+
+async def test_klines_window_carries_start_end_and_the_bar_cap():
+    """`get_klines_window` is the backtest's only seam onto ranged history.
+
+    `get_klines` takes no time parameters at all, which is why the harness
+    capped itself at 1000 bars (3.47 days of 5m). Assert the range really
+    reaches the wire, and that `limit` defaults to Binance's 1500 klines cap —
+    ask for more and the overflow is silently dropped, so a wrong default is a
+    truncated dataset that raises no error.
+    """
+    seen = []
+
+    def handler(request: httpx.Request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json=[KLINE_ROW])
+
+    svc = make_service(handler)
+    try:
+        rows = await svc.get_klines_window("BTCUSDT", "5m", 1_700_000_000_000,
+                                           1_700_003_888_000_000)
+    finally:
+        await svc._client.aclose()
+    url = seen[0]
+    assert url.startswith("https://testnet.binancefuture.com/fapi/v1/klines")
+    assert "startTime=1700000000000" in url
+    assert "endTime=1700003888000000" in url
+    assert "limit=1500" in url
+    assert "interval=5m" in url
+    # Same normalised row shape as get_klines, so downstream needs no branch.
+    assert rows[0]["open_time"] == 1 and rows[0]["close"] == 105.0
+    assert rows[0]["close_time"] == 2

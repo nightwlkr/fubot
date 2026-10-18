@@ -22,9 +22,15 @@ from backend.indicators.choch import detect_choch
 from backend.indicators.trend import analyze_trend_bias
 from backend.indicators.volume_profile import get_volume_confirmed_filter
 from backend.backtest_data import last_closed_before
-from backend.backtest_data import FEE_ROUND_TRIP
+from backend.backtest_data import align_window, bars_expected, fetch_klines, window_for_days
 
 logger = logging.getLogger(__name__)
+
+# Round trip: LIMIT entry (maker) + market exit (taker), as a fraction of
+# NOTIONAL. It lives here, next to `fee_in_r`, because this is the module that
+# CHARGES it -- a cost constant in the data layer was a constant nobody who
+# read `backtest_data.py` would think to look for.
+FEE_ROUND_TRIP = 0.0007
 
 
 def fee_in_r(entry: float, risk_dist: float) -> float:
@@ -495,20 +501,32 @@ class LookaheadProbeBacktester(Backtester):
 
 async def run_backtest(symbol: str, days: int = 30, settings: Optional[dict] = None,
                        binance=None) -> BacktestResult:
-    """Fetch historical klines and run a backtest. `binance` is a BinanceService
-    (injectable for tests); creates one if not given."""
+    """Fetch a full `days` window (paginated) and run the backtest.
+
+    All three intervals are pinned to ONE `[start, end)` window and fetched
+    through `fetch_klines`, so the harness cannot again silently test 3.5 days
+    of 5m against a month of 1h.
+    """
     created = False
     if binance is None:
         from backend.services.binance_service import BinanceService
         binance = BinanceService()
         created = True
     try:
-        limit = min(days * 24, 1000)
-        k1h = await binance.get_klines(symbol, "1h", limit)
-        k5m = await binance.get_klines(symbol, "5m", limit)
-        k15m = await binance.get_klines(symbol, "15m", limit)
+        start_ms, end_ms = window_for_days(days)
+        series = {}
+        for tf in ("1h", "5m", "15m"):
+            series[tf] = await fetch_klines(
+                lambda s, i, a, b: binance.get_klines_window(s, i, a, b),
+                symbol, tf, start_ms, end_ms)
+        series = align_window(series, start_ms, end_ms)
+        for tf, candles in series.items():
+            if len(candles) < bars_expected(tf, days) * 0.9:
+                raise RuntimeError(
+                    f"{symbol} {tf}: got {len(candles)} bars for a {days}d window, "
+                    f"expected ~{bars_expected(tf, days)} — pagination failed")
         bt = Backtester(settings=settings)
-        return bt.run(symbol, k1h, k5m, k15m)
+        return bt.run(symbol, series["1h"], series["5m"], series["15m"])
     finally:
         if created:
             await binance.close()

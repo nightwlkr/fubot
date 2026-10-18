@@ -729,3 +729,91 @@ class TestLookaheadIsDetectable:
         # that saw the probe lose would be reading the wrong signal.
         assert broken["total_r"] > honest["total_r"], \
             "lookahead must inflate R; a probe that scores worse is not this defect"
+
+
+# ------------------------------------------------- 7. the wiring (run_backtest)
+
+class FakeRangedBinance:
+    """A BinanceService stand-in that HONOURS the requested range, like the real
+    endpoint. Records every call so the wiring can be asserted, not just the
+    result."""
+
+    def __init__(self, truncate: dict | None = None):
+        from backend.backtest_data import INTERVAL_MS
+        self.ms = INTERVAL_MS
+        self.truncate = truncate or {}   # interval -> only return this many bars
+        self.calls: list = []
+        self.closed = False
+
+    async def get_klines_window(self, symbol, interval, start_ms, end_ms, limit=1500):
+        ms = self.ms[interval]
+        first = -(-start_ms // ms) * ms
+        page = [{"open_time": t, "open": 100.0, "high": 101.0, "low": 99.0,
+                 "close": 100.0, "volume": 1000.0, "close_time": t + ms - 1}
+                for t in range(first, end_ms, ms)]
+        cap = self.truncate.get(interval)
+        if cap is not None:
+            page = page[:cap]
+        self.calls.append((symbol, interval, start_ms, end_ms))
+        return page
+
+    async def close(self):
+        self.closed = True
+
+
+class TestRunBacktestWiring:
+    def test_a_full_window_round_trips_through_the_data_layer(self):
+        """`run_backtest` used to do `limit = min(days * 24, 1000)` on every
+        interval, which capped 5m at 3.47 days regardless of `--days`. It must
+        now page the whole window and hand one backtester all three series."""
+        import asyncio
+        from backend.backtest import run_backtest
+        from backend.backtest_data import bars_expected, page_ranges
+
+        fake = FakeRangedBinance()
+        res = asyncio.run(run_backtest("BTCUSDT", days=5, binance=fake))
+        assert res.symbol == "BTCUSDT"
+        # Within ONE bar of the full window, not exactly: `window_for_days` ends
+        # on a 5m boundary, so on a coarse interval the first 1h bar closes after
+        # `end` and `align_window` correctly drops it. Exact equality would be
+        # asserting the boundary quirk instead of the wiring.
+        assert bars_expected("1h", 5) - 1 <= res.candles <= bars_expected("1h", 5)
+        # One call per PAGE, and more than one page on 5m — a 5d window is 1,440
+        # bars, right at the 1,500-bar cap, so it barely pages. Use 45d to make
+        # paging undeniable rather than borderline.
+        fake = FakeRangedBinance()
+        asyncio.run(run_backtest("BTCUSDT", days=45, binance=fake))
+        end = 1_700_000_000_000
+        want_5m = len(page_ranges(end - 45 * 86_400_000, end, "5m"))
+        got_5m = len([c for c in fake.calls if c[1] == "5m"])
+        assert got_5m == want_5m >= 9, f"5m issued {got_5m} pages, expected {want_5m}"
+
+    def test_a_short_series_raises_rather_than_reporting_a_thin_sample(self):
+        """`fetch_klines` already range-filters, so a partial page cannot pass
+        silently — but a REMOTE that returns nothing, or a symbol that listed
+        mid-window, would otherwise yield a confident-looking report off a
+        fraction of the data. The tripwire is loud, and it names the symbol and
+        the counts."""
+        import asyncio
+        from backend.backtest import run_backtest
+
+        # Only the first 300 bars of 5m ever come back.
+        fake = FakeRangedBinance(truncate={"5m": 300})
+        with pytest.raises(RuntimeError, match="5m"):
+            asyncio.run(run_backtest("BTCUSDT", days=45, binance=fake))
+
+    def test_the_client_is_not_closed_when_it_was_injected(self):
+        """Ownership: a client we created is closed in `finally`, a caller-supplied
+        one is not. Closing the caller's client is the kind of thing a smoke test
+        would never notice."""
+        import asyncio
+        from backend.backtest import run_backtest
+
+        ok = FakeRangedBinance()
+        asyncio.run(run_backtest("BTCUSDT", days=5, binance=ok))
+        assert ok.closed is False, "an injected client must not be closed by the callee"
+
+        short = FakeRangedBinance(truncate={"1h": 10})
+        with pytest.raises(RuntimeError):
+            asyncio.run(run_backtest("BTCUSDT", days=5, binance=short))
+        assert short.closed is False

@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.backtest import run_backtest  # noqa: E402
-from backend.backtest_data import FEE_ROUND_TRIP  # noqa: E402
+from backend.backtest import FEE_ROUND_TRIP  # noqa: E402
 
 
 async def main() -> None:

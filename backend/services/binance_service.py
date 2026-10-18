@@ -319,6 +319,43 @@ class BinanceService:
             {"symbol": symbol, "interval": interval, "limit": limit},
             weight=kweight,
         )
+        return self._parse_klines(data)
+
+    async def get_klines_window(self, symbol: str, interval: str,
+                                start_ms: int, end_ms: int,
+                                limit: int = 1500) -> list[dict]:
+        """GET /fapi/v1/klines over an explicit TIME range — the backtest seam.
+
+        `get_klines` takes only a `limit`, which is why the harness capped
+        itself at 1000 bars (3.47 days of 5m) no matter what `--days` said.
+        `startTime`/`endTime` are what let a caller walk a long window one
+        page at a time; `backend/backtest_data.fetch_klines` drives it.
+
+        Reuses `_public_request` (the shared rate limiter, 429 retry and
+        error-body handling) rather than opening a second httpx client — a
+        second client means a second limiter and a second blind spot.
+
+        `limit` defaults to 1500, Binance's klines cap. Callers must size the
+        range so the window holds no more than that many bars: ask for more and
+        the overflow is silently dropped. `fetch_klines` guarantees this via
+        `page_ranges`, which steps by `limit` bars OF `interval`.
+        """
+        data = await self._public_request(
+            "fapi/v1/klines",
+            {"symbol": symbol, "interval": interval,
+             "startTime": int(start_ms), "endTime": int(end_ms), "limit": limit},
+            weight=10,  # 501-1500 per Binance's klines weight table
+        )
+        return self._parse_klines(data)
+
+    @staticmethod
+    def _parse_klines(data) -> list[dict]:
+        """Binance's positional kline array -> the dicts the rest of the app reads.
+
+        Note `close_time` is kept RAW. It is the anti-lookahead boundary for
+        every consumer (the backtest drops still-forming bars on it), and it is
+        a millisecond timestamp, not a price — no coercion.
+        """
         result = []
         for k in data:
             result.append({
