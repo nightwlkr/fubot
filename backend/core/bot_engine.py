@@ -23,7 +23,6 @@ from backend.services.order_service import OrderService
 from backend.services.alert_service import AlertService
 from backend.services.binance_service import BinanceService
 from backend.core.daily_reset import DailyResetService
-from backend.core.bot_mode import normalise_bot_mode
 from backend.core.websocket_manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -62,7 +61,7 @@ class BotEngine:
         self.position_manager = None  # set by main.py after construction
 
         self._running = False
-        self._mode: str = normalise_bot_mode(settings.get("bot_mode"))
+        self._mode: str = settings.get("bot_mode", "paper")
         self._task: Optional[asyncio.Task] = None
         self._last_scan: Optional[datetime] = None
         self._scan_count = 0

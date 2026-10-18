@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.core.bot_mode import normalise_bot_mode
 from backend.schemas.bot import BotStartRequest, BotStatusResponse
 
 logger = logging.getLogger(__name__)
@@ -51,10 +50,7 @@ async def start_bot(
         from sqlalchemy import select
         result = await db.execute(select(Setting).where(Setting.key == "bot_mode"))
         saved = result.scalar_one_or_none()
-        # normalise_bot_mode, not a raw membership test: the stored value can be
-        # JSON-quoted ('"live"'), which a `value in ("paper","live")` check
-        # rejects — silently downgrading a live bot to paper.
-        mode = normalise_bot_mode(saved.value if saved else None)
+        mode = (saved.value if saved and saved.value in ("paper", "live") else "paper")
     if mode not in ("paper", "live"):
         raise HTTPException(status_code=400, detail="Mode must be 'paper' or 'live'")
     await _bot_engine.start(mode=mode)
