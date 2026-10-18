@@ -106,7 +106,23 @@ def range_fetch_page(calls: list | None = None):
 
 
 class TestFetchKlines:
-    @pytest.mark.parametrize("interval", ["1h", "5m", "15m"])
+    def test_no_page_can_request_more_bars_than_the_remote_cap(self):
+        """No range may ask for more bars than the endpoint will return, or the
+        overflow is silently dropped and the window is never revisited. This is
+        what the interval-aware step fixes: a fixed 5m step over-requests by 12x
+        on 1m and loses 6,000 bars per page. This is the ONLY test that pins the
+        interval-aware step: both `page_ranges` tests above use the default
+        interval, and for 5m a fixed 5m step is exactly correct."""
+        from backend.backtest_data import INTERVAL_MS, PAGE_SIZE, page_ranges
+        end = 1_700_000_000_000
+        start = end - 45 * 86_400_000
+        for tf, ms in INTERVAL_MS.items():
+            for a, b in page_ranges(start, end, tf):
+                assert (b - a) // ms <= PAGE_SIZE, (
+                    f"{tf} page asks for {(b - a) // ms} bars, cap is {PAGE_SIZE}"
+                )
+
+    @pytest.mark.parametrize("interval", ["1m", "1h", "5m", "15m"])
     def test_every_interval_gets_its_full_window(self, interval):
         """The defect this pins: `page_ranges` stepped by a fixed 5m duration, so
         a 1500-bar page was 5.2 days on 5m but 62 days on 1h. Combined with a
@@ -133,6 +149,30 @@ class TestFetchKlines:
         times = [c["open_time"] for c in got]
         assert times == sorted(times), "output must ascend by open_time"
         assert len(times) == len(set(times)), "overlapping pages must not duplicate"
+
+    def test_result_is_filtered_to_the_window_even_if_the_remote_ignores_it(self):
+        """DEFECT 1's shape, silently. The only production fetch method is
+        `get_klines(symbol, interval, limit)` — it has NO time parameters, so an
+        adapter built naively on it returns the newest 1500 bars for EVERY range.
+        Dedup then collapses them and you get 1500 recent candles with no error.
+        `fetch_klines` must enforce its own contract, not trust the adapter."""
+        import asyncio
+        from backend.backtest_data import fetch_klines
+
+        end = 1_700_000_000_000
+        start = end - 45 * 86_400_000
+
+        async def ignores_range(symbol, interval, a, b):
+            # Deliberately ignores [a, b) and returns RECENT bars, as a naive
+            # limit-based adapter would. These are all AFTER the window ends.
+            recent = range(end, end + 1500 * 60_000, 60_000)
+            return [{"open_time": t, "close_time": t + 59_999} for t in recent]
+
+        got = asyncio.run(fetch_klines(ignores_range, "BTCUSDT", "1m",
+                                       start, end, sleep=0.0))
+        assert got == [], (
+            f"candles outside the window must be dropped, got {len(got)}"
+        )
 
     def test_an_empty_page_mid_window_neither_hangs_nor_truncates_silently(self):
         """A short or empty page is NOT a terminator. Breaking on one is the exact
@@ -227,17 +267,72 @@ class TestWindowAlignment:
         times = [c["open_time"] for c in aligned]
         assert times == sorted(times), "align_window must sort ascending"
 
-    def test_alignment_joins_on_open_time_not_index(self):
-        """The actual bug: index-proportional slicing. Two series that start at
-        DIFFERENT wall-clock times must not be silently stitched together."""
+    def test_align_window_leaves_each_series_open_time_untouched(self):
+        """`align_window` must NOT stitch series together. The index-proportional
+        slicing that did so lived in `backtest.py`, not here — what this module
+        owes is that each series keeps its own open_time so a consumer can join
+        explicitly. Two series starting at DIFFERENT wall-clock times must come
+        out still starting at different times."""
         from backend.backtest_data import align_window
         end = 1_700_000_000_000
         start = end - 2 * 86_400_000
-        k5m = synth(start, MS_5M, 500)          # covers start .. start+41h
+        k5m = synth(start, MS_5M, 500)             # covers start .. start+41h
         k1h = synth(start + 10 * MS_1H, MS_1H, 30)  # starts 10h LATER
         aligned = align_window({"5m": k5m, "1h": k1h}, start, end)
-        overlap = ({c["open_time"] for c in aligned["5m"]}
-                   & {c["open_time"] for c in aligned["1h"]})
-        # Only genuinely co-timed candles may overlap.
-        assert all(t >= start + 10 * MS_1H for t in overlap)
-        assert overlap, "sanity: the two series do genuinely overlap"
+        assert aligned["5m"][0]["open_time"] == start
+        assert aligned["1h"][0]["open_time"] == start + 10 * MS_1H
+        assert aligned["5m"][0]["open_time"] != aligned["1h"][0]["open_time"]
+
+
+# ------------------------------------------------- 3. defect 3, still in backtest.py
+
+@pytest.mark.xfail(reason="Task 2 rewires Backtester; defect 3 removed there",
+                   strict=True)
+def test_backtest_no_longer_aligns_series_by_proportional_index(self):
+    """DEFECT 3 lived here: `k5m[: len(k5m)*(at_idx+1)//len(k1h)]` mapped 1h
+    bar 500 to 5m bar 500 — hour 500 against hour 41.7. Pinned here because
+    Task 2 is what removes it; until then this test FAILS. `strict=True` means
+    an unexpected PASS is also a failure, which is the signal we want when Task 2
+    lands — if this ever xpasses, the defect is fixed and the marker must go."""
+    import pathlib
+
+    import backend.backtest as bt
+    src = pathlib.Path(bt.__file__).read_text()
+    assert "(at_idx + 1) // len(k1h)" not in src, \
+        "series are still being aligned by proportional index"
+
+
+# ------------------------------------------------------- 4. untested public helpers
+
+class TestHelpers:
+    def test_last_closed_before(self):
+        """-1 before any candle has closed; the right index once one has. Also
+        pins the fail-closed rule: a candle with NO close_time is treated as NOT
+        closed rather than defaulting to open_time (which would look closed)."""
+        from backend.backtest_data import last_closed_before
+        start = 1_700_000_000_000
+        candles = synth(start, MS_5M, 10)  # bar i closes at start+(i+1)*5m-1
+        assert last_closed_before(candles, start) == -1, \
+            "nothing is closed at the very first open_time"
+        # Bar i closes at start + (i+1)*5m - 1, so at t = start + 5m exactly one
+        # bar has closed, and at t = start + 50m all ten have.
+        assert last_closed_before(candles, start + MS_5M) == 0
+        assert last_closed_before(candles, start + 10 * MS_5M) == 9
+        # Fail closed: unknown close_time must not read as already-closed.
+        blind = [dict(c) for c in candles[:3]]
+        for c in blind:
+            c.pop("close_time")
+        assert last_closed_before(blind, start + 10 * MS_5M) == -1
+
+    def test_window_for_days_ends_on_a_5m_boundary_and_spans_exactly_days(self):
+        """This is the single place the anti-lookahead boundary is chosen, so it
+        is pinned directly: the window must end ON a 5m boundary (never mid-bar)
+        and span exactly `days`."""
+        from backend.backtest_data import INTERVAL_MS, window_for_days
+        ms_5m = INTERVAL_MS["5m"]
+        # A deliberately unaligned "now" (mid-bar).
+        now = 1_700_000_000_000 + 137_000
+        start, end = window_for_days(30, now_ms=now)
+        assert end % ms_5m == 0, "window must end on a 5m boundary"
+        assert end <= now, "must not reach into the future"
+        assert end - start == 30 * 86_400_000, "must span exactly `days`"

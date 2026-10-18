@@ -38,6 +38,8 @@ BARS_PER_DAY = {tf: 86_400_000 // ms for tf, ms in INTERVAL_MS.items()}
 PAGE_SIZE = 1500
 
 # Round trip: LIMIT entry (maker) + market exit (taker).
+# MISPLACED HERE: this is a Task 3 cost-model constant, not a data-layer one.
+# Task 3 moves it to the harness that actually charges it. Do not read it before then.
 FEE_ROUND_TRIP = 0.0007
 
 
@@ -51,9 +53,12 @@ def page_ranges(start_ms: int, end_ms: int, interval: str = "5m",
     """Contiguous, ascending [start, end) ranges covering the whole window.
 
     Steps by `page_size` bars OF `interval`. Stepping by a fixed 5m duration
-    regardless of interval was wrong: a 1500-bar page is 5.2 days on 5m but
-    62 days on 1h, so a single page covered the whole window for coarse
-    intervals while truncating fine ones.
+    regardless of interval was wrong in BOTH directions: a 1500-bar page is 5.2
+    days on 5m but 62 days on 1h (so one page covered the whole window for
+    coarse intervals), and it OVER-REQUESTS on fine ones — a 1500*5m range asks
+    for 7,500 bars on 1m against a 1,500 cap, so the overflow is dropped and the
+    window is never revisited. Stepping by `interval`'s own bar size guarantees
+    no page can ask for more bars than the endpoint will return.
     """
     step = page_size * INTERVAL_MS[interval]
     out, cur = [], start_ms
@@ -68,12 +73,19 @@ def align_window(series_by_tf: dict[str, list[dict]],
                  start_ms: int, end_ms: int) -> dict[str, list[dict]]:
     """Restrict every interval to [start_ms, end_ms), drop still-forming bars,
     and sort ascending. Series are NOT stitched together — each keeps its own
-    open_time, so callers join explicitly rather than by index."""
+    open_time, so callers join explicitly rather than by index.
+
+    A candle with NO `close_time` is DROPPED, not admitted. Defaulting it to
+    `open_time` would make a candle of unknown age look already-closed; this
+    codebase's rule is that unreadable must never mean released. Binance always
+    sends `close_time`, so this costs nothing in practice.
+    """
     out: dict[str, list[dict]] = {}
     for tf, candles in series_by_tf.items():
         kept = [c for c in candles
                 if start_ms <= c["open_time"] < end_ms
-                and c.get("close_time", c["open_time"]) < end_ms]
+                and c.get("close_time") is not None
+                and c["close_time"] < end_ms]
         out[tf] = sorted(kept, key=lambda c: c["open_time"])
     return out
 
@@ -84,10 +96,20 @@ def index_by_time(candles: list[dict]) -> dict[int, int]:
 
 
 def last_closed_before(candles: list[dict], t_ms: int) -> int:
-    """Index of the last candle fully closed at `t_ms`, or -1."""
+    """Index of the last candle fully closed at `t_ms`, or -1.
+
+    PRECONDITION: `candles` must be sorted ascending by `open_time`. This
+    early-`break`s on the first still-forming candle, so unsorted input silently
+    returns a wrong index rather than raising.
+
+    Fails CLOSED: a candle with no `close_time` is treated as NOT closed (it
+    breaks the scan), matching `align_window` and the codebase rule that
+    unreadable must never mean released.
+    """
     idx = -1
     for i, c in enumerate(candles):
-        if c.get("close_time", c["open_time"]) < t_ms:
+        close = c.get("close_time")
+        if close is not None and close < t_ms:
             idx = i
         else:
             break
@@ -117,7 +139,14 @@ async def fetch_klines(fetch_page: Callable[[str, str, int, int], list[dict]],
     for n, (a, b) in enumerate(ranges):
         page = await fetch_page(symbol, interval, a, b)
         for c in page:
-            out[c["open_time"]] = c
+            # Enforce our own contract rather than trusting the adapter. The only
+            # production fetch method is `get_klines(symbol, interval, limit)`,
+            # which has NO time parameters — an adapter built naively on it returns
+            # the newest 1500 bars for every range, dedup collapses them, and you
+            # silently get 1500 recent candles with no error. This filter is the
+            # last line of defence against defect 1's shape.
+            if start_ms <= c["open_time"] < end_ms:
+                out[c["open_time"]] = c
         if n < len(ranges) - 1:
             await asyncio.sleep(sleep)
     return [out[t] for t in sorted(out)]
