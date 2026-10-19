@@ -30,10 +30,21 @@ async def main() -> None:
     ap.add_argument("--days", type=int, default=30, help="days of 1h history")
     ap.add_argument("--rr-min", type=float, default=3.0)
     ap.add_argument("--risk-percent", type=float, default=1.0)
+    ap.add_argument("--min-risk-pct", type=float, default=None, dest="min_risk_pct",
+                    help="floor on |entry-stop| as a fraction of entry (e.g. 0.005 = 0.5%%). "
+                         "Costs are a fraction of notional while R divides by stop distance, so "
+                         "this is the single highest-leverage risk knob: widening the stop "
+                         "divides the cost in R. Unset uses the code default (0.0005).")
     ap.add_argument("--balance", type=float, default=10000.0)
-    ap.add_argument("--neutral", action="store_true", help="allow NEUTRAL-bias trades")
+    ap.add_argument("--neutral", dest="neutral", action="store_true", default=None,
+                    help="allow NEUTRAL-bias trades (production default: True)")
+    ap.add_argument("--no-neutral", dest="neutral", action="store_false",
+                    help="reject NEUTRAL-bias markets (non-production)")
     ap.add_argument("--strength", default="MODERATE", choices=["WEAK", "MODERATE", "STRONG"])
-    ap.add_argument("--no-volume", action="store_true", help="disable the volume-confirmation filter")
+    ap.add_argument("--no-volume", dest="volume", action="store_false", default=None,
+                    help="disable the volume-confirmation filter")
+    ap.add_argument("--volume", dest="volume", action="store_true",
+                    help="enable the volume-confirmation filter (non-production)")
     ap.add_argument("--end-days-ago", type=int, default=0,
                     help="shift the window backward N days (disjoint out-of-sample slices)")
     args = ap.parse_args()
@@ -44,9 +55,13 @@ async def main() -> None:
         "rr_min": args.rr_min,
         "risk_percent": args.risk_percent,
         "backtest_balance": args.balance,
-        "trade_neutral_markets": args.neutral,
+        # Default to PRODUCTION (routers/settings.py): trade_neutral_markets=True,
+        # volume_filter_enabled=False. These flags previously defaulted to the
+        # INVERSE, silently re-imposing the inversion the harness had just fixed.
+        "trade_neutral_markets": True if args.neutral is None else args.neutral,
         "trade_min_trend_strength": args.strength,
-        "volume_filter_enabled": not args.no_volume,
+        "volume_filter_enabled": False if args.volume is None else args.volume,
+        **({"min_risk_pct": args.min_risk_pct} if args.min_risk_pct is not None else {}),
     }
 
     print(f"Backtest: {', '.join(symbols)} | {args.days}d | "
