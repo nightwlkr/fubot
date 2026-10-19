@@ -21,28 +21,38 @@ from backend.indicators.three_candle import detect_three_candles, evaluate_three
 from backend.indicators.choch import detect_choch
 from backend.indicators.trend import analyze_trend_bias
 from backend.indicators.volume_profile import get_volume_confirmed_filter
+from backend.core.cost_model import LIVE as COST_MODEL
 from backend.backtest_data import last_closed_before
 from backend.backtest_data import align_window, bars_expected, fetch_klines, window_for_days
 
 logger = logging.getLogger(__name__)
 
-# Round trip: LIMIT entry (maker) + market exit (taker), as a fraction of
-# NOTIONAL. It lives here, next to `fee_in_r`, because this is the module that
-# CHARGES it -- a cost constant in the data layer was a constant nobody who
-# read `backtest_data.py` would think to look for.
-FEE_ROUND_TRIP = 0.0007
+# Trading costs come from ONE place — backend/core/cost_model.py. Three
+# inconsistent constants used to live here, in scripts/strategy_compare.py and
+# position_manager; this one charged 0.0007 on the assumption that entries fill
+# as maker. Live entries are GTC (not GTX post-only) at the zone midpoint with
+# gate 4 admitting +-1%, so they cross the spread as a TAKER — measured: 27 of
+# 30 consecutive fills came in BETTER than the planned midpoint, which a resting
+# maker order never does. Costs are now the measured 0.0011 round trip.
+
+#: Re-exported so `scripts/backtest.py` and existing callers keep working. The
+#: value is derived from COST_MODEL, never defined twice.
+FEE_ROUND_TRIP = COST_MODEL.round_trip
 
 
 def fee_in_r(entry: float, risk_dist: float) -> float:
     """Round-trip cost expressed in R.
 
     Fees are a fraction of NOTIONAL; R divides by the risk distance. So the same
-    0.07% costs 4x more R at a 0.5% stop than at a 2% stop — the effect panel
-    cycle 1 measured as the dominant cost drag.
+    ~0.11% costs 4x more R at a 0.5% stop than at a 2% stop — the effect panel
+    cycle 1 measured as the dominant cost drag, and the reason this strategy
+    loses money: at the observed 0.123% stops a round trip costs ~0.90R.
+
+    `risk_dist` is a PRICE distance (entry - stop), not a stop fraction.
     """
     if risk_dist <= 0:
         return float("inf")
-    return (entry * FEE_ROUND_TRIP) / risk_dist
+    return COST_MODEL.round_trip_in_r(entry, risk_dist)
 
 
 # Live entry semantics, mirrored so the backtest measures what the bot does.
@@ -227,9 +237,9 @@ class Backtester:
         self.rr_min = float(self.settings.get("rr_min", 3.0))
         self.risk_percent = float(self.settings.get("risk_percent", 1.0))
         self.balance = float(self.settings.get("backtest_balance", 10000.0))
-        self.trade_neutral = bool(self.settings.get("trade_neutral_markets", False))
+        self.trade_neutral = bool(self.settings.get("trade_neutral_markets", True))
         self.min_strength = str(self.settings.get("trade_min_trend_strength", "MODERATE")).upper()
-        self.volume_filter_enabled = bool(self.settings.get("volume_filter_enabled", True))
+        self.volume_filter_enabled = bool(self.settings.get("volume_filter_enabled", False))
         self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
         self.signal_max_age_ms = int(
             self.settings.get("signal_max_age_minutes", DEFAULT_SIGNAL_MAX_AGE_MIN)) * 60_000

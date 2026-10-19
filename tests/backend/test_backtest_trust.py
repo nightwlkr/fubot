@@ -650,13 +650,21 @@ class TestCostModel:
 
     def test_a_wide_stop_pays_more_in_fees_than_a_tight_one(self):
         """Fees are a fraction of NOTIONAL, but R divides by the risk distance.
-        The same 0.07% therefore costs more R when the stop is tight — which is
-        exactly the effect cycle 1 measured (fee drag 4x at tight stops)."""
-        from backend.backtest import fee_in_r
+        The same ~0.11% therefore costs more R when the stop is tight — which is
+        exactly the effect cycle 1 measured (fee drag 4x at tight stops).
+
+        The constant is read from the cost model rather than hardcoded: the
+        harness used to assume 0.07% on the grounds that entries fill as maker,
+        but live entries are GTC at the zone midpoint and filled better than
+        planned on 27 of 30 trades, i.e. they cross the spread as a taker."""
+        from backend.backtest import FEE_ROUND_TRIP, fee_in_r
         tight = fee_in_r(entry=100.0, risk_dist=0.5)
         wide = fee_in_r(entry=100.0, risk_dist=5.0)
         assert tight > wide
-        assert tight == pytest.approx(100.0 * 0.0007 / 0.5)
+        assert FEE_ROUND_TRIP > 0.0007, (
+            "the measured live round trip costs more than the old assumed 0.07%"
+        )
+        assert tight == pytest.approx(100.0 * FEE_ROUND_TRIP / 0.5)
 
     def test_the_real_close_path_charges_the_cost(self):
         """The two tests above call `finalise()` themselves, so they stay green
@@ -676,7 +684,8 @@ class TestCostModel:
         Backtester()._resolve_exit(t, series)
         assert t.exit_reason == "TP_HIT"
         assert t.pnl_r == pytest.approx(3.0)
-        assert t.net_r == pytest.approx(3.0 - 100.0 * 0.0007 / 1.0)
+        from backend.backtest import FEE_ROUND_TRIP as _FRT
+        assert t.net_r == pytest.approx(3.0 - 100.0 * _FRT / 1.0)
 
     def test_the_summary_reports_net_and_flags_it_as_the_number_to_trust(self):
         from backend.backtest import BacktestResult, BacktestTrade
