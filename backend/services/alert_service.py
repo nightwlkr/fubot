@@ -48,6 +48,9 @@ class AlertService:
     async def error(self, message: str) -> None:
         await self.signal(message, level="ERROR")
 
+    async def critical(self, message: str) -> None:
+        await self.signal(message, level="CRITICAL")
+
     # ---- Trading events ------------------------------------------------
 
     async def trade_executed(self, symbol: str, direction: str, entry: float,
