@@ -32,6 +32,7 @@ interface TradingSettings {
   stale_trade_hours: number
   strategy_obfvg_enabled: boolean
   strategy_obfvg_max_age_bars: number
+  weekly_drawdown_limit_r: number
 }
 
 interface SymbolConfig {
@@ -224,6 +225,7 @@ function TradingParamsSection() {
   const [staleTradeHours, setStaleTradeHours] = useState(24)
   const [obfvgEnabled, setObfvgEnabled] = useState(true)
   const [obfvgMaxAgeBars, setObfvgMaxAgeBars] = useState(2)
+  const [weeklyDrawdownLimit, setWeeklyDrawdownLimit] = useState(5.0)
 
   useEffect(() => {
     api.get<TradingSettings>(ENDPOINTS.settingsTrading)
@@ -252,6 +254,7 @@ function TradingParamsSection() {
         setStaleTradeHours(s.stale_trade_hours ?? 24)
         setObfvgEnabled(s.strategy_obfvg_enabled ?? true)
         setObfvgMaxAgeBars(s.strategy_obfvg_max_age_bars ?? 2)
+        setWeeklyDrawdownLimit(s.weekly_drawdown_limit_r ?? 5.0)
         setIsLoading(false)
       })
       .catch(() => setIsLoading(false))
@@ -283,6 +286,7 @@ function TradingParamsSection() {
         stale_trade_hours: staleTradeHours,
         strategy_obfvg_enabled: obfvgEnabled,
         strategy_obfvg_max_age_bars: obfvgMaxAgeBars,
+        weekly_drawdown_limit_r: weeklyDrawdownLimit,
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
@@ -317,6 +321,7 @@ function TradingParamsSection() {
           { label: 'Stale Trade Exit', value: staleTradeHours, setValue: setStaleTradeHours, min: 0, max: 72, step: 1, suffix: 'h', desc: 'Close profitable trades after this many hours if they haven\'t hit TP. 0 = disabled. Prevents stale trades from tying up margin' },
           { label: 'Max Open Positions', value: maxPositions, setValue: setMaxPositions, min: 1, max: 10, step: 1, suffix: '', desc: 'Maximum concurrent positions' },
           { label: 'Daily Loss Limit', value: dailyLossLimit, setValue: setDailyLossLimit, min: 1, max: 10, step: 0.5, suffix: 'R', desc: 'Bot stops trading after this loss (in R)' },
+          { label: 'Weekly Drawdown Limit', value: weeklyDrawdownLimit, setValue: setWeeklyDrawdownLimit, min: 1, max: 20, step: 0.5, suffix: 'R', desc: 'Bot halts when weekly losses exceed this threshold. Reset via Bot Controls if tripped' },
           { label: 'Min R:R Ratio', value: rrMin, setValue: setRrMin, min: 1.5, max: 5, step: 0.5, suffix: ':1', desc: 'Minimum risk:reward to execute a trade' },
           { label: 'Check Interval', value: checkInterval, setValue: setCheckInterval, min: 30, max: 300, step: 30, suffix: 's', desc: 'How often the bot scans for signals' },
         ].map(({ label, value, setValue, min, max, step, suffix, desc }) => (
