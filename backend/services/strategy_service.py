@@ -132,6 +132,11 @@ class StrategyService:
         if signal.status != "PENDING":
             return TradeDecision("SKIP", skip_reason=f"Signal is {signal.status}")
 
+        # 0.5. Strategy toggle gate — skip if this strategy is disabled
+        strategy_key = f"strategy_{signal.strategy_type.lower()}_enabled"
+        if not bool(self.settings.get(strategy_key, True)):
+            return TradeDecision("SKIP", skip_reason=f"Strategy {signal.strategy_type} disabled")
+
         # 1. Open position on this symbol? (exchange AND paper positions in DB)
         existing = await self.order_svc.get_current_position(symbol)
         if existing and existing.get("quantity", 0) > 0:
