@@ -169,3 +169,28 @@ async def get_circuit_breaker_status(
         return {"error": "Circuit breaker not available"}
     status = await cb.get_status()
     return status
+
+
+@router.post("/reset-weekly-guard")
+async def reset_weekly_drawdown_guard(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset the weekly drawdown guard manually.
+
+    Use this when a new trading week starts but the in-memory guard is still
+    flagged from last week. The guard checks 7-day rolling losses and will
+    re-trigger if the current week's losses exceed the limit.
+    """
+    global _bot_engine
+    if _bot_engine is None:
+        raise HTTPException(status_code=503, detail="Bot engine not initialized")
+    user = await get_current_user_from_cookie(request, db)
+    weekly_guard = getattr(_bot_engine, "weekly_guard", None)
+    if weekly_guard is None:
+        raise HTTPException(status_code=503, detail="Weekly drawdown guard not initialized")
+    # Reset the in-memory state
+    weekly_guard._weekly_limit_hit = False
+    weekly_guard._weekly_limit_date = None
+    logger.info("Weekly drawdown guard reset by user '%s'", user.username)
+    return {"ok": True, "message": "Weekly drawdown guard reset"}
