@@ -350,6 +350,34 @@ class TestEveryIncomeCallerAsksForNetPnl:
         assert '"REALIZED_PNL"' not in src
 
 
+class TestFlattenPathDoesNotCollapseUnknownR:
+    """The flatten path carried its own copy of the fail-open.
+
+    It logged "R recorded as unknown, so the daily breaker charges a full
+    -1R" and then, on the very next line, did `computed_r if ... is not None
+    else 0.0` — so the breaker was handed a free breakeven and the Trade row
+    stored 0.0 instead of NULL. The log message and the code directly beneath
+    it said opposite things.
+
+    `position_manager._close_position` already passed None through correctly;
+    only this path was wrong."""
+
+    def test_source_has_no_none_to_zero_coercion(self):
+        import inspect
+        from backend.services.strategy_service import StrategyService
+        src = inspect.getsource(StrategyService)
+        assert "computed_r if computed_r is not None else 0.0" not in src, \
+            "unknown R must stay None so the breaker charges -1R, not a free 0R"
+
+    def test_source_passes_none_to_the_accumulator(self):
+        import inspect
+        from backend.services.strategy_service import StrategyService
+        src = inspect.getsource(StrategyService)
+        assert "update_daily_summary(pnl_r, pnl_usdt)" in src, \
+            "the raw pnl_r (possibly None) must reach update_daily_summary, " \
+            "which applies the fail-closed rule"
+
+
 class TestTradeStatsDoNotReadUnknownRAsBreakeven:
     """A NULL pnl_r means 1R could not be established. Coalescing it to 0.0
     registered the trade as a perfect breakeven and flattered every stat on the

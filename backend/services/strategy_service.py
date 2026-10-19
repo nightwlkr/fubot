@@ -803,7 +803,11 @@ class StrategyService:
 
                 # Fetch realized PnL from the exchange before closing
                 pnl_usdt = 0.0
-                pnl_r = 0.0
+                # None means UNKNOWN, not breakeven. It is passed through to
+                # `update_daily_summary`, which prices it at a full -1R via
+                # `risk_units.daily_r_contribution`. Coercing to 0.0 here made
+                # the breaker read an unmeasurable trade as a free pass.
+                pnl_r: Optional[float] = None
                 if self._mode == "live" and self.binance is not None:
                     try:
                         income = await self.binance.get_position_income(
@@ -817,13 +821,14 @@ class StrategyService:
                             frozen=row.initial_risk_distance)
                         computed_r = risk_units.pnl_r_from(
                             pnl_usdt, row.quantity, distance)
-                        if computed_r is None:
+                        if computed_r is not None:
+                            pnl_r = computed_r
+                        else:
                             logger.error(
                                 "[%s] flatten close cannot establish 1R "
                                 "(frozen risk=%s) — R recorded as unknown, so "
                                 "the daily breaker charges a full -1R",
                                 row.symbol, row.initial_risk_distance)
-                        pnl_r = computed_r if computed_r is not None else 0.0
                     except Exception:
                         logger.debug("Could not fetch income for flatten close of %s", row.symbol)
 
@@ -856,8 +861,9 @@ class StrategyService:
                 await session.commit()
                 symbol = row.symbol
                 logger.warning(
-                    "[%s] Recorded FLATTENED trade: %.4f USDT / %.2fR (failed entry, market-closed)",
-                    symbol, pnl_usdt, pnl_r)
+                    "[%s] Recorded FLATTENED trade: %.4f USDT / %sR "
+                    "(failed entry, market-closed)",
+                    symbol, pnl_usdt, "unknown" if pnl_r is None else f"{pnl_r:.2f}")
 
             # The Trade row is durable at this point, so the daily accumulator
             # can be told about the loss. This runs AFTER the commit and inside
