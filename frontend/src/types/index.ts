@@ -80,6 +80,8 @@ export interface TradingSettings {
   strategy_obfvg_enabled: boolean
   strategy_obfvg_max_age_bars: number
   weekly_drawdown_limit_r: number
+  profit_lock_trigger_r2: number
+  profit_lock_trail_r2: number
 }
 
 export interface SymbolConfig {

@@ -29,6 +29,8 @@ interface TradingSettings {
   be_trail_trigger_r: number
   profit_lock_trigger_r: number
   profit_lock_trail_r: number
+  profit_lock_trigger_r2: number
+  profit_lock_trail_r2: number
   stale_trade_hours: number
   strategy_obfvg_enabled: boolean
   strategy_obfvg_max_age_bars: number
@@ -222,6 +224,8 @@ function TradingParamsSection() {
   const [beTrailTriggerR, setBeTrailTriggerR] = useState(0.5)
   const [profitLockTriggerR, setProfitLockTriggerR] = useState(1.0)
   const [profitLockTrailR, setProfitLockTrailR] = useState(0.5)
+  const [profitLockTriggerR2, setProfitLockTriggerR2] = useState(1.0)
+  const [profitLockTrailR2, setProfitLockTrailR2] = useState(0.25)
   const [staleTradeHours, setStaleTradeHours] = useState(24)
   const [obfvgEnabled, setObfvgEnabled] = useState(true)
   const [obfvgMaxAgeBars, setObfvgMaxAgeBars] = useState(2)
@@ -251,6 +255,8 @@ function TradingParamsSection() {
         setBeTrailTriggerR(s.be_trail_trigger_r ?? 0.5)
         setProfitLockTriggerR(s.profit_lock_trigger_r ?? 1.0)
         setProfitLockTrailR(s.profit_lock_trail_r ?? 0.5)
+        setProfitLockTriggerR2(s.profit_lock_trigger_r2 ?? 1.0)
+        setProfitLockTrailR2(s.profit_lock_trail_r2 ?? 0.25)
         setStaleTradeHours(s.stale_trade_hours ?? 24)
         setObfvgEnabled(s.strategy_obfvg_enabled ?? true)
         setObfvgMaxAgeBars(s.strategy_obfvg_max_age_bars ?? 2)
@@ -283,6 +289,8 @@ function TradingParamsSection() {
         be_trail_trigger_r: beTrailTriggerR,
         profit_lock_trigger_r: profitLockTriggerR,
         profit_lock_trail_r: profitLockTrailR,
+        profit_lock_trigger_r2: profitLockTriggerR2,
+        profit_lock_trail_r2: profitLockTrailR2,
         stale_trade_hours: staleTradeHours,
         strategy_obfvg_enabled: obfvgEnabled,
         strategy_obfvg_max_age_bars: obfvgMaxAgeBars,
@@ -318,6 +326,8 @@ function TradingParamsSection() {
           { label: 'BE Trail Trigger', value: beTrailTriggerR, setValue: setBeTrailTriggerR, min: 0, max: 3, step: 0.25, suffix: 'R', desc: 'Move the stop to break-even once the trade is this far in profit. 0 = immediately (many scratches), 0.5 = let it prove itself first' },
           { label: 'Profit Lock Trigger', value: profitLockTriggerR, setValue: setProfitLockTriggerR, min: 0.5, max: 3, step: 0.25, suffix: 'R', desc: 'At this profit level, start trailing the stop to lock in gains. 1.0 = lock once trade is +1R deep' },
           { label: 'Profit Lock Trail', value: profitLockTrailR, setValue: setProfitLockTrailR, min: 0.1, max: 2, step: 0.1, suffix: 'R', desc: 'How far behind price (in R) the profit-lock stop sits. 0.5 = locks in at least half the current profit' },
+          { label: 'Profit Lock 2 Trigger', value: profitLockTriggerR2, setValue: setProfitLockTriggerR2, min: 0.5, max: 5, step: 0.25, suffix: 'R', desc: 'Second profit lock stage — activates when trade reaches this R level. 1.0 = triggers at +1R' },
+          { label: 'Profit Lock 2 Trail', value: profitLockTrailR2, setValue: setProfitLockTrailR2, min: 0.05, max: 2, step: 0.05, suffix: 'R', desc: 'Tight trailing distance for stage 2. 0.25 = secures +0.75R if stopped (locks $5.17 on a $6.89 risk trade)' },
           { label: 'Stale Trade Exit', value: staleTradeHours, setValue: setStaleTradeHours, min: 0, max: 72, step: 1, suffix: 'h', desc: 'Close profitable trades after this many hours if they haven\'t hit TP. 0 = disabled. Prevents stale trades from tying up margin' },
           { label: 'Max Open Positions', value: maxPositions, setValue: setMaxPositions, min: 1, max: 10, step: 1, suffix: '', desc: 'Maximum concurrent positions' },
           { label: 'Daily Loss Limit', value: dailyLossLimit, setValue: setDailyLossLimit, min: 1, max: 10, step: 0.5, suffix: 'R', desc: 'Bot stops trading after this loss (in R)' },

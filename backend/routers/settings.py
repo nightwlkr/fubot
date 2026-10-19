@@ -80,6 +80,7 @@ async def get_trading_settings(
         "be_trail_trigger_r",
         "profit_lock_trigger_r", "profit_lock_trail_r", "stale_trade_hours",
         "funding_rate_filter_enabled", "funding_skip_threshold", "atr_stop_mult",
+        "profit_lock_trigger_r2", "profit_lock_trail_r2",
         "weekly_drawdown_limit_r",
     ]
     defaults = {
@@ -110,6 +111,8 @@ async def get_trading_settings(
         "funding_rate_filter_enabled": True,
         "funding_skip_threshold": -0.0001,
         "atr_stop_mult": 1.5,
+        "profit_lock_trigger_r2": 1.0,
+        "profit_lock_trail_r2": 0.25,
         "weekly_drawdown_limit_r": 5.0,
     }
 
@@ -149,6 +152,8 @@ async def get_trading_settings(
         funding_rate_filter_enabled=bool(settings.get("funding_rate_filter_enabled", True)),
         funding_skip_threshold=float(settings.get("funding_skip_threshold", -0.0001)),
         atr_stop_mult=float(settings.get("atr_stop_mult", 1.5)),
+        profit_lock_trigger_r2=float(settings.get("profit_lock_trigger_r2", 1.0)),
+        profit_lock_trail_r2=float(settings.get("profit_lock_trail_r2", 0.25)),
         weekly_drawdown_limit_r=float(settings.get("weekly_drawdown_limit_r", 5.0)),
     )
 

@@ -446,6 +446,9 @@ class PositionManager:
             # Check profit lock trailing (locks in gains on deep-profit trades)
             await self._check_profit_trailing(position, current_price)
 
+            # Check second-stage profit lock (tighter trail at deeper profit)
+            await self._check_profit_trailing_2(position, current_price)
+
             # Check stale trades (close profitable trades that aren't reaching TP)
             await self._check_stale_trade(position)
 
@@ -535,6 +538,46 @@ class PositionManager:
         locked_r = (new_stop - entry) / float(risk) if side == "LONG" else (entry - new_stop) / float(risk)
         logger.info(
             f"[{position['symbol']}] {side} profit lock: +{profit/float(risk):.2f}R, "
+            f"trailing stop to {new_stop:.6f} (locks +{locked_r:.2f}R)")
+        await self._trail_stop_to_be(position["id"], new_stop)
+
+    async def _check_profit_trailing_2(self, position: dict, current_price: float):
+        """Second-stage profit lock: tighter trail once trade is deeper in profit.
+
+        Triggered at `profit_lock_trigger_r2` R (default +1.0R). Trails the stop
+        `profit_lock_trail_r2` R behind price (default 0.25R), locking in
+        at least `(trigger - trail) × risk_usd` profit. For a $6.89 risk trade
+        this means stopping out at +0.75R ≈ +$5.17 instead of giving it all back.
+        """
+        risk = position.get("initial_risk_distance")
+        if risk is None or float(risk) <= 0:
+            return
+        trigger_r = float(self.settings.get("profit_lock_trigger_r2", 1.0))
+        trail_r = float(self.settings.get("profit_lock_trail_r2", 0.25))
+        trigger = float(risk) * trigger_r
+        trail = float(risk) * trail_r
+        side = position["side"]
+        entry = float(position["entry_price"])
+
+        if side == "LONG":
+            profit = current_price - entry
+            if profit < trigger:
+                return  # not yet at the second profit-lock threshold
+            new_stop = current_price - trail
+            # One-way: only move stop UP for a LONG; respect the first-stage lock
+            if position["stop_loss"] is not None and float(position["stop_loss"]) >= new_stop:
+                return
+        else:  # SHORT
+            profit = entry - current_price
+            if profit < trigger:
+                return
+            new_stop = current_price + trail
+            if position["stop_loss"] is not None and float(position["stop_loss"]) <= new_stop:
+                return
+
+        locked_r = (new_stop - entry) / float(risk) if side == "LONG" else (entry - new_stop) / float(risk)
+        logger.info(
+            f"[{position['symbol']}] {side} profit lock 2: +{profit/float(risk):.2f}R, "
             f"trailing stop to {new_stop:.6f} (locks +{locked_r:.2f}R)")
         await self._trail_stop_to_be(position["id"], new_stop)
 

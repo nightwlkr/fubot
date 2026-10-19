@@ -43,6 +43,11 @@ class TradingSettingsResponse(BaseModel):
     funding_skip_threshold: float = -0.0001  # Skip if funding < -0.01%
     # ATR multiplier for stop distance (research: 1.5×ATR optimal for crypto).
     atr_stop_mult: float = 1.5
+    # Two-stage profit lock: first at profit_lock_trigger_r R, second at
+    # profit_lock_trigger_r2 R. The second stage trails tighter to lock in more
+    # profit (default: lock at +1R with 0.25R trail = secures +0.75R if stopped out).
+    profit_lock_trigger_r2: float = 1.0
+    profit_lock_trail_r2: float = 0.25
     # Weekly drawdown guard — pauses trading when this many R in losses
     # accumulate in a UTC trading day. Default 5.0R; raise to ride out volatile
     # weeks, lower to tighten the cap.
@@ -98,6 +103,9 @@ class TradingSettingsUpdate(BaseModel):
     funding_skip_threshold: float | None = Field(default=None, ge=-0.001, le=0.001)
     # ATR multiplier for stop distance
     atr_stop_mult: float | None = Field(default=None, ge=0.5, le=5.0)
+    # Two-stage profit lock settings
+    profit_lock_trigger_r2: float | None = Field(default=None, ge=0.5, le=5.0)
+    profit_lock_trail_r2: float | None = Field(default=None, ge=0.05, le=2.0)
     # Weekly drawdown guard limit in R
     weekly_drawdown_limit_r: float | None = Field(default=None, ge=1.0, le=20.0)
 
