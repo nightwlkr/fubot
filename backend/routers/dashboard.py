@@ -91,6 +91,10 @@ async def dashboard_overview(
         engine_status = {"status": "stopped", "mode": "paper", "uptime_seconds": 0.0,
                          "scan_count": 0, "last_scan": None}
 
+    # Check if weekly guard is currently active in the engine
+    weekly_guard = getattr(engine, "weekly_guard", None) if engine else None
+    guard_paused = weekly_guard._weekly_limit_hit if weekly_guard else False
+
     # Open positions (+ live pricing for the table: exchange truth in live
     # mode, mark price in paper mode)
     result = await db.execute(select(Position).where(Position.status == "OPEN"))
@@ -185,7 +189,7 @@ async def dashboard_overview(
                 used_r=weekly_used_r,
                 limit_r=weekly_limit,
                 remaining_r=weekly_remaining_r,
-                is_paused=weekly_paused,
+                is_paused=guard_paused or weekly_paused,
             ),
         ),
         open_positions=[_format_position(p, pricing) for p in positions],
