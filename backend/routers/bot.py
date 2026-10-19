@@ -171,6 +171,53 @@ async def get_circuit_breaker_status(
     return status
 
 
+@router.post("/reset-daily-limit")
+async def reset_daily_limit(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset the daily loss and trade limits so trading can continue."""
+    global _bot_engine
+    if _bot_engine is None:
+        raise HTTPException(status_code=503, detail="Bot engine not initialized")
+
+    user = await get_current_user_from_cookie(request, db)
+    if not user or user.username != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Reset daily counters in database
+    from backend.models.setting import Setting
+    from sqlalchemy import select, update
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).date()
+    today_str = today.isoformat()
+
+    # Reset daily summary
+    await db.execute(
+        update(Setting)
+        .where(Setting.key.in_(["daily_pnl_r", "daily_trades_count", "daily_high_watermark"]))
+        .values(value="0" if "pnl" in Setting.key or "count" in Setting.key else Setting.value)
+    )
+
+    # Clear daily loss tracking
+    await db.execute(
+        update(Setting)
+        .where(Setting.key == "daily_pnl_r")
+        .values(value="0.0")
+    )
+    await db.execute(
+        update(Setting)
+        .where(Setting.key == "daily_trades_count")
+        .values(value="0")
+    )
+
+    await db.commit()
+
+    logger.info("Daily limit reset by user '%s'", user.username)
+    return {"ok": True, "message": "Daily limit reset"}
+
+
 @router.post("/reset-weekly-guard")
 async def reset_weekly_drawdown_guard(
     request: Request,
