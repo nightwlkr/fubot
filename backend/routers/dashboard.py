@@ -13,9 +13,9 @@ from backend.core.daily_reset import (
     today_utc,
     used_r_from,
 )
+from backend.models.setting import Setting
 from backend.database import get_db
 from backend.models.daily_summary import DailySummary
-from backend.models.setting import Setting
 from backend.models.position import Position
 from backend.models.trade import Trade
 from backend.models.equity_log import EquityLog
@@ -23,10 +23,12 @@ from backend.routers.position_pricing import apply_pricing, fetch_pricing
 from backend.schemas.dashboard import (
     BotStatus,
     DailyLimitStatus,
+    DailyTradesLimitStatus,
     TodayStats,
     PositionItem,
     EquityPoint,
     DashboardOverview,
+    WeeklyLimitStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,6 +131,31 @@ async def dashboard_overview(
     best_trade = max((t.pnl_r for t in trades), default=0.0)
     worst_trade = min((t.pnl_r for t in trades), default=0.0)
 
+    # Max daily trades cap
+    settings_result = await db.execute(select(Setting).where(Setting.key == "max_daily_trades"))
+    max_daily_row = settings_result.scalar_one_or_none()
+    max_daily_trades = int(max_daily_row.value) if max_daily_row and max_daily_row.value is not None else 12
+    trades_today_count = daily.total_trades if daily else 0
+    remaining_daily_trades = max(0, max_daily_trades - trades_today_count)
+
+    # Weekly drawdown status
+    week_start = today - timedelta(days=7)
+    weekly_result = await db.execute(
+        select(Trade.pnl_r)
+        .where(Trade.closed_at >= week_start)
+        .where(Trade.pnl_r < 0)
+    )
+    weekly_losses = weekly_result.fetchall()
+    total_weekly_loss = sum(abs(float(r[0])) for r in weekly_losses if r[0] is not None)
+
+    settings_result2 = await db.execute(select(Setting).where(Setting.key == "weekly_drawdown_limit_r"))
+    weekly_row = settings_result2.scalar_one_or_none()
+    weekly_limit = float(weekly_row.value) if weekly_row and weekly_row.value is not None else 5.0
+
+    weekly_used_r = total_weekly_loss
+    weekly_remaining_r = max(0.0, weekly_limit - weekly_used_r)
+    weekly_paused = weekly_used_r >= weekly_limit
+
     return DashboardOverview(
         bot_status=BotStatus(
             status=engine_status["status"],
@@ -149,6 +176,17 @@ async def dashboard_overview(
             wins=daily.wins if daily else 0,
             losses=daily.losses if daily else 0,
             trades_count=daily.total_trades if daily else 0,
+            daily_trades_limit_status=DailyTradesLimitStatus(
+                used_trades=trades_today_count,
+                limit_trades=max_daily_trades,
+                remaining_trades=remaining_daily_trades,
+            ),
+            weekly_limit_status=WeeklyLimitStatus(
+                used_r=weekly_used_r,
+                limit_r=weekly_limit,
+                remaining_r=weekly_remaining_r,
+                is_paused=weekly_paused,
+            ),
         ),
         open_positions=[_format_position(p, pricing) for p in positions],
         equity_curve=[

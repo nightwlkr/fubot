@@ -149,3 +149,23 @@ async def get_bot_status(
     user = await get_current_user_from_cookie(request, db)
     status_dict = await _bot_engine.get_status()
     return BotStatusResponse(**status_dict)
+
+
+@router.get("/circuit-breaker")
+async def get_circuit_breaker_status(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get current circuit breaker status for monitoring."""
+    global _bot_engine
+    if _bot_engine is None:
+        raise HTTPException(status_code=503, detail="Bot engine not initialized")
+    user = await get_current_user_from_cookie(request, db)
+    binance = getattr(_bot_engine, "binance", None)
+    if binance is None:
+        raise HTTPException(status_code=503, detail="Binance service not initialized")
+    cb = getattr(binance, "_circuit_breaker", None)
+    if cb is None:
+        return {"error": "Circuit breaker not available"}
+    status = await cb.get_status()
+    return status

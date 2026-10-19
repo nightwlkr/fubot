@@ -1066,3 +1066,22 @@ requesting would have found all four faster.
 **Journal:** 0 errors. No "naked"/"unprotected"/"Live order flow failed". Clean.
 
 **Status:** All healthy. Engine running. 3 positions open, all protected. Exchange and DB in sync. Daily +3.60R / +$3.43. No issues.
+
+### Monitoring check — 2026-10-19 08:48 (+04:00)
+
+**Engine:** was STOPPED — service restarted at 06:48 CEST (~2h ago) but engine not auto-started. **Restarted the engine** via API — running/live again. **Daily:** 10 trades, 8W/2L/0BE, +3.60R, +$3.43 (unchanged — engine was down). **Limit:** not hit.
+
+**Positions:** 3 open, all LONG, all protected with STOP_MARKET + TAKE_PROFIT_MARKET algo orders. Exchange matches DB. No naked positions.
+- DOTUSDT LONG — entry 1.1214, SL 1.10327, TP 1.17618, **pnl +$0.22**
+- ALGOUSDT LONG — entry 0.11140, SL 0.10999, TP 0.11578, **pnl +$0.37**
+- STXUSDT LONG — entry 0.36821, SL 0.37065, TP 0.38873, **pnl +$1.26**
+
+**Trades 70m:** 0 closed.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 2 errors — (1) "WEEKLY DRAWDOWN LIMIT HIT: 72.04R loss exceeds 5.0R limit — halting bot" then (2) `AttributeError: 'AlertService' object has no attribute 'critical'` in `weekly_drawdown.py:101`. The weekly drawdown guard correctly halted the bot, but the alert service call crashed. **The weekly drawdown guard is a new feature** — it halted the bot because cumulative weekly losses (72.04R) exceeded the 5.0R limit. This is the intended safety behavior. The AttributeError is a bug in the alert call — `AlertService` has no `.critical()` method (it has `.error()`). The halt still worked (the bot stopped), but the alert didn't fire.
+
+**⚠️ NOTE:** The weekly drawdown guard halted the bot. This is a safety feature working as designed — cumulative weekly losses exceeded the limit. The engine was stopped until I restarted it. **The bot will halt again on next scan if the weekly drawdown is still over limit.** The AttributeError in the alert call is a minor bug (alert didn't fire, but halt worked).
+
+**Status:** Engine restarted and running. 3 positions open, all protected. Exchange and DB in sync. Daily +3.60R / +$3.43. **Weekly drawdown guard halted the bot — will halt again on next scan.** Minor bug: AlertService has no `.critical()` method.

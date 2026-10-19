@@ -41,6 +41,21 @@ class DailyLimitStatus(BaseModel):
     remaining_r: float
 
 
+class DailyTradesLimitStatus(BaseModel):
+    """Status for max_daily_trades cap."""
+    used_trades: int
+    limit_trades: int
+    remaining_trades: int
+
+
+class WeeklyLimitStatus(BaseModel):
+    """Status for weekly drawdown guard."""
+    used_r: float
+    limit_r: float
+    remaining_r: float
+    is_paused: bool  # True if weekly guard triggered
+
+
 class TodayStats(BaseModel):
     # matches frontend PnLCard: pnl_r/pnl_usdt/wins/losses/trades_count/daily_limit_status
     realized_pnl_usdt: float = 0.0
@@ -53,6 +68,8 @@ class TodayStats(BaseModel):
     losses: int = 0
     trades_count: int = 0
     daily_limit_status: Optional[DailyLimitStatus] = None
+    daily_trades_limit_status: Optional[DailyTradesLimitStatus] = None
+    weekly_limit_status: Optional[WeeklyLimitStatus] = None
 
 
 class PositionItem(BaseModel):

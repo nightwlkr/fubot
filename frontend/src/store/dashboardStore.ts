@@ -38,6 +38,19 @@ export interface DailyLimitStatus {
   remaining_r: number
 }
 
+export interface DailyTradesLimitStatus {
+  used_trades: number
+  limit_trades: number
+  remaining_trades: number
+}
+
+export interface WeeklyLimitStatus {
+  used_r: number
+  limit_r: number
+  remaining_r: number
+  is_paused: boolean
+}
+
 export interface TodayStats {
   pnl_r: number
   pnl_usdt: number
@@ -45,6 +58,8 @@ export interface TodayStats {
   wins: number
   losses: number
   daily_limit_status: DailyLimitStatus
+  daily_trades_limit_status: DailyTradesLimitStatus
+  weekly_limit_status: WeeklyLimitStatus
 }
 
 export interface EquityPoint {

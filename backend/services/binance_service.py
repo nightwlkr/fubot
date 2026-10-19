@@ -104,6 +104,98 @@ class RateLimiter:
             await asyncio.sleep(wait)
 
 
+class CircuitBreaker:
+    """Prevents repeated Binance API failures from triggering rate-limit bans.
+
+    Binance bans accounts that exceed rate limits (429s). If we get N consecutive
+    failures (transport errors, 5xx, or 429s), we open the circuit and pause all
+    trading for a reset period. This is better than spamming a rate-limited API
+    and getting permanently banned.
+
+    States:
+    - CLOSED: Normal operation, requests pass through
+    - OPEN: Circuit tripped, all requests rejected immediately
+    - HALF_OPEN: Reset timeout elapsed, allow one probe request
+
+    Triggered by:
+    - 5 consecutive failures (default threshold)
+    - Any single 429 rate limit response (immediate open)
+
+    Reset:
+    - 60 seconds after tripping (default timeout)
+    """
+
+    def __init__(self, failure_threshold: int = 5, reset_timeout: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.reset_timeout = reset_timeout
+        self._failure_count = 0
+        self._last_failure_time: Optional[float] = None
+        self._state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self._lock = asyncio.Lock()
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    async def check(self) -> bool:
+        """Check if requests are allowed. Returns True if CLOSED or HALF_OPEN."""
+        async with self._lock:
+            if self._state == "CLOSED":
+                return True
+            if self._state == "OPEN":
+                # Check if reset timeout has elapsed
+                if self._last_failure_time and \
+                   time.monotonic() - self._last_failure_time > self.reset_timeout:
+                    self._state = "HALF_OPEN"
+                    logger.warning("Circuit breaker HALF_OPEN: allowing probe request")
+                    return True
+                return False
+            # HALF_OPEN: allow one probe
+            return True
+
+    async def record_success(self):
+        """Record a successful request. Reset failure counter."""
+        async with self._lock:
+            self._failure_count = 0
+            if self._state == "HALF_OPEN":
+                self._state = "CLOSED"
+                logger.info("Circuit breaker CLOSED: probe succeeded, resuming normal operation")
+
+    async def record_failure(self, is_rate_limit: bool = False):
+        """Record a failed request. Trip circuit if threshold exceeded."""
+        async with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.monotonic()
+
+            if is_rate_limit:
+                # Immediate open on rate limit — don't spam the API
+                self._state = "OPEN"
+                logger.error(
+                    "Circuit breaker OPEN: Binance rate limit hit (429). "
+                    "Pausing all API requests for %ds", self.reset_timeout)
+            elif self._failure_count >= self.failure_threshold:
+                self._state = "OPEN"
+                logger.error(
+                    "Circuit breaker OPEN: %d consecutive failures. "
+                    "Pausing for %ds to prevent rate-limit ban",
+                    self._failure_count, self.reset_timeout)
+            else:
+                logger.warning(
+                    "Circuit breaker: failure %d/%d",
+                    self._failure_count, self.failure_threshold)
+
+    async def get_status(self) -> dict:
+        """Get current circuit breaker status for monitoring."""
+        async with self._lock:
+            return {
+                "state": self._state,
+                "failure_count": self._failure_count,
+                "failure_threshold": self.failure_threshold,
+                "last_failure_time": self._last_failure_time,
+                "reset_timeout": self.reset_timeout,
+            }
+
+
 class BinanceService:
     """Async wrapper around Binance Futures API."""
 
@@ -113,6 +205,7 @@ class BinanceService:
         self._testnet = testnet if testnet is not None else settings.BINANCE_TESTNET
         self._base_url = TESTNET_BASE if self._testnet else PROD_BASE
         self._limiter = RateLimiter()
+        self._circuit_breaker = CircuitBreaker()
         self._client: httpx.AsyncClient | None = None
         # symbol -> LOT_SIZE/MARKET_LOT_SIZE/PRICE_FILTER, cached for the
         # process lifetime. Filters change at most weekly; the uncached version
@@ -201,7 +294,9 @@ class BinanceService:
                 resp = await client.request(method, full_url, headers=headers)
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get("Retry-After", 1))
-                    logger.warning(f"Rate limited, waiting {retry_after}s (attempt {attempt+1})")
+                    # Rate limit hit — trip circuit breaker immediately
+                    logger.warning(f"Rate limited (429), waiting {retry_after}s (attempt {attempt+1})")
+                    await self._circuit_breaker.record_failure(is_rate_limit=True)
                     await asyncio.sleep(retry_after)
                     continue
                 if resp.status_code >= 400:
@@ -231,6 +326,8 @@ class BinanceService:
             except (httpx.HTTPStatusError, BinanceAPIError):
                 raise
             except Exception as e:
+                # Record failure for circuit breaker
+                await self._circuit_breaker.record_failure()
                 if method.upper() == "POST":
                     # A transport error on a POST leaves the exchange state
                     # UNKNOWN: the order may have been accepted and simply not
@@ -564,21 +661,53 @@ class BinanceService:
         lot = await self.get_lot_size(symbol)
         qty = self._round_qty(quantity, lot)
         px = self._round_price(price, lot)
-        data = await self._signed_request(
-            "POST", "fapi/v1/order",
-            {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTX",
-             "quantity": qty, "price": px,
-             "newClientOrderId": self._next_client_order_id()},
-            weight=2,
-        )
-        return {
-            "orderId": data.get("orderId"),
-            "symbol": symbol,
-            "side": side,
-            "price": px,
-            "quantity": qty,
-            "status": data.get("status", "NEW"),
-        }
+
+        # Try GTX (post-only) first for maker fees
+        try:
+            data = await self._signed_request(
+                "POST", "fapi/v1/order",
+                {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTX",
+                 "quantity": qty, "price": px,
+                 "newClientOrderId": self._next_client_order_id()},
+                weight=2,
+            )
+            return {
+                "orderId": data.get("orderId"),
+                "symbol": symbol,
+                "side": side,
+                "price": px,
+                "quantity": qty,
+                "status": data.get("status", "NEW"),
+                "timeInForce": "GTX",
+            }
+        except BinanceAPIError as e:
+            # GTX rejected: order would have filled immediately (crossed spread)
+            # Error -2019 or -1002 typically. Fall back to GTC.
+            if e.code in (-2019, -1002, -1015):
+                logger.warning(
+                    "GTX rejected for %s %s (would fill immediately), "
+                    "falling back to GTC. Code: %d", side, symbol, e.code)
+                try:
+                    data = await self._signed_request(
+                        "POST", "fapi/v1/order",
+                        {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
+                         "quantity": qty, "price": px,
+                         "newClientOrderId": self._next_client_order_id()},
+                        weight=2,
+                    )
+                    return {
+                        "orderId": data.get("orderId"),
+                        "symbol": symbol,
+                        "side": side,
+                        "price": px,
+                        "quantity": qty,
+                        "status": data.get("status", "NEW"),
+                        "timeInForce": "GTC",
+                    }
+                except BinanceAPIError as gtc_error:
+                    logger.error("GTC order also failed: %s", gtc_error)
+                    raise
+            raise
 
     async def get_lot_size(self, symbol: str) -> dict:
         """LOT_SIZE + MARKET_LOT_SIZE + PRICE_FILTER for one symbol.

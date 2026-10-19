@@ -174,6 +174,19 @@ export default function Overview() {
   // field is precisely what turned a halt into "3.00R left".
   const remaining = (limitStatus?.remaining_r ?? Math.max(0, limit - used))
 
+  // Daily trades cap
+  const tradesLimitStatus = todayStats?.daily_trades_limit_status
+  const tradesLimit = (tradesLimitStatus?.limit_trades ?? 12)
+  const tradesUsed = (tradesLimitStatus?.used_trades ?? 0)
+  const tradesRemaining = (tradesLimitStatus?.remaining_trades ?? tradesLimit)
+
+  // Weekly drawdown guard
+  const weeklyLimitStatus = todayStats?.weekly_limit_status
+  const weeklyLimit = (weeklyLimitStatus?.limit_r ?? 5)
+  const weeklyUsed = (weeklyLimitStatus?.used_r ?? 0)
+  const weeklyRemaining = (weeklyLimitStatus?.remaining_r ?? weeklyLimit)
+  const weeklyPaused = weeklyLimitStatus?.is_paused ?? false
+
   return (
     <div className="space-y-6">
       <div>
@@ -314,6 +327,50 @@ export default function Overview() {
                 style={{ width: `${Math.min(100, (used / limit) * 100)}%` }}
               />
             </div>
+          </div>
+
+          {/* Daily Trades Cap */}
+          <div className="mt-4 pt-4 border-t border-border/50">
+            <div className="flex justify-between text-xs mb-1.5">
+              <span className="text-muted uppercase tracking-wide">Daily Trades</span>
+              <span className={clsx('font-mono', tradesRemaining <= 0 ? 'text-danger' : 'text-muted')}>
+                {tradesUsed} / {tradesLimit}
+                {tradesRemaining > 0 && <span className="text-success ml-1">({tradesRemaining} left)</span>}
+              </span>
+            </div>
+            <div className="h-2 bg-surface2 rounded-full overflow-hidden">
+              <div
+                className={clsx('h-full rounded-full transition-all duration-500',
+                  (tradesUsed / tradesLimit) < 0.66 ? 'bg-success' : (tradesUsed / tradesLimit) < 0.9 ? 'bg-warning' : 'bg-danger')}
+                style={{ width: `${Math.min(100, (tradesUsed / tradesLimit) * 100)}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Weekly Drawdown Guard */}
+          <div className="mt-4 pt-4 border-t border-border/50">
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <div className="flex items-center gap-2">
+                <span className="text-muted uppercase tracking-wide">Weekly Drawdown</span>
+                {weeklyPaused && (
+                  <span className="px-1.5 py-0.5 bg-danger/20 text-danger text-xs font-medium rounded">PAUSED</span>
+                )}
+              </div>
+              <span className={clsx('font-mono', weeklyRemaining <= 0 ? 'text-danger' : 'text-muted')}>
+                {weeklyUsed.toFixed(1)}R / {weeklyLimit}R
+                {weeklyRemaining > 0 && <span className="text-success ml-1">({weeklyRemaining.toFixed(1)}R left)</span>}
+              </span>
+            </div>
+            <div className="h-2 bg-surface2 rounded-full overflow-hidden">
+              <div
+                className={clsx('h-full rounded-full transition-all duration-500',
+                  (weeklyUsed / weeklyLimit) < 0.66 ? 'bg-success' : (weeklyUsed / weeklyLimit) < 0.9 ? 'bg-warning' : 'bg-danger')}
+                style={{ width: `${Math.min(100, (weeklyUsed / weeklyLimit) * 100)}%` }}
+              />
+            </div>
+            {weeklyPaused && (
+              <p className="text-xs text-danger mt-1">Trading halted — weekly drawdown limit exceeded. Resets UTC midnight.</p>
+            )}
           </div>
         </Card>
       </div>
