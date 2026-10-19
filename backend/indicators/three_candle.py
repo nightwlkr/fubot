@@ -4,9 +4,10 @@ from datetime import datetime
 
 # Minimum stop distance as a multiple of ATR(14). The structural sweep wick is
 # often only a few pips from entry on 5m candles — too tight for price noise
-# (observed 0.07%-0.3% stops getting hit instantly). 1.0× ATR gives the stop
-# room to breathe while keeping it on the correct structural side.
-atr_stop_mult = 1.0
+# (observed 0.07%-0.3% stops getting hit instantly). Research shows 1.5× ATR
+# provides adequate buffer against stop hunts while keeping stops on the
+# correct structural side.
+atr_stop_mult = 1.5
 
 
 @dataclass

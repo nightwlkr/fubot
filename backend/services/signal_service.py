@@ -158,6 +158,21 @@ class SignalService:
         atr_1h = calculate_atr(k1h, period=14) or 0.0
         bias = analyze_trend_bias([c["close"] for c in k1h])
 
+        # 2b. Funding rate filter — skip entries when funding is extremely negative
+        # (indicates heavy short bias, potential for short squeeze or reversal).
+        # Positive funding = longs pay shorts (bullish sentiment).
+        # Extreme negative = shorts pay longs (bearish sentiment, possible bounce).
+        funding_rate = 0.0
+        try:
+            funding_rate = await self.binance.get_funding_rate(symbol)
+        except Exception as exc:
+            logger.debug("[%s] Funding rate fetch failed: %s", symbol, exc)
+        funding_filter_enabled = bool(self.settings.get("funding_rate_filter_enabled", True))
+        funding_skip_threshold = float(self.settings.get("funding_skip_threshold", -0.0001))
+        if funding_filter_enabled and funding_rate < funding_skip_threshold:
+            logger.info("[%s] Skipping: extreme negative funding rate %.6f", symbol, funding_rate)
+            return []
+
         # 3. Detect patterns
         candidates: list[tuple[str, str, float, float, float, float, float]] = []
         # Strategy toggles (Settings UI). DECISION.md D1 (2026-10-16): FVG is

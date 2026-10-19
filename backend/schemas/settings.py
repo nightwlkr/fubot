@@ -36,6 +36,13 @@ class TradingSettingsResponse(BaseModel):
     profit_lock_trail_r: float = 0.5
     # Close stale profitable trades after this many hours (0 = disabled).
     stale_trade_hours: float = 24.0
+    # Funding rate filter: skip entries when funding rate drops below threshold.
+    # Negative funding = shorts pay longs (bearish sentiment, possible bounce).
+    # Skip if funding < threshold (e.g., -0.0001 = -0.01%).
+    funding_rate_filter_enabled: bool = True
+    funding_skip_threshold: float = -0.0001  # Skip if funding < -0.01%
+    # ATR multiplier for stop distance (research: 1.5×ATR optimal for crypto).
+    atr_stop_mult: float = 1.5
 
 
 class TradingSettingsUpdate(BaseModel):
@@ -82,6 +89,11 @@ class TradingSettingsUpdate(BaseModel):
     profit_lock_trigger_r: float | None = Field(default=None, ge=0, le=20)
     profit_lock_trail_r: float | None = Field(default=None, ge=0, le=20)
     stale_trade_hours: float | None = Field(default=None, ge=0, le=720)
+    # Funding rate filter settings
+    funding_rate_filter_enabled: bool | None = None
+    funding_skip_threshold: float | None = Field(default=None, ge=-0.001, le=0.001)
+    # ATR multiplier for stop distance
+    atr_stop_mult: float | None = Field(default=None, ge=0.5, le=5.0)
 
 
 class SymbolConfigResponse(BaseModel):

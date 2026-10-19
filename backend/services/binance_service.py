@@ -733,7 +733,12 @@ class BinanceService:
 
     async def modify_position_stop(self, symbol: str, side: str, stop_price: float, quantity: float) -> dict:
         """POST /fapi/v1/algoOrder — STOP_MARKET (reduce-only). Rounds qty + price.
-        Binance migrated conditional orders to the Algo Order API (2025-12-09)."""
+        Binance migrated conditional orders to the Algo Order API (2025-12-09).
+
+        Uses MARK_PRICE trigger to prevent stop-hunts from wicks. Last-price
+        triggers are vulnerable to momentary spikes that sweep retail stops
+        before reversing.
+        """
         close_side = "SELL" if side == "LONG" else "BUY"
         lot = await self.get_lot_size(symbol)
         qty = self._round_qty(quantity, lot)
@@ -743,6 +748,7 @@ class BinanceService:
             {"symbol": symbol, "side": close_side, "type": "STOP_MARKET",
              "triggerPrice": price, "quantity": qty, "reduceOnly": "true",
              "algoType": "CONDITIONAL",
+             "workingType": "MARK_PRICE",  # Use mark price, not last price
              "newClientOrderId": self._next_client_order_id()},
             weight=2,
         )
@@ -754,7 +760,10 @@ class BinanceService:
         }
 
     async def place_take_profit_order(self, symbol: str, side: str, tp_price: float, quantity: float) -> dict:
-        """POST /fapi/v1/algoOrder — TAKE_PROFIT_MARKET (reduce-only). Rounds qty + price."""
+        """POST /fapi/v1/algoOrder — TAKE_PROFIT_MARKET (reduce-only). Rounds qty + price.
+
+        Uses MARK_PRICE trigger for consistency with stop losses.
+        """
         close_side = "SELL" if side == "LONG" else "BUY"
         lot = await self.get_lot_size(symbol)
         qty = self._round_qty(quantity, lot)
@@ -764,6 +773,7 @@ class BinanceService:
             {"symbol": symbol, "side": close_side, "type": "TAKE_PROFIT_MARKET",
              "triggerPrice": price, "quantity": qty, "reduceOnly": "true",
              "algoType": "CONDITIONAL",
+             "workingType": "MARK_PRICE",  # Use mark price for TP too
              "newClientOrderId": self._next_client_order_id()},
             weight=2,
         )
