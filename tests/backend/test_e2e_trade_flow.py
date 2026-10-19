@@ -195,11 +195,13 @@ async def _scenario():
         assert trade.exit_reason == "TP_HIT"
         assert trade.strategy_type == "FVG"
         # entry 108, exit 124, qty 19.7723 → 16 * 19.7723 = 316.36
-        # paper mode now deducts estimated fees: (108*19.7723 + 124*19.7723) * 0.00045 = 2.07
-        # so PnL = 316.36 - 2.07 = 314.29
-        assert round(float(trade.pnl_usdt), 2) == 314.29
-        # pnl_r = pnl / (initial_risk 5.05758 * qty) = 314.29 / 100 = 3.14
-        assert round(float(trade.pnl_r), 2) == 3.14
+        # paper mode now deducts estimated fees: (108*19.7723 + 124*19.7723) * 0.00036 = 1.65
+        # (corrected from 0.00045 — spot rate, not futures rate; futures taker
+        # is 0.04% * 0.9 BNB discount = 0.036%)
+        # so PnL = 316.36 - 1.65 = 314.71
+        assert round(float(trade.pnl_usdt), 2) == 314.71
+        # pnl_r = pnl / (initial_risk 5.05758 * qty) = 314.71 / 100 = 3.15
+        assert round(float(trade.pnl_r), 2) == 3.15
         result["trade"] = {"pnl_usdt": float(trade.pnl_usdt), "pnl_r": float(trade.pnl_r),
                            "reason": trade.exit_reason}
 
@@ -210,7 +212,7 @@ async def _scenario():
         assert summary.total_trades == summary_before[0] + 1
         assert summary.wins == summary_before[2] + 1
         import pytest as _pytest
-        assert float(summary.total_pnl_r) == _pytest.approx(summary_before[1] + 3.1406, abs=0.01)
+        assert float(summary.total_pnl_r) == _pytest.approx(summary_before[1] + 3.1471, abs=0.01)
         result["summary"] = {"trades_delta": 1, "pnl_r_delta": float(summary.total_pnl_r) - summary_before[1]}
 
     # ── cleanup ───────────────────────────────────────────────────────

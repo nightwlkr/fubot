@@ -28,10 +28,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Binance USDS-M VIP 0, after the 10% BNB discount (which position_manager's
-# paper model already assumed at 0.00045/side).
-MAKER_FEE = 0.00018
-TAKER_FEE = 0.00045
+# Binance USDS-M Futures VIP 0 taker fee is 0.04%. With 10% BNB fee discount
+# (paying fees in BNB), this becomes 0.036%. The old constant 0.045% was the
+# SPOT trading rate (0.05% - 10%) mistakenly applied to futures — it
+# overstates per-trade fees by ~0.009%/side and inflates round-trip cost
+# by ~0.018%, which understates realized PnL vs Binance's actual statement.
+MAKER_FEE = 0.00018   # 0.018% — 0.02% maker * 0.9 BNB discount
+TAKER_FEE = 0.00036   # 0.036% — 0.04% taker * 0.9 BNB discount
 
 #: Charged per side against the fill price. Deliberately conservative: a
 #: STOP_MARKET in a thin book fills through the bid/ask.

@@ -185,32 +185,34 @@ async def reset_daily_limit(
     if not user or user.username != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    # Reset daily counters in database
-    from backend.models.setting import Setting
+    from backend.models.daily_summary import DailySummary
     from sqlalchemy import select, update
     from datetime import datetime, timezone
 
     today = datetime.now(timezone.utc).date()
-    today_str = today.isoformat()
 
-    # Reset daily summary
-    await db.execute(
-        update(Setting)
-        .where(Setting.key.in_(["daily_pnl_r", "daily_trades_count", "daily_high_watermark"]))
-        .values(value="0" if "pnl" in Setting.key or "count" in Setting.key else Setting.value)
+    # Reset the DailySummary row for today — the breaker reads from here, not
+    # from Setting rows. Reset ALL fields so wins/losses/trade_count are
+    # consistent after a manual reset.
+    result = await db.execute(
+        update(DailySummary)
+        .where(DailySummary.date == today)
+        .values(
+            total_pnl_r=0.0,
+            total_pnl_usdt=0.0,
+            total_trades=0,
+            wins=0,
+            losses=0,
+            breakeven=0,
+            daily_loss_limit_hit=False,
+        )
     )
-
-    # Clear daily loss tracking
-    await db.execute(
-        update(Setting)
-        .where(Setting.key == "daily_pnl_r")
-        .values(value="0.0")
-    )
-    await db.execute(
-        update(Setting)
-        .where(Setting.key == "daily_trades_count")
-        .values(value="0")
-    )
+    if result.rowcount == 0:
+        # No row yet — create one
+        from backend.models.daily_summary import DailySummary as DS
+        db.add(DS(date=today, total_trades=0, wins=0, losses=0, breakeven=0,
+                  total_pnl_r=0.0, total_pnl_usdt=0.0,
+                  daily_loss_limit_hit=False))
 
     await db.commit()
 
@@ -236,8 +238,7 @@ async def reset_weekly_drawdown_guard(
     weekly_guard = getattr(_bot_engine, "weekly_guard", None)
     if weekly_guard is None:
         raise HTTPException(status_code=503, detail="Weekly drawdown guard not initialized")
-    # Reset the in-memory state
-    weekly_guard._weekly_limit_hit = False
-    weekly_guard._weekly_limit_date = None
+    # Reset the in-memory state + grant same-day grace period
+    weekly_guard.manual_reset()
     logger.info("Weekly drawdown guard reset by user '%s'", user.username)
     return {"ok": True, "message": "Weekly drawdown guard reset"}

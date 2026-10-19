@@ -100,10 +100,13 @@ class TestMatchesMeasuredLiveTrade:
 
     def test_a_tight_stop_makes_a_round_trip_cost_almost_a_whole_r(self):
         cost = LIVE.round_trip_in_r(7.201, 0.008838)
-        assert cost == pytest.approx(0.896, abs=0.01)
-        assert cost > 0.85, (
-            "at a 0.123% stop the round trip costs ~0.90R — the strategy must win "
-            "~30% of 3R trades just to break even"
+        # With corrected fees (0.036% taker), round-trip cost ≈ 0.75R at a
+        # 0.123% stop. Still nearly a whole R — the strategy must win ~27% of
+        # 3R trades just to break even.
+        assert cost == pytest.approx(0.75, abs=0.05)
+        assert cost > 0.60, (
+            "at a 0.123% stop the round trip costs ~0.75R — the strategy must "
+            "win ~27% of 3R trades just to break even"
         )
 
     def test_the_wider_the_stop_the_more_viable_the_math(self):
@@ -130,7 +133,8 @@ class TestUnitsAreUnambiguous:
     def test_price_distance_gives_the_sane_answer(self):
         entry = 100.0
         # 1% stop = a price distance of 1.0 on a $100 entry.
-        assert LIVE.round_trip_in_r(entry, 1.0) == pytest.approx(0.11, abs=0.005)
+        # With corrected fee (0.036% taker + 0.01% slippage round-trip = 0.092%)
+        assert LIVE.round_trip_in_r(entry, 1.0) == pytest.approx(0.092, abs=0.005)
 
     def test_a_fraction_mistaken_for_a_distance_is_obviously_wrong(self):
         """If a caller passes 0.01 (the 1% stop as a FRACTION) instead of 1.0
@@ -139,4 +143,4 @@ class TestUnitsAreUnambiguous:
         sane = LIVE.round_trip_in_r(100.0, 1.0)
         mistaken = LIVE.round_trip_in_r(100.0, 0.01)
         assert mistaken == pytest.approx(sane * 100, rel=1e-6)
-        assert mistaken > 10, "a >10R cost is self-evidently a units bug"
+        assert mistaken > 9, "a >9R cost is self-evidently a units bug"

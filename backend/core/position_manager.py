@@ -18,6 +18,7 @@ from backend.services.binance_service import BinanceAPIError, BinanceService
 from backend.core.daily_reset import DailyResetService
 from backend.core.websocket_manager import ws_manager
 from backend.core import risk_units
+from backend.core.cost_model import TAKER_FEE
 from backend.services.alert_service import AlertService
 
 logger = logging.getLogger(__name__)
@@ -771,6 +772,7 @@ class PositionManager:
             # LIVE: try to fetch actual realized PnL from Binance (includes fees)
             # PAPER: synthetic PnL (no fees)
             pnl_usdt = None
+            synthetic_pnl = None
             if self._mode == "live" and self.binance is not None:
                 try:
                     # Scope income to THIS position's lifetime — the 7-day
@@ -791,10 +793,26 @@ class PositionManager:
                     # on profitable manual closes.
                     if income.get("events", 0) > 0:
                         pnl_usdt = income.get("totalPnl", 0)
-                        logger.info(
-                            "[%s] Using exchange PnL: %.4f USDT (fees included)",
-                            row.symbol, pnl_usdt
-                        )
+                        # Cross-check: if exchange PnL is 0 but the synthetic
+                        # calculation shows a material move, the income API
+                        # likely returned stale/zero results from a different
+                        # position on the same symbol. Fall back to synthetic.
+                        if side == "LONG":
+                            synthetic_pnl = (exit_price - entry) * qty
+                        else:
+                            synthetic_pnl = (entry - exit_price) * qty
+                        if abs(synthetic_pnl) > 0.01 and abs(pnl_usdt) < abs(synthetic_pnl) * 0.1:
+                            logger.warning(
+                                "[%s] Exchange PnL %.4f USDT is suspiciously low "
+                                "vs synthetic %.4f — using synthetic (income timing race)",
+                                row.symbol, pnl_usdt, synthetic_pnl
+                            )
+                            pnl_usdt = None  # fall through to synthetic below
+                        else:
+                            logger.info(
+                                "[%s] Using exchange PnL: %.4f USDT (fees included)",
+                                row.symbol, pnl_usdt
+                            )
                     else:
                         logger.debug(
                             "[%s] No income events yet — using synthetic PnL", row.symbol)
@@ -808,19 +826,25 @@ class PositionManager:
                 else:
                     pnl_usdt = (entry - exit_price) * qty
 
-                # Estimate fees for paper mode (realistic simulation)
-                # Binance taker fee with BNB discount: 0.045% per side (entry + exit)
-                # Standard rate is 0.05%, but BNB holders get 10% discount
-                if self._mode == "paper":
+                # Estimate fees for synthetic PnL (paper mode OR live fallback)
+                # Uses the cost_model constants which are correctly calibrated
+                # to Binance USDS-M Futures VIP0 + 10% BNB discount.
+                if self._mode == "paper" or self._mode == "live":
                     notional_entry = entry * qty
                     notional_exit = exit_price * qty
-                    fee_rate = 0.00045  # 0.045% taker fee (BNB discount)
+                    fee_rate = TAKER_FEE  # 0.036% — see cost_model.py
                     fees = (notional_entry + notional_exit) * fee_rate
                     pnl_usdt -= fees
-                    logger.debug(
-                        "[%s] Paper PnL after fees: %.4f (raw: %.4f, fees: %.4f)",
-                        row.symbol, pnl_usdt, pnl_usdt + fees, fees
-                    )
+                    if self._mode == "paper":
+                        logger.debug(
+                            "[%s] Paper PnL after fees: %.4f (raw: %.4f, fees: %.4f)",
+                            row.symbol, pnl_usdt, pnl_usdt + fees, fees
+                        )
+                    else:
+                        logger.debug(
+                            "[%s] Live synthetic PnL after estimated fees: %.4f (raw: %.4f, fees: %.4f)",
+                            row.symbol, pnl_usdt, pnl_usdt + fees, fees
+                        )
 
             # Calculate P&L in R units — against the FROZEN initial risk
             # (entry-to-original-SL), NOT the live stop_loss. BE-trailing moves

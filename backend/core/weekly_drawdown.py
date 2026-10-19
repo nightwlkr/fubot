@@ -38,6 +38,10 @@ class WeeklyDrawdownGuard:
         self.alerts = alert_service
         self._weekly_limit_hit = False
         self._weekly_limit_date: Optional[datetime] = None
+        # Set by reset_api endpoint to grant a grace period after manual reset
+        # so the DB-based loss check doesn't immediately re-trigger on the
+        # same day's historical losses. Cleared at UTC midnight.
+        self._manual_reset_time: Optional[datetime] = None
 
     def get_weekly_limit_r(self) -> float:
         """Get the weekly drawdown limit in R (positive value)."""
@@ -68,15 +72,29 @@ class WeeklyDrawdownGuard:
         now = datetime.now(timezone.utc)
         today = now.date()
 
+        # Clear manual reset grace at UTC midnight
+        if self._manual_reset_time is not None:
+            if self._manual_reset_time.date() < today:
+                self._manual_reset_time = None
+
         # Reset if it's a new day (simple weekly: Mon-Sun based on UTC)
         if self._weekly_limit_date and self._weekly_limit_date.date() < today:
             self._weekly_limit_hit = False
             self._weekly_limit_date = None
+            self._manual_reset_time = None
             logger.info("New trading day — resetting weekly drawdown counter")
 
         if self._weekly_limit_hit:
             logger.warning("Weekly drawdown limit already hit, skipping trade")
             return False
+
+        # If manually reset today, grant a grace period so the DB-based loss
+        # check doesn't immediately re-trigger on the same day's historical
+        # losing trades. The guard will resume normal DB checks at the next
+        # UTC day boundary.
+        if self._manual_reset_time is not None and self._manual_reset_time.date() == today:
+            logger.info("Weekly guard within post-reset grace period — skipping DB loss check")
+            return True
 
         # Query TODAY'S losses only (not rolling 7 days)
         day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
@@ -111,6 +129,21 @@ class WeeklyDrawdownGuard:
             return False
 
         return True
+
+    def manual_reset(self) -> None:
+        """Clear the weekly limit flag and grant a same-day grace period.
+
+        Unlike a plain ``_weekly_limit_hit = False``, this also records the
+        reset timestamp so ``check_weekly_drawdown`` can skip its DB-based
+        loss re-check for the remainder of the current UTC day. Without the
+        grace, the guard re-queries today's losing trades on the next scan and
+        immediately trips again.
+        """
+        now = datetime.now(timezone.utc)
+        self._weekly_limit_hit = False
+        self._weekly_limit_date = None
+        self._manual_reset_time = now
+        logger.info("Weekly drawdown guard manually reset (grace through UTC midnight)")
 
     async def get_weekly_stats(self) -> dict:
         """Get weekly PnL statistics (current UTC day)."""
