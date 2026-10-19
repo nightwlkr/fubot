@@ -75,12 +75,6 @@ class PositionManager:
         self._running = True
         await self._reconcile_exchange_positions()
         self._task = asyncio.create_task(self._loop())
-        # Wire up userDataStream callback if available
-        if self.user_data_ws and self._mode == "live":
-            try:
-                await self.user_data_ws.connect(self._handle_userdata_event)
-            except Exception as e:
-                logger.warning(f"userDataStream connect failed: {e}")
 
     async def stop(self):
         """Stop the position manager loop."""
@@ -100,6 +94,21 @@ class PositionManager:
             except asyncio.CancelledError:
                 pass
         if self.user_data_ws:
+            try:
+                await self.user_data_ws.close()
+            except Exception:
+                pass
+
+    async def set_mode(self, mode: str):
+        """Update mode and (re)connect userDataStream if needed."""
+        self._mode = mode
+        if mode == "live" and self.user_data_ws:
+            try:
+                await self.user_data_ws.connect(self._handle_userdata_event)
+                logger.info(f"userDataStream connected for {mode} mode")
+            except Exception as e:
+                logger.warning(f"userDataStream connect failed: {e}")
+        elif mode == "paper" and self.user_data_ws:
             try:
                 await self.user_data_ws.close()
             except Exception:
