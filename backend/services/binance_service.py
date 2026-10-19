@@ -682,8 +682,8 @@ class BinanceService:
             }
         except BinanceAPIError as e:
             # GTX rejected: order would have filled immediately (crossed spread)
-            # Error -2019 or -1002 typically. Fall back to GTC.
-            if e.code in (-2019, -1002, -1015):
+            # Error -2019, -1002, -1015, or -5022 typically. Fall back to GTC.
+            if e.code in (-2019, -1002, -1015, -5022):
                 logger.warning(
                     "GTX rejected for %s %s (would fill immediately), "
                     "falling back to GTC. Code: %d", side, symbol, e.code)
