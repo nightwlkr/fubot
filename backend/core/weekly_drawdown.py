@@ -59,26 +59,32 @@ class WeeklyDrawdownGuard:
 
         Returns True if trading should CONTINUE (within limits),
         False if trading should HALT (limit exceeded).
+
+        NOTE: Uses UTC day-based counting (resets at midnight) rather than
+        rolling 7-day window. This allows manual reset at the start of each
+        trading week without losing historical data.
         """
         # Check if we already hit the limit this week
         now = datetime.now(timezone.utc)
-        week_start = now - timedelta(days=7)
+        today = now.date()
 
-        # Reset if it's a new week
-        if self._weekly_limit_date and self._weekly_limit_date < week_start:
+        # Reset if it's a new day (simple weekly: Mon-Sun based on UTC)
+        if self._weekly_limit_date and self._weekly_limit_date.date() < today:
             self._weekly_limit_hit = False
             self._weekly_limit_date = None
+            logger.info("New trading day — resetting weekly drawdown counter")
 
         if self._weekly_limit_hit:
             logger.warning("Weekly drawdown limit already hit, skipping trade")
             return False
 
-        # Query weekly PnL
+        # Query TODAY'S losses only (not rolling 7 days)
+        day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
         async with self.session_factory() as session:
             result = await session.execute(
                 select(Trade.pnl_r)
                 .where(
-                    Trade.closed_at >= week_start,
+                    Trade.closed_at >= day_start,
                     Trade.pnl_r < 0  # Only count losses
                 )
             )
@@ -107,15 +113,16 @@ class WeeklyDrawdownGuard:
         return True
 
     async def get_weekly_stats(self) -> dict:
-        """Get weekly PnL statistics."""
+        """Get weekly PnL statistics (current UTC day)."""
         now = datetime.now(timezone.utc)
-        week_start = now - timedelta(days=7)
+        today = now.date()
+        day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
 
         async with self.session_factory() as session:
-            # Total trades this week
+            # Total trades this week (today)
             result = await session.execute(
                 select(Trade)
-                .where(Trade.closed_at >= week_start)
+                .where(Trade.closed_at >= day_start)
             )
             trades = result.fetchall()
 
