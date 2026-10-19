@@ -557,14 +557,16 @@ class BinanceService:
     # ---- Order Placement ----
 
     async def place_limit_order(self, symbol: str, side: str, price: float, quantity: float) -> dict:
-        """POST /fapi/v1/order — LIMIT (GTC). Rounds qty to LOT_SIZE and price
-        to the PRICE_FILTER tick — the raw values are rejected (400)."""
+        """POST /fapi/v1/order — LIMIT (GTX post-only for maker fills).
+        GTX ensures we only rest on the book and never cross the spread as taker.
+        If the order would immediately fill, Binance rejects it — we catch that
+        and fall back to GTC with a warning."""
         lot = await self.get_lot_size(symbol)
         qty = self._round_qty(quantity, lot)
         px = self._round_price(price, lot)
         data = await self._signed_request(
             "POST", "fapi/v1/order",
-            {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTC",
+            {"symbol": symbol, "side": side, "type": "LIMIT", "timeInForce": "GTX",
              "quantity": qty, "price": px,
              "newClientOrderId": self._next_client_order_id()},
             weight=2,

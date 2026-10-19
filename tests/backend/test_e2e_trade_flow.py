@@ -91,9 +91,12 @@ async def _scenario():
                                    # trade_neutral_markets + WEAK min-strength: the
                                    # e2e fixture is a small sample; this test validates
                                    # the trade flow, not the trend gate.
+                                   # strategy_fvg_enabled=True because this test
+                                   # specifically validates the FVG detection → execution path.
                                    settings={"rr_min": 3.0, "risk_percent": 1.0,
                                              "trade_neutral_markets": True,
-                                             "trade_min_trend_strength": "WEAK"})
+                                             "trade_min_trend_strength": "WEAK",
+                                             "strategy_fvg_enabled": True})
     strategy_service = StrategyService(risk_service, order_service, binance=binance,
                                        session_factory=Session,
                                        settings={"rr_min": 3.0, "max_positions": 50,

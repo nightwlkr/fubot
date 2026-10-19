@@ -999,3 +999,70 @@ requesting would have found all four faster.
 **Journal:** 0 errors. No "naked"/"unprotected"/"Live order flow failed". Clean.
 
 **Status:** All healthy. Engine running. Flat, no exposure. Daily -3.77R / -$3.24. **Safety concern persists: -3R breaker did not fire despite daily R exceeding limit.** No naked positions.
+
+### Monitoring check — 2026-10-19 04:48 (+04:00)
+
+**Engine:** RUNNING/live, 6 scans, last 00:48 UTC. **Daily:** 3 trades, 2W/1L/0BE, -0.07R, +$0.19. **Limit:** not hit (remaining 3.0R). **New UTC day** — daily_summary rolled over at 00:00 UTC. Previous day (2026-10-18) closed at 27 trades, 10W/15L/2BE, -3.77R, -$3.24.
+
+**Positions:** 3 open, all protected with STOP_MARKET + TAKE_PROFIT_MARKET algo orders. Exchange matches DB. No naked positions.
+- BNBUSDT LONG — entry 722.82, SL 724.000, TP 734.749, **pnl +$0.40**
+- LINKUSDT LONG — entry 12.037, SL 12.063, TP 12.395, **pnl +$0.75**
+- AAVEUSDT SHORT — entry 151.94, SL 153.470, TP 146.949, **pnl -$0.49**
+
+**Trades 70m:** 3 closed — DOTUSDT SL_HIT +0.74R/+$0.36, ETHUSDT SL_HIT +0.21R/+$0.06, UNIUSDT SL_HIT -1.02R/-$0.23. Net -0.07R / +$0.19.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 2 errors — LINKUSDT and DOGEUSDT "CRITICAL — could not cancel resting limit entry -2011 Unknown order" then "Live flow failed with an UNPROTECTED LONG ... — flattened at market" (02:00). Safety net correctly market-closed both positions. Same pattern as previous checks — flow failed after entry (limit cancel got -2011 because order was already gone), safety net flattened. No exposure gap. Note: LINKUSDT was re-entered as a new LONG position (now protected).
+
+**Status:** All healthy. Engine running. 3 positions open, all protected. Exchange and DB in sync. New trading day started. Daily -0.07R / +$0.19. 2 errors (LINK/DOGE flatten — safety net worked correctly). No naked positions.
+
+### Monitoring check — 2026-10-19 05:48 (+04:00)
+
+**Engine:** RUNNING/live, 126 scans, last 01:48 UTC. **Daily:** 3 trades, 2W/1L/0BE, -0.07R, +$0.19. **Limit:** not hit (remaining 3.0R).
+
+**Positions:** 3 open, all protected with STOP_MARKET + TAKE_PROFIT_MARKET algo orders. Exchange matches DB. No naked positions. All in profit (market moving with positions):
+- BNBUSDT LONG — entry 722.82, SL 725.440, TP 734.749, **pnl +$0.63** — SL trailed into profit
+- LINKUSDT LONG — entry 12.037, SL 12.130, TP 12.395, **pnl +$1.65** — SL trailed into profit
+- AAVEUSDT SHORT — entry 151.94, SL 153.470, TP 146.949, **pnl -$0.85**
+
+**Trades 70m:** 0 closed.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors. No "naked"/"unprotected"/"Live order flow failed". Clean.
+
+**Status:** All healthy. Engine running. 3 positions open, all protected. Exchange and DB in sync. Daily -0.07R / +$0.19. No issues.
+
+### Monitoring check — 2026-10-19 06:48 (+04:00)
+
+**Engine:** RUNNING/live, 246 scans, last 02:48 UTC. **Daily:** 8 trades, 6W/2L/0BE, +2.88R, +$2.63. **Limit:** not hit (remaining 3.0R).
+
+**Positions:** 2 open, both LONG, both protected. Exchange matches DB. No naked positions.
+- STXUSDT LONG — entry 0.36821, SL 0.36202, TP 0.38873, **pnl -$0.09**
+- ETHUSDT LONG — entry 2420.51, SL 2405.622, TP 2476.934, **pnl +$0.58**
+
+**Trades 70m:** 5 closed — GRTUSDT SL_HIT +0.06R/+$0.06, OPUSDT SL_HIT +0.90R/+$1.08, BNBUSDT SL_HIT +1.22R/+$0.71, LINKUSDT SL_HIT **+1.77R/+$2.28** (big winner), AAVEUSDT SL_HIT -1.00R/-$1.69. Net +2.95R / +$2.44.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors. No "naked"/"unprotected"/"Live order flow failed". Clean.
+
+**Status:** All healthy. Engine running. 2 positions open, all protected. Exchange and DB in sync. Daily +2.88R / +$2.63 (strong recovery). No issues.
+
+### Monitoring check — 2026-10-19 07:48 (+04:00)
+
+**Engine:** RUNNING/live, 366 scans, last 03:48 UTC. **Daily:** 10 trades, 8W/2L/0BE, +3.60R, +$3.43. **Limit:** not hit (remaining 3.0R).
+
+**Positions:** 3 open, all LONG, all protected with STOP_MARKET + TAKE_PROFIT_MARKET algo orders. Exchange matches DB. No naked positions.
+- DOTUSDT LONG — entry 1.1214, SL 1.10327, TP 1.17618, **pnl -$0.14**
+- ALGOUSDT LONG — entry 0.11140, SL 0.10999, TP 0.11578, **pnl -$0.84**
+- STXUSDT LONG — entry 0.36821, SL 0.36202, TP 0.38873, **pnl +$0.57**
+
+**Trades 70m:** 4 closed — APEUSDT SL_HIT +0.13R/+$0.09, ETHUSDT SL_HIT +0.59R/+$0.71, GRTUSDT SL_HIT +0.06R/+$0.06, OPUSDT SL_HIT +0.90R/+$1.08. All winners. Net +1.68R / +$1.94.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors. No "naked"/"unprotected"/"Live order flow failed". Clean.
+
+**Status:** All healthy. Engine running. 3 positions open, all protected. Exchange and DB in sync. Daily +3.60R / +$3.43. No issues.

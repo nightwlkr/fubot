@@ -10,15 +10,12 @@ class TradingSettingsResponse(BaseModel):
     check_interval_seconds: int = 60
     leverage_btc: int = 10
     leverage_alts: int = 5
-    strategy_fvg_enabled: bool = True
+    strategy_fvg_enabled: bool = False
     strategy_3candle_enabled: bool = True
-    strategy_choch_enabled: bool = True
-    # OB+FVG: a 1h Fair Value Gap only trades when a confirmed, same-direction
-    # Order Block on 5m overlaps its zone. Measured +0.315R/trade with the live
-    # trend gate (20 symbols, R:R 3.0). max_age_bars bounds how old a gap may be
-    # — only the last N closed 1h bars are eligible, matching how the backtest
-    # entered each gap at formation.
-    strategy_obfvg_enabled: bool = True
+    strategy_choch_enabled: bool = False
+    # OB+FVG: DISABLED — live data shows -0.34R/trade (15 trades, 33% WR).
+    # Panel analysis (+0.315R) was based on 5-trade sample — insufficient.
+    strategy_obfvg_enabled: bool = False
     strategy_obfvg_max_age_bars: int = 2
     paper_use_real_balance: bool = True
     paper_balance_usdt: float = 10000.0
@@ -30,7 +27,7 @@ class TradingSettingsResponse(BaseModel):
     # Max position notional as a % of balance. This is a CAP, not a target: when
     # it binds it reduces the effective risk below risk_percent (with ~1% stops,
     # a 50% cap turns a 5% risk target into ~$1-2 per trade).
-    max_position_notional_pct: float = 50.0
+    max_position_notional_pct: float = 200.0
     # Move the stop to break-even once the trade is this many R in profit.
     be_trail_trigger_r: float = 0.5
     # Profit lock: at this many R in profit, start trailing the stop to lock in gains.

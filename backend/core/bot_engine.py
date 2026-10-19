@@ -23,6 +23,8 @@ from backend.services.order_service import OrderService
 from backend.services.alert_service import AlertService
 from backend.services.binance_service import BinanceService
 from backend.core.daily_reset import DailyResetService
+from backend.core.weekly_drawdown import WeeklyDrawdownGuard
+from backend.core.correlation_guard import CorrelationGuard
 from backend.core.websocket_manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,15 @@ class BotEngine:
         self.orders = order_service
         self.alerts = alert_service
         self.daily_reset = daily_reset
+        # Weekly drawdown guard — halts bot if weekly losses exceed threshold
+        self.weekly_guard = WeeklyDrawdownGuard(
+            session_factory=session_factory,
+            settings=settings,
+            bot_engine=self,
+            alert_service=alert_service,
+        )
+        # Correlation guard — prevents overexposure to correlated assets
+        self.correlation_guard = CorrelationGuard(settings=settings)
         self.position_manager = None  # set by main.py after construction
 
         self._running = False
@@ -210,6 +221,11 @@ class BotEngine:
                             f"< {cooldown_min}m")
                         continue
 
+                # Check weekly drawdown limit
+                if not await self.weekly_guard.check_weekly_drawdown():
+                    logger.info(f"Weekly drawdown limit hit, skipping {symbol}")
+                    continue
+
                 # Scan for signals
                 signals = await self.signals.scan_symbol(symbol)
 
@@ -219,7 +235,12 @@ class BotEngine:
                             "symbol": signal.symbol,
                             "strategy_type": signal.strategy_type,
                             "direction": signal.direction}})
-                    decision = await self.strategy.evaluate_signal(signal, paper_mode=(self._mode == "paper"))
+                    decision = await self.strategy.evaluate_signal(
+                        signal,
+                        paper_mode=(self._mode == "paper"),
+                        open_positions=open_positions,
+                        correlation_guard=self.correlation_guard,
+                    )
 
                     if decision.decision == "EXECUTE":
                         await ws_manager.broadcast({"type": "position_update", "data": {

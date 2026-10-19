@@ -166,7 +166,7 @@ class SignalService:
         # flags existed in the settings API but were never consumed; without
         # this gate a "disabled" strategy kept firing. Default True preserves
         # prior behaviour when the keys are absent.
-        if bool(self.settings.get("strategy_fvg_enabled", True)):
+        if bool(self.settings.get("strategy_fvg_enabled", False)):
             # FVG runs on 1h: a true 3-candle gap (c2.low > c1.high) essentially
             # never forms on liquid 5m crypto (ranges always overlap) — 0
             # detections there. On 1h, gaps do occur.
@@ -190,7 +190,7 @@ class SignalService:
                     candidates.append(("CHOC", direction,
                                        ch.pullback_entry_zone[0], ch.pullback_entry_zone[1],
                                        ch.stop_loss, ch.take_profit, ch.rr_ratio))
-        if bool(self.settings.get("strategy_obfvg_enabled", True)):
+        if bool(self.settings.get("strategy_obfvg_enabled", False)):
             max_age = int(self.settings.get("strategy_obfvg_max_age_bars", 2))
             for fdir, zmin, zmax, sl, tp, rr in detect_obfvg_candidates(
                 k5m, k1h, atr_1h, rr_min, max_age_bars=max_age

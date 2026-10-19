@@ -115,7 +115,13 @@ class StrategyService:
 
     # ---- decision layer driven by BotEngine -----------------------------
 
-    async def evaluate_signal(self, signal, paper_mode: bool = False) -> TradeDecision:
+    async def evaluate_signal(
+        self,
+        signal,
+        paper_mode: bool = False,
+        open_positions: Optional[dict] = None,
+        correlation_guard=None,
+    ) -> TradeDecision:
         symbol = signal.symbol
         side = "BUY" if signal.direction == "LONG" else "SELL"
         # Keep `_mode` in step with the mode this evaluation runs in — the
@@ -140,6 +146,15 @@ class StrategyService:
             if open_count >= max_positions:
                 return TradeDecision(
                     "SKIP", skip_reason=f"Max positions ({max_positions}) already open")
+
+        # 2b. Correlation guard — prevent overexposure to same move
+        if correlation_guard is not None and open_positions is not None:
+            can_trade, reason = correlation_guard.check_correlation(
+                symbol, signal.direction, open_positions
+            )
+            if not can_trade:
+                logger.info(f"[{symbol}] Correlation guard: {reason}")
+                return TradeDecision("SKIP", skip_reason=f"Correlation: {reason}")
 
         # 3. Signal age (normalize naive timestamps defensively)
         max_age_min = float(self.settings.get("signal_max_age_minutes", 60))

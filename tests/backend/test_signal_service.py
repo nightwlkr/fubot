@@ -193,7 +193,8 @@ def test_scan_persists_pending_fvg_signal():
         # (the trend gate itself is covered by test_scan_skips_neutral_market).
         signals, persisted = await _scan_and_fetch(
             "flat", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
-                                  "trade_min_trend_strength": "WEAK"})
+                                  "trade_min_trend_strength": "WEAK",
+                                  "strategy_fvg_enabled": True})
         try:
             fvg = [s for s in signals if s.strategy_type == "FVG"]
             assert fvg, "the trailing FVG pattern must yield a candidate"
@@ -213,7 +214,8 @@ def test_scan_persists_pending_fvg_signal():
 def test_scan_skips_on_bearish_trend():
     async def scenario():
         signals, persisted = await _scan_and_fetch(
-            "bearish_1h", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True})
+            "bearish_1h", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
+                                       "strategy_fvg_enabled": True})
         try:
             assert signals, "candidate is still generated, but filtered"
             assert signals[0].status == "SKIPPED"
@@ -232,7 +234,8 @@ def test_scan_skips_when_volume_not_confirmed():
         # trades) — opt in here to exercise the skip path
         signals, persisted = await _scan_and_fetch(
             "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
-                                         "volume_filter_enabled": True})
+                                         "volume_filter_enabled": True,
+                                         "strategy_fvg_enabled": True})
         try:
             assert signals[0].status == "SKIPPED"
             assert signals[0].skip_reason == "Volume filter: no dominant side confirmation"
@@ -248,7 +251,8 @@ def test_volume_filter_disabled_by_default():
     (default) the signal passes to PENDING."""
     async def scenario():
         signals, persisted = await _scan_and_fetch(
-            "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True})
+            "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
+                                        "strategy_fvg_enabled": True})
         try:
             assert signals[0].status == "PENDING", (
                 f"expected PENDING with volume filter off, got {signals[0].status}: "
@@ -260,7 +264,8 @@ def test_volume_filter_disabled_by_default():
 
 def test_scan_dedups_repeated_scans():
     async def scenario():
-        svc_settings = {"rr_min": 3.0, "trade_neutral_markets": True}
+        svc_settings = {"rr_min": 3.0, "trade_neutral_markets": True,
+                        "strategy_fvg_enabled": True}
         signals1, persisted1 = await _scan_and_fetch("flat", svc_settings=svc_settings)
         signals2, persisted2 = await _scan_and_fetch("flat", svc_settings=svc_settings)
         try:
@@ -293,7 +298,8 @@ def test_skipped_signal_does_not_block_fresh():
 
             svc = SignalService(session_factory=Session,
                                 binance=FakeBinance(make_klines("flat")),
-                                settings={"rr_min": 3.0, "trade_neutral_markets": True})
+                                settings={"rr_min": 3.0, "trade_neutral_markets": True,
+                                          "strategy_fvg_enabled": True})
 
             # scan #1: creates a PENDING signal
             await svc.scan_symbol(SYMBOL)
@@ -338,7 +344,8 @@ def test_stale_pending_signals_are_expired():
         from backend.services.signal_service import SignalService
         engine = create_async_engine(cfg.DATABASE_URL)
         Session = async_sessionmaker(engine, expire_on_commit=False)
-        svc_settings = {"rr_min": 3.0, "trade_neutral_markets": True}
+        svc_settings = {"rr_min": 3.0, "trade_neutral_markets": True,
+                        "strategy_fvg_enabled": True}
         try:
             # clean slate
             async with Session() as db:
@@ -388,7 +395,8 @@ def test_scan_skips_neutral_market():
     (default is now TRUE — neutral allowed — per the 2026-10-13 backtest)."""
     async def scenario():
         signals, persisted = await _scan_and_fetch(
-            "neutral_1h", svc_settings={"rr_min": 3.0, "trade_neutral_markets": False})
+            "neutral_1h", svc_settings={"rr_min": 3.0, "trade_neutral_markets": False,
+                                       "strategy_fvg_enabled": True})
         try:
             assert signals, "candidate generated but gated"
             assert signals[0].status == "SKIPPED"

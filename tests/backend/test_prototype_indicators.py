@@ -603,7 +603,9 @@ class TestObFvgSettingsPlumbing:
     def test_toggle_gates_the_scan(self):
         import backend.services.signal_service as ss
         src = inspect.getsource(ss.SignalService.scan_symbol)
-        assert 'self.settings.get("strategy_obfvg_enabled", True)' in src, \
+        # Default is False because OBFVG showed -0.34R/trade in production (15 trades).
+        # Must still be toggleable — test verifies the gate exists, not the default.
+        assert 'self.settings.get("strategy_obfvg_enabled"' in src, \
             "OBFVG must be gated on its toggle, like the other three strategies"
 
     def test_volume_filter_uses_1h_candles_for_obfvg(self):
@@ -615,7 +617,7 @@ class TestObFvgSettingsPlumbing:
     def test_settings_round_trip_defaults(self):
         from backend.schemas.settings import TradingSettingsResponse
         s = TradingSettingsResponse()
-        assert s.strategy_obfvg_enabled is True
+        assert s.strategy_obfvg_enabled is False
         assert s.strategy_obfvg_max_age_bars == 2
 
     def test_update_schema_accepts_the_new_keys(self):

@@ -723,6 +723,16 @@ class TestOvertradingGuard:
         engine.signals.scan_symbol = fake_scan
         engine._get_enabled_symbols = lambda: _async_list(["BTCUSDT"])
         engine.orders = SimpleNamespace(get_current_position=lambda s: _async_none())
+        # weekly_guard needs session_factory to be callable; inject a no-op
+        # that returns a context manager yielding None (so the guard skips DB queries)
+        class _NoOpSession:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def execute(self, *a, **kw):
+                class _Result:
+                    def fetchall(self): return []
+                return _Result()
+        engine.weekly_guard.session_factory = lambda **kw: _NoOpSession()
         await engine._scan_and_evaluate()
         assert scanned == ["BTCUSDT"], "scans normally below the cap"
 
