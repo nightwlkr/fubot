@@ -318,6 +318,52 @@ class TestNoSecretFragmentIsLogged:
             "the secret-key prefix must not appear in a login-failure log line"
 
 
+class TestEveryIncomeCallerAsksForNetPnl:
+    """`income_type` became a CLIENT-SIDE filter when the `incomeType` param was
+    dropped from the Binance request. A caller that still passes "REALIZED_PNL"
+    therefore silently keeps only gross PnL — commission and funding dropped on
+    the floor. That is exactly what the flatten path in `strategy_service.py`
+    was doing, so it stayed fee-blind through the P0-1 fix.
+
+    Checked by source because the stub returns one number regardless of args,
+    so a behavioural test cannot see the filter."""
+
+    def test_no_caller_passes_an_income_type(self):
+        import pathlib
+        import re
+        for f in ("backend/services/strategy_service.py",
+                  "backend/core/position_manager.py",
+                  "backend/routers/settings.py"):
+            src = pathlib.Path(f).read_text()
+            for m in re.finditer(r"get_position_income\(([^)]*)\)", src):
+                args = m.group(1)
+                assert '"REALIZED_PNL"' not in args and "'REALIZED_PNL'" not in args, (
+                    f"{f} calls get_position_income with an explicit REALIZED_PNL "
+                    f"filter, so commission and funding are excluded: "
+                    f"get_position_income({args.strip()})"
+                )
+
+    def test_flatten_uses_the_net_total(self):
+        import inspect
+        from backend.services.strategy_service import StrategyService
+        src = inspect.getsource(StrategyService)
+        assert '"REALIZED_PNL"' not in src
+
+
+class TestTradeStatsDoNotReadUnknownRAsBreakeven:
+    """A NULL pnl_r means 1R could not be established. Coalescing it to 0.0
+    registered the trade as a perfect breakeven and flattered every stat on the
+    Trade Log cards — while the PnL chart and Monthly table on the same page
+    charge it -1R. The two disagreed on the same screen."""
+
+    def test_source_does_not_coalesce_null_r_to_zero(self):
+        import inspect
+        from backend.routers.trades import trade_stats
+        src = inspect.getsource(trade_stats)
+        assert "float(t.pnl_r or 0)" not in src
+        assert "daily_r_contribution" in src
+
+
 class TestReduceOnlyRejectionIsNotAFailedClose:
     """`reduceOnly=true` introduces a rejection the old code could not produce:
     Binance answers -2021 when there is nothing left to reduce, which is exactly

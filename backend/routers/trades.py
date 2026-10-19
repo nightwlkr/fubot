@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models.trade import Trade
 from backend.schemas.trade import TradeResponse, TradeListResponse, TradeStatsResponse
+from backend.core import risk_units
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/trades", tags=["trades"])
@@ -208,9 +209,16 @@ async def trade_stats(
     result = await db.execute(query)
     rows = result.scalars().all()
     # Both columns are Numeric and come back as Decimal. Coerce through float()
-    # before any arithmetic — a NULL would raise TypeError inside sum(), and a
-    # bare Decimal would not serialise as a JSON number.
-    trades = [float(t.pnl_r or 0) for t in rows]
+    # before any arithmetic — a bare Decimal would not serialise as a JSON
+    # number.
+    #
+    # A NULL pnl_r means 1R could not be established for that trade. It must be
+    # charged a full -1R (`risk_units.daily_r_contribution`), NOT coalesced to
+    # 0.0: `or 0` registered an unmeasurable trade as a perfect breakeven, which
+    # flattered avg_r, best_trade, worst_trade and win_rate on the Trade Log
+    # cards — and disagreed with the PnL chart and Monthly table sitting next to
+    # them on the Performance page, which already charge it correctly.
+    trades = [risk_units.daily_r_contribution(t.pnl_r) for t in rows]
     usd = [float(t.pnl_usdt or 0) for t in rows]
 
     total = len(trades)

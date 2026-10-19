@@ -807,8 +807,9 @@ class StrategyService:
                 if self._mode == "live" and self.binance is not None:
                     try:
                         income = await self.binance.get_position_income(
-                            row.symbol, "REALIZED_PNL",
-                            int(row.opened_at.timestamp() * 1000) if row.opened_at else None,
+                            row.symbol,
+                            start_time=(int(row.opened_at.timestamp() * 1000)
+                                        if row.opened_at else None),
                         )
                         pnl_usdt = float(income.get("totalPnl", 0) or 0)
                         distance = risk_units.risk_distance(

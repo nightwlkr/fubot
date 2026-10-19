@@ -117,7 +117,7 @@ class FakeBinance:
         self.open_qty = 0.0
         return {"orderId": 7, "status": "FILLED"}
 
-    async def get_position_income(self, symbol, income_type, start_time=None):
+    async def get_position_income(self, symbol, income_type=None, start_time=None):
         return {"totalPnl": str(self.total_pnl)}
 
 

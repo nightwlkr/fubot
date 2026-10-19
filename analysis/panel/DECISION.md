@@ -985,3 +985,17 @@ requesting would have found all four faster.
 **⚠️ SAFETY CONCERN:** Daily R is now -3.77R, which exceeds the -3.0R limit, but `daily_loss_limit_hit` is false. The exchange-sync recompute (which corrected the R after the restart) happened AFTER the engine had already been stopped/restarted. The -3R breaker reads the accumulator, which was understated during the day. This is the known residual issue documented in AGENTS.md: the breaker reads the hot-reloaded in-memory settings dict while the dashboard and sync read the `Setting` row. The sync's recompute can push R back under/over the limit after the fact. **Needs investigation** — the breaker should have fired when daily R hit -3.0R.
 
 **Status:** Engine restarted and running. Flat, no exposure. Daily -3.77R / -$3.24 (recomputed after restart). **Safety concern: -3R breaker may not have fired correctly.** No naked positions.
+
+### Monitoring check — 2026-10-19 03:48 (+04:00)
+
+**Engine:** RUNNING/live, 37 scans, last 23:48 UTC. **Daily:** 27 trades, 10W/15L/2BE, -3.77R, -$3.24. **Limit:** not hit flag is false, but -3.77R exceeds -3.0R limit (safety concern from previous check persists).
+
+**Positions:** 0 open (flat). Exchange flat, 0 algo orders. No naked positions.
+
+**Trades 70m:** 0 closed.
+
+**Signals:** 0 new PENDING.
+
+**Journal:** 0 errors. No "naked"/"unprotected"/"Live order flow failed". Clean.
+
+**Status:** All healthy. Engine running. Flat, no exposure. Daily -3.77R / -$3.24. **Safety concern persists: -3R breaker did not fire despite daily R exceeding limit.** No naked positions.

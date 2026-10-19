@@ -396,5 +396,9 @@ class TestStatsNumericCoercion:
     def test_stats_coerces_to_float(self):
         from backend.routers.trades import trade_stats
         src = inspect.getsource(trade_stats)
-        assert "float(t.pnl_r or 0)" in src, \
-            "pnl_r must be coerced to float; Decimal/float mixes raise"
+        # A NULL pnl_r is UNKNOWN, not breakeven. Coalescing it to 0.0 made the
+        # Trade Log cards flatter avg_r / best / worst / win_rate, and disagree
+        # with the PnL chart and Monthly table beside them, which charge -1R.
+        assert "float(t.pnl_r or 0)" not in src, \
+            "an unknown-R trade must be charged -1R, not coalesced to a breakeven"
+        assert "daily_r_contribution" in src

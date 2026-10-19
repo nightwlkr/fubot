@@ -292,7 +292,7 @@ class _IncomeBinance:
     def __init__(self, total_pnl=-2.5):
         self.total_pnl = total_pnl
 
-    async def get_position_income(self, symbol, income_type, start_time=None):
+    async def get_position_income(self, symbol, income_type=None, start_time=None):
         return {"totalPnl": str(self.total_pnl)}
 
 
