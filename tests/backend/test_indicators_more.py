@@ -469,7 +469,22 @@ class TestBacktester:
                 assert series[t.exit_idx]["open_time"] > series[t.entry_idx]["open_time"], \
                     "the exit bar must open strictly after the fill bar"
                 # R is computed from the frozen entry-to-stop distance.
-                assert t.pnl_r != 0.0 or t.exit_price in (t.stop, t.take_profit)
+                # R is computed from the frozen entry-to-stop distance. A
+                # zero-R exit is a breakeven close, which under the live
+                # trailing rules happens at the MOVED stop — the BE stop sits
+                # exactly at entry, and profit-lock can sit above it. So the
+                # invariant is no longer "exit at the original stop or TP" but
+                # the weaker, correct one: an exit can never be WORSE than the
+                # worst stop the strategy was ever allowed to be resting.
+                if t.pnl_r == 0.0:
+                    if t.direction == "LONG":
+                        assert t.exit_price >= t.stop, (
+                            "a breakeven exit below the original stop means the "
+                            "exit used a price the strategy was never resting at")
+                    else:
+                        assert t.exit_price <= t.stop, (
+                            "a breakeven exit above the original stop means the "
+                            "exit used a price the strategy was never resting at")
 
     def test_backtest_reports_expectancy(self):
         k1h, k5m, k15m = self._series()

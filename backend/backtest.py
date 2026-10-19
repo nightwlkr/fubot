@@ -234,6 +234,15 @@ class Backtester:
 
     def __init__(self, settings: Optional[dict] = None):
         self.settings = settings or {}
+        # Trailing defaults mirror production (routers/settings.py). Without
+        # them the harness models static SL/TP while live runs BE + profit-lock,
+        # and the 2026-10-15 audit measured 81% of live exits at ~0R — a
+        # distribution static exits cannot produce. Pass None values to disable.
+        self.trailing = {
+            "be_trail_trigger_r": self.settings.get("be_trail_trigger_r", 0.5),
+            "profit_lock_trigger_r": self.settings.get("profit_lock_trigger_r", 1.0),
+            "profit_lock_trail_r": self.settings.get("profit_lock_trail_r", 0.5),
+        }
         self.rr_min = float(self.settings.get("rr_min", 3.0))
         self.risk_percent = float(self.settings.get("risk_percent", 1.0))
         self.balance = float(self.settings.get("backtest_balance", 10000.0))
@@ -374,7 +383,8 @@ class Backtester:
 
     def _resolve_exit(self, trade: BacktestTrade, series: list[dict]) -> None:
         """Walk the trade's OWN interval forward from the bar after the fill,
-        closing on whichever of SL/TP the range reaches first.
+        closing on whichever of SL/TP the range reaches first — with the live
+        BE and profit-lock trailing rules applied as the trade moves in profit.
 
         The exit MUST run on the same interval as the entry. Evaluating a 5m
         entry against 1h bars had two defects: an SL hit ten minutes after a
@@ -382,33 +392,85 @@ class Backtester:
         checked can OPEN before the fill — lookahead on the exit path, which the
         previous docstring denied while doing it.
 
-        Both legs are checked on the same bar, so a bar whose range spans stop
-        AND target is resolved conservatively (stop first), as before.
+        TRAILING (added 2026-10-19). The harness previously modelled static
+        SL/TP only, while production runs `be_trail_trigger_r` and
+        `profit_lock_*` (position_manager._check_be_trailing:391 and
+        _check_profit_trailing:430). Live converts a large share of -1R
+        stop-outs into ~0R scratches — the 2026-10-15 audit found 81% of exits
+        at approximately 0R — so the static model's exit distribution is not the
+        live one, and every expectancy number it produced described a strategy
+        nobody runs.
+
+        Both rules are mirrored exactly, including their one-way guard (a stop
+        only ever moves toward profit, never back):
+
+            profit >= be_trail_trigger_r * risk  -> stop moves to entry
+            profit >= profit_lock_trigger_r * risk -> stop trails to
+                                                     extreme -/+ trail_r
+
+        WITHIN-BAR ORDERING, and it is deliberately pessimistic: the existing
+        stop is tested against the bar's range FIRST, and only then is the stop
+        tightened using that same bar's extreme. A bar is a range with no
+        internal path, so crediting a tighter stop before testing would let a
+        trailing stop "catch" a move it could not have been placed in time for.
+        The live engine re-checks every ~30s and would often do better than this.
 
         KNOWN LIMITATION, stated rather than hidden: this resolves each trade to
         completion before the outer loop advances, so it is correct on interval
         and strictly post-fill, but it is not an event loop — overlapping
         positions cannot overlap in time, and `max_open > 1` is not honoured.
-        A full multi-position exit model is scoped follow-up work.
         """
         t = trade
+        # Live defaults (routers/settings.py). `None` disables a rule.
+        be_r = self.trailing.get("be_trail_trigger_r")
+        pl_trigger_r = self.trailing.get("profit_lock_trigger_r")
+        pl_trail_r = self.trailing.get("profit_lock_trail_r", 0.5)
+
+        entry = t.entry
+        risk = abs(entry - t.stop)
+        if risk <= 0:
+            risk = abs(t.take_profit - entry) or 1.0
+
+        stop = t.stop
+
         for j in range(t.entry_idx + 1, len(series)):
             c = series[j]
             hi, lo = c["high"], c["low"]
+
+            # 1. Test the CURRENT stop against this bar before tightening it.
             if t.direction == "LONG":
-                if lo <= t.stop:
-                    self._close(t, j, t.stop, "SL_HIT")
+                if lo <= stop:
+                    self._close(t, j, stop, "BE_STOP" if stop != t.stop else "SL_HIT")
                     return
                 if hi >= t.take_profit:
                     self._close(t, j, t.take_profit, "TP_HIT")
                     return
             else:
-                if hi >= t.stop:
-                    self._close(t, j, t.stop, "SL_HIT")
+                if hi >= stop:
+                    self._close(t, j, stop, "BE_STOP" if stop != t.stop else "SL_HIT")
                     return
                 if lo <= t.take_profit:
                     self._close(t, j, t.take_profit, "TP_HIT")
                     return
+
+            # 2. Tighten the stop for SUBSEQUENT bars, mirroring the live
+            #    one-way guards. Uses this bar's favourable extreme.
+            if t.direction == "LONG":
+                profit = hi - entry
+                if pl_trigger_r and profit >= pl_trigger_r * risk:
+                    new_stop = hi - pl_trail_r * risk
+                    if new_stop > stop:
+                        stop = new_stop
+                elif be_r and profit >= be_r * risk and stop < entry:
+                    stop = entry
+            else:
+                profit = entry - lo
+                if pl_trigger_r and profit >= pl_trigger_r * risk:
+                    new_stop = lo + pl_trail_r * risk
+                    if new_stop < stop:
+                        stop = new_stop
+                elif be_r and profit >= be_r * risk and stop > entry:
+                    stop = entry
         # Ran out of data with the trade still open: leave `exit_idx` None so
         # `BacktestResult.open` counts it and it stays out of expectancy.
 
