@@ -35,6 +35,7 @@ class PositionManager:
         settings: dict,
         session_factory: Optional[Callable] = None,
         market_data_ws=None,
+        user_data_ws=None,
     ):
         self.session_factory = session_factory
         self.binance = binance
@@ -46,6 +47,9 @@ class PositionManager:
         # checks fire on every tick (sub-second) instead of the 30s REST poll.
         # The REST loop still runs as a fallback/reconciliation pass.
         self.market_data_ws = market_data_ws
+        # Binance userDataStream for real-time position/order events.
+        # Triggers immediate reconciliation when positions are closed externally.
+        self.user_data_ws = user_data_ws
         self._latest_price: dict[str, float] = {}   # symbol -> last bookTicker mid
         self._ws_symbols: set[str] = set()          # symbols currently subscribed
         self._check_locks: dict[str, asyncio.Lock] = {}  # per-symbol close lock
@@ -71,6 +75,12 @@ class PositionManager:
         self._running = True
         await self._reconcile_exchange_positions()
         self._task = asyncio.create_task(self._loop())
+        # Wire up userDataStream callback if available
+        if self.user_data_ws and self._mode == "live":
+            try:
+                await self.user_data_ws.connect(self._handle_userdata_event)
+            except Exception as e:
+                logger.warning(f"userDataStream connect failed: {e}")
 
     async def stop(self):
         """Stop the position manager loop."""
@@ -89,6 +99,54 @@ class PositionManager:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self.user_data_ws:
+            try:
+                await self.user_data_ws.close()
+            except Exception:
+                pass
+
+    async def _handle_userdata_event(self, data: dict):
+        """Handle real-time position/order events from Binance userDataStream.
+
+        Events of interest:
+        - ACCOUNT_UPDATE / position: position opened/closed/sized
+        - executionReport: order fill/cancel (trade entries, SL/TP hits)
+
+        Triggers immediate reconciliation so we don't wait for the 30s REST poll.
+        """
+        try:
+            event_type = data.get("e")
+            if event_type == "executionReport":
+                # Order fill or cancel — check if position changed
+                order_status = data.get("X", "")
+                if order_status in ("FILLED", "CANCELED", "EXPIRED"):
+                    logger.debug(f"userDataStream executionReport: {data.get('s')} {order_status}")
+                    await self._trigger_reconciliation()
+            elif event_type == "ORDER_TRADE_UPDATE":
+                # Simplified userDataStream format (some Binance versions)
+                trade = data.get("o", {})
+                status = trade.get("X", "")
+                if status in ("FILLED", "CANCELED"):
+                    logger.debug(f"userDataStream ORDER_TRADE_UPDATE: {data.get('s')} {status}")
+                    await self._trigger_reconciliation()
+            elif event_type == "ACCOUNT_UPDATE":
+                # Position or balance update
+                updates = data.get("a", {})
+                positions = updates.get("P", [])
+                if positions:
+                    logger.debug(f"userDataStream ACCOUNT_UPDATE: {len(positions)} position(s) changed")
+                    await self._trigger_reconciliation()
+        except Exception as e:
+            logger.debug(f"userDataStream event handler error: {e}")
+
+    async def _trigger_reconciliation(self):
+        """Lightweight reconciliation: check if any DB positions are now stale."""
+        if not self._running or self._mode != "live":
+            return
+        try:
+            await self._reconcile_exchange_positions()
+        except Exception as e:
+            logger.debug(f"userDataStream reconciliation error: {e}")
 
     async def _reconcile_exchange_positions(self) -> None:
         """Sync DB positions with actual exchange positions (live mode, on start).

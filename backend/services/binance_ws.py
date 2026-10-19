@@ -185,3 +185,135 @@ class BinanceWebSocketManager:
             }
             await callback(cb_data)
         await self.subscribe(stream, wrapper)
+
+
+# ---- UserDataStream (separate WS for position/order events) ----
+
+USERDATA_WS_BASE = "wss://fstream.binance.com/ws"
+
+
+class UserDataStreamManager:
+    """Manages Binance Futures userDataStream (listenKey-based WS).
+
+    Streams executionReport, position, and account update events in real time.
+    ListenKey auto-refreshes every 50 minutes (Binance max lifetime 24h).
+    """
+
+    def __init__(self, binance_service, position_manager=None):
+        self._binance = binance_service
+        self._position_manager = position_manager
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._session: aiohttp.ClientSession | None = None
+        self._listen_key: str | None = None
+        self._running = False
+        self._listen_task: asyncio.Task | None = None
+        self._refresh_task: asyncio.Task | None = None
+        self._reconnect_delay = 1.0
+        self._max_reconnect_delay = 30.0
+        self._callback: Callable | None = None
+
+    async def connect(self, callback: Callable):
+        """Start userDataStream with the given event callback."""
+        self._callback = callback
+        self._running = True
+        await self._refresh_listen_key()
+        await self._open_socket()
+        self._listen_task = asyncio.create_task(self._listen())
+        self._refresh_task = asyncio.create_task(self._auto_refresh())
+        logger.info("UserDataStream connected")
+
+    async def close(self):
+        """Shutdown userDataStream gracefully."""
+        self._running = False
+        tasks = []
+        if self._listen_task:
+            tasks.append(self._listen_task)
+        if self._refresh_task:
+            tasks.append(self._refresh_task)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        if self._session and not self._session.closed:
+            await self._session.close()
+        logger.info("UserDataStream closed")
+
+    async def _refresh_listen_key(self):
+        """GET/POST /fapi/v1/listenKey — creates or refreshes the listen key."""
+        try:
+            data = await self._binance._signed_request("POST", "fapi/v1/listenKey", weight=1)
+            self._listen_key = data.get("listenKey", "")
+            logger.info(f"UserDataStream listenKey refreshed (expires in 50min)")
+        except Exception as e:
+            logger.error(f"Failed to refresh listenKey: {e}")
+            self._listen_key = None
+
+    async def _auto_refresh(self):
+        """Refresh listenKey every 50 minutes; reconnect WS after each refresh."""
+        while self._running:
+            try:
+                await asyncio.sleep(50 * 60)  # 50 minutes
+                if not self._running:
+                    break
+                await self._refresh_listen_key()
+                if self._listen_key and self._ws and not self._ws.closed:
+                    await self._ws.close()
+                if self._listen_key:
+                    await self._open_socket()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"userDataStream auto-refresh error: {e}")
+                await asyncio.sleep(10)
+
+    async def _open_socket(self):
+        """Open WS connection to wss://fstream.binance.com/ws/{listenKey}."""
+        if not self._listen_key:
+            return
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        url = f"{USERDATA_WS_BASE}/{self._listen_key}"
+        self._ws = await self._session.ws_connect(url, heartbeat=30)
+        logger.info(f"UserDataStream socket opened: {url}")
+
+    async def _listen(self):
+        """Main listen loop with auto-reconnect."""
+        while self._running:
+            try:
+                async for msg in self._ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            data = json.loads(msg.data)
+                            await self._handle_message(data)
+                        except json.JSONDecodeError:
+                            pass
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        raise
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                        break
+            except (asyncio.CancelledError, aiohttp.ClientError):
+                break
+            except Exception as e:
+                if self._running:
+                    logger.warning(f"UserDataStream error: {e}, reconnecting in {self._reconnect_delay}s")
+            if self._running:
+                await asyncio.sleep(self._reconnect_delay)
+                self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
+                try:
+                    await self._open_socket()
+                except Exception as e:
+                    logger.error(f"UserDataStream reconnect failed: {e}")
+
+    async def _handle_message(self, data: dict):
+        """Route incoming userDataStream events to callback."""
+        try:
+            await self._callback(data)
+        except Exception as e:
+            logger.error(f"UserDataStream callback error: {e}")

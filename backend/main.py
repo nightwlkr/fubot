@@ -90,12 +90,18 @@ async def lifespan(app: FastAPI):
     position_manager = getattr(app.state, "position_manager", None)
     binance = getattr(app.state, "binance", None)
     market_data_ws = getattr(app.state, "market_data_ws", None)
+    user_data_ws = getattr(app.state, "user_data_ws", None)
     if engine:
         await engine.stop()
     if position_manager:
         await position_manager.stop()
     if market_data_ws:
         await market_data_ws.close()
+    if user_data_ws:
+        try:
+            await user_data_ws.close()
+        except Exception:
+            pass
     if binance:
         await binance.close()
     await close_db()
@@ -165,6 +171,11 @@ async def init_bot(app: FastAPI) -> None:
     )
     daily_reset.bot = engine  # -3R stop can stop the engine
 
+    # Real-time position/order events via Binance userDataStream (live mode only)
+    from backend.services.binance_ws import UserDataStreamManager
+    user_data_ws = UserDataStreamManager(binance_service=binance)
+    app.state.user_data_ws = user_data_ws
+
     position_manager = PositionManager(
         binance=binance,
         order_service=order_service,
@@ -173,6 +184,7 @@ async def init_bot(app: FastAPI) -> None:
         settings=bot_settings,
         session_factory=AsyncSessionLocal,
         market_data_ws=market_data_ws,
+        user_data_ws=user_data_ws,
     )
 
     set_bot_engine(engine)
