@@ -236,6 +236,31 @@ async def today_stats(
     # used_r_from(None) is 0.0, so the "no row yet" case needs no guard.
     used_r = used_r_from(daily)
 
+    # Max daily trades cap
+    settings_result3 = await db.execute(select(Setting).where(Setting.key == "max_daily_trades"))
+    max_daily_row = settings_result3.scalar_one_or_none()
+    max_daily_trades = int(max_daily_row.value) if max_daily_row and max_daily_row.value is not None else 12
+    trades_today_count = daily.total_trades if daily else 0
+    remaining_daily_trades = max(0, max_daily_trades - trades_today_count)
+
+    # Weekly drawdown status (day-based to match guard)
+    day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    weekly_result = await db.execute(
+        select(Trade.pnl_r)
+        .where(Trade.closed_at >= day_start)
+        .where(Trade.pnl_r < 0)
+    )
+    weekly_losses = weekly_result.fetchall()
+    total_weekly_loss = sum(abs(float(r[0])) for r in weekly_losses if r[0] is not None)
+
+    settings_result2 = await db.execute(select(Setting).where(Setting.key == "weekly_drawdown_limit_r"))
+    weekly_row = settings_result2.scalar_one_or_none()
+    weekly_limit = float(weekly_row.value) if weekly_row and weekly_row.value is not None else 5.0
+
+    weekly_used_r = total_weekly_loss
+    weekly_remaining_r = max(0.0, weekly_limit - weekly_used_r)
+    weekly_paused = weekly_used_r >= weekly_limit
+
     return TodayStats(
         realized_pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
         unrealized_pnl_usdt=0.0,
@@ -250,5 +275,16 @@ async def today_stats(
             used_r=used_r,
             limit_r=limit_r,
             remaining_r=max(0.0, limit_r - used_r),
+        ),
+        daily_trades_limit_status=DailyTradesLimitStatus(
+            used_trades=trades_today_count,
+            limit_trades=max_daily_trades,
+            remaining_trades=remaining_daily_trades,
+        ),
+        weekly_limit_status=WeeklyLimitStatus(
+            used_r=weekly_used_r,
+            limit_r=weekly_limit,
+            remaining_r=weekly_remaining_r,
+            is_paused=weekly_paused,
         ),
     )
