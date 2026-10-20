@@ -42,6 +42,11 @@ class WeeklyDrawdownGuard:
         # so the DB-based loss check doesn't immediately re-trigger on the
         # same day's historical losses. Cleared at UTC midnight.
         self._manual_reset_time: Optional[datetime] = None
+        # Track when the user last requested a full reset. Trades closed after
+        # this point are counted in the weekly calculation — everything before
+        # is ignored. This lets the user "start fresh" without waiting for the
+        # natural Mon-Sun boundary.
+        self._reset_from: Optional[datetime] = None
 
     def get_weekly_limit_r(self) -> float:
         """Get the weekly drawdown limit in R (positive value)."""
@@ -96,17 +101,20 @@ class WeeklyDrawdownGuard:
             logger.info("Weekly guard within post-reset grace period — skipping DB loss check")
             return True
 
-        # Query THIS WEEK's (Monday-Sunday UTC) NET PnL — wins AND losses count.
-        # This allows profits to offset losses so the limit is a true safety net
-        # against a string of bad days, not just a daily loss gate.
+        # Determine the start of the weekly window.
+        # If a full reset was requested, use that timestamp as the cutoff.
+        # Otherwise use the natural Monday boundary.
         now = datetime.now(timezone.utc)
-        monday = now - timedelta(days=now.weekday())
-        monday = monday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+        if self._reset_from is not None:
+            week_start = self._reset_from.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            monday = now - timedelta(days=now.weekday())
+            week_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
 
         async with self.session_factory() as session:
             result = await session.execute(
                 select(Trade.pnl_r)
-                .where(Trade.closed_at >= monday)
+                .where(Trade.closed_at >= week_start)
                 .where(Trade.pnl_r.isnot(None))
             )
             trades = result.fetchall()
@@ -135,20 +143,25 @@ class WeeklyDrawdownGuard:
 
         return True
 
-    def manual_reset(self) -> None:
-        """Clear the weekly limit flag and grant a same-day grace period.
+    def manual_reset(self, full_reset: bool = False) -> None:
+        """Clear the weekly limit flag.
 
-        Unlike a plain ``_weekly_limit_hit = False``, this also records the
-        reset timestamp so ``check_weekly_drawdown`` can skip its DB-based
-        loss re-check for the remainder of the current UTC day. Without the
-        grace, the guard re-queries today's losing trades on the next scan and
-        immediately trips again.
+        ``full_reset=True`` records a reset point so all historical trades
+        before now are ignored in future weekly PnL calculations. This lets the
+        user start fresh without waiting for the Mon-Sun boundary.
+        ``full_reset=False`` grants a same-day grace period (previous behavior).
         """
         now = datetime.now(timezone.utc)
         self._weekly_limit_hit = False
         self._weekly_limit_date = None
-        self._manual_reset_time = now
-        logger.info("Weekly drawdown guard manually reset (grace through UTC midnight)")
+        if full_reset:
+            self._reset_from = now
+            self._manual_reset_time = None
+            logger.info("Weekly drawdown guard FULLY reset — historical trades ignored from %s", now)
+        else:
+            self._manual_reset_time = now
+            self._reset_from = None
+            logger.info("Weekly drawdown guard manually reset (grace through UTC midnight)")
 
     async def get_weekly_stats(self) -> dict:
         """Get weekly PnL statistics (current UTC week, Mon-Sun)."""

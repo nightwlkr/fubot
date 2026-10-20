@@ -238,7 +238,7 @@ async def reset_weekly_drawdown_guard(
     weekly_guard = getattr(_bot_engine, "weekly_guard", None)
     if weekly_guard is None:
         raise HTTPException(status_code=503, detail="Weekly drawdown guard not initialized")
-    # Reset the in-memory state + grant same-day grace period
-    weekly_guard.manual_reset()
-    logger.info("Weekly drawdown guard reset by user '%s'", user.username)
-    return {"ok": True, "message": "Weekly drawdown guard reset"}
+    # Full reset: ignore all historical trades, start fresh
+    weekly_guard.manual_reset(full_reset=True)
+    logger.info("Weekly drawdown guard FULLY reset by user '%s'", user.username)
+    return {"ok": True, "message": "Weekly drawdown guard fully reset"}
