@@ -24,6 +24,9 @@ class TradingSettingsResponse(BaseModel):
     symbol_cooldown_minutes: int = 240
     max_daily_trades: int = 12
     volume_filter_enabled: bool = False
+    # Market regime filter — skip trades in RANGING markets (ADX < 20).
+    # SMC strategies (FVG/CHoCH) fail in chop. Enabled by default.
+    regime_filter_enabled: bool = True
     # Max position notional as a % of balance. This is a CAP, not a target: when
     # it binds it reduces the effective risk below risk_percent (with ~1% stops,
     # a 50% cap turns a 5% risk target into ~$1-2 per trade).
@@ -91,6 +94,7 @@ class TradingSettingsUpdate(BaseModel):
     symbol_cooldown_minutes: int | None = Field(default=None, ge=0, le=10080)
     max_daily_trades: int | None = Field(default=None, ge=0, le=500)
     volume_filter_enabled: bool | None = None
+    regime_filter_enabled: bool | None = None
     # Negative values here produced a negative cap -> negative qty -> a paper
     # Position row with quantity=-5 (the zero guard does not catch negatives).
     max_position_notional_pct: float | None = Field(default=None, ge=0, le=1000)

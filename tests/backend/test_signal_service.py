@@ -102,7 +102,7 @@ async def _scan_and_fetch(kind, rr_min=3.0, svc_settings=None):
             await db.execute(delete(SignalModel).where(SignalModel.symbol == SYMBOL))
             await db.commit()
         svc = SignalService(session_factory=Session, binance=FakeBinance(make_klines(kind)),
-                            settings=svc_settings or {"rr_min": rr_min})
+                            settings=svc_settings or {"rr_min": rr_min, "regime_filter_enabled": False})
         signals = await svc.scan_symbol(SYMBOL)
         async with Session() as db:
             rows = (await db.execute(
@@ -215,7 +215,8 @@ def test_scan_skips_on_bearish_trend():
     async def scenario():
         signals, persisted = await _scan_and_fetch(
             "bearish_1h", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
-                                       "strategy_fvg_enabled": True})
+                                       "strategy_fvg_enabled": True,
+                                       "regime_filter_enabled": False})
         try:
             assert signals, "candidate is still generated, but filtered"
             assert signals[0].status == "SKIPPED"
@@ -235,7 +236,8 @@ def test_scan_skips_when_volume_not_confirmed():
         signals, persisted = await _scan_and_fetch(
             "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
                                          "volume_filter_enabled": True,
-                                         "strategy_fvg_enabled": True})
+                                         "strategy_fvg_enabled": True,
+                                         "regime_filter_enabled": False})
         try:
             assert signals[0].status == "SKIPPED"
             assert signals[0].skip_reason == "Volume filter: no dominant side confirmation"
@@ -252,7 +254,8 @@ def test_volume_filter_disabled_by_default():
     async def scenario():
         signals, persisted = await _scan_and_fetch(
             "doji_volume", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
-                                        "strategy_fvg_enabled": True})
+                                        "strategy_fvg_enabled": True,
+                                        "regime_filter_enabled": False})
         try:
             assert signals[0].status == "PENDING", (
                 f"expected PENDING with volume filter off, got {signals[0].status}: "
@@ -265,7 +268,8 @@ def test_volume_filter_disabled_by_default():
 def test_scan_dedups_repeated_scans():
     async def scenario():
         svc_settings = {"rr_min": 3.0, "trade_neutral_markets": True,
-                        "strategy_fvg_enabled": True}
+                        "strategy_fvg_enabled": True,
+                        "regime_filter_enabled": False}
         signals1, persisted1 = await _scan_and_fetch("flat", svc_settings=svc_settings)
         signals2, persisted2 = await _scan_and_fetch("flat", svc_settings=svc_settings)
         try:
@@ -299,7 +303,8 @@ def test_skipped_signal_does_not_block_fresh():
             svc = SignalService(session_factory=Session,
                                 binance=FakeBinance(make_klines("flat")),
                                 settings={"rr_min": 3.0, "trade_neutral_markets": True,
-                                          "strategy_fvg_enabled": True})
+                                          "strategy_fvg_enabled": True,
+                                          "regime_filter_enabled": False})
 
             # scan #1: creates a PENDING signal
             await svc.scan_symbol(SYMBOL)
@@ -345,7 +350,8 @@ def test_stale_pending_signals_are_expired():
         engine = create_async_engine(cfg.DATABASE_URL)
         Session = async_sessionmaker(engine, expire_on_commit=False)
         svc_settings = {"rr_min": 3.0, "trade_neutral_markets": True,
-                        "strategy_fvg_enabled": True}
+                        "strategy_fvg_enabled": True,
+                        "regime_filter_enabled": False}
         try:
             # clean slate
             async with Session() as db:

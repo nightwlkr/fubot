@@ -158,6 +158,13 @@ class SignalService:
         atr_1h = calculate_atr(k1h, period=14) or 0.0
         bias = analyze_trend_bias([c["close"] for c in k1h])
 
+        # 2b. Market regime analysis (ADX + regime classification)
+        from backend.indicators.regime import analyze_market_regime, should_trade_regime
+        highs_1h = [c["high"] for c in k1h]
+        lows_1h = [c["low"] for c in k1h]
+        closes_1h = [c["close"] for c in k1h]
+        regime = analyze_market_regime(highs_1h, lows_1h, closes_1h)
+
         # 2b. Funding rate filter — skip entries when funding is extremely negative
         # (indicates heavy short bias, potential for short squeeze or reversal).
         # Positive funding = longs pay shorts (bullish sentiment).
@@ -251,6 +258,16 @@ class SignalService:
                 status, skip_reason = "SKIPPED", "Trend filter: RSI overbought"
             elif bias.rsi_zone == "OVERSOLD" and direction == "SHORT":
                 status, skip_reason = "SKIPPED", "Trend filter: RSI oversold"
+        # Filter 1b — market regime (ADX-based). Skip RANGING markets entirely
+            # because SMC strategies (FVG/CHoCH) fail in chop. Also skip counter-trend
+            # entries in strong regimes.
+            regime_filter_enabled = bool(self.settings.get("regime_filter_enabled", True))
+            if regime_filter_enabled and regime.regime == "RANGING":
+                status, skip_reason = "SKIPPED", f"Regime: ranging (ADX {regime.adx:.1f})"
+            elif regime_filter_enabled and regime.regime in ("STRONG_BULL", "STRONG_BEAR"):
+                regime_ok, regime_reason = should_trade_regime(regime, direction)
+                if not regime_ok:
+                    status, skip_reason = "SKIPPED", f"Regime filter: {regime_reason}"
             else:
                 # Filter 2 — volume confirmation (10 candles preceding formation).
                 # Use the timeframe the pattern was detected on: 1h volume for
