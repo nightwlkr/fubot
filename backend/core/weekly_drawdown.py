@@ -96,26 +96,31 @@ class WeeklyDrawdownGuard:
             logger.info("Weekly guard within post-reset grace period — skipping DB loss check")
             return True
 
-        # Query TODAY'S losses only (not rolling 7 days)
-        day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+        # Query THIS WEEK's (Monday-Sunday UTC) NET PnL — wins AND losses count.
+        # This allows profits to offset losses so the limit is a true safety net
+        # against a string of bad days, not just a daily loss gate.
+        now = datetime.now(timezone.utc)
+        monday = now - timedelta(days=now.weekday())
+        monday = monday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+
         async with self.session_factory() as session:
             result = await session.execute(
                 select(Trade.pnl_r)
-                .where(
-                    Trade.closed_at >= day_start,
-                    Trade.pnl_r < 0  # Only count losses
-                )
+                .where(Trade.closed_at >= monday)
+                .where(Trade.pnl_r.isnot(None))
             )
-            losses = result.fetchall()
+            trades = result.fetchall()
 
-        total_loss = sum(abs(float(r[0])) for r in losses if r[0] is not None)
+        total_pnl = sum(float(r[0]) for r in trades if r[0] is not None)
+        total_loss = sum(abs(float(r[0])) for r in trades if float(r[0]) < 0)
 
         limit = self.get_weekly_limit_r()
-        logger.debug("Weekly loss: %.2fR / %.1fR limit", total_loss, limit)
+        logger.debug("Weekly PnL: %.2fR (losses: %.2fR / %.1fR limit)", total_pnl, total_loss, limit)
 
-        if total_loss >= limit:
-            logger.error("WEEKLY DRAWDOWN LIMIT HIT: %.2fR loss exceeds %.1fR limit — halting bot",
-                        total_loss, limit)
+        # Halt on net weekly loss exceeding the limit
+        if total_pnl <= -limit:
+            logger.error("WEEKLY DRAWDOWN LIMIT HIT: %.2fR net loss exceeds %.1fR limit — halting bot",
+                        total_pnl, limit)
             self._weekly_limit_hit = True
             self._weekly_limit_date = now
 
@@ -146,16 +151,16 @@ class WeeklyDrawdownGuard:
         logger.info("Weekly drawdown guard manually reset (grace through UTC midnight)")
 
     async def get_weekly_stats(self) -> dict:
-        """Get weekly PnL statistics (current UTC day)."""
+        """Get weekly PnL statistics (current UTC week, Mon-Sun)."""
         now = datetime.now(timezone.utc)
-        today = now.date()
-        day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+        monday = now - timedelta(days=now.weekday())
+        monday = monday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
 
         async with self.session_factory() as session:
-            # Total trades this week (today)
+            # Total trades this week (Mon-Sun UTC)
             result = await session.execute(
                 select(Trade)
-                .where(Trade.closed_at >= day_start)
+                .where(Trade.closed_at >= monday)
             )
             trades = result.fetchall()
 
