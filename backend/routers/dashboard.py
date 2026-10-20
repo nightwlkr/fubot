@@ -275,8 +275,10 @@ async def today_stats(
             api_secret = decrypt(acc.api_secret_encrypted)
             binance = BinanceService(api_key=api_key, api_secret=api_secret)
             equity = await binance.get_account_equity()
-            available_balance_usdt = equity.get("available_balance", 0.0)
-            logger.info(f"Fetched balance: {available_balance_usdt:.2f} USDT")
+            # Use margin_balance (total equity) not available_balance (free margin)
+            # available_balance is 0 when all funds are in cross-margin collateral
+            available_balance_usdt = equity.get("margin_balance", 0.0)
+            logger.info(f"Fetched balance: {available_balance_usdt:.2f} USDT (margin_balance)")
         else:
             logger.warning("No active Binance account found in DB")
     except Exception as e:
