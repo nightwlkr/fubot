@@ -276,8 +276,11 @@ async def today_stats(
             binance = BinanceService(api_key=api_key, api_secret=api_secret)
             equity = await binance.get_account_equity()
             available_balance_usdt = equity.get("available_balance", 0.0)
+            logger.info(f"Fetched balance: {available_balance_usdt:.2f} USDT")
+        else:
+            logger.warning("No active Binance account found in DB")
     except Exception as e:
-        logger.debug(f"Failed to fetch balance for today stats: {e}")
+        logger.warning(f"Failed to fetch balance for today stats: {e}")
 
     return TodayStats(
         realized_pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
