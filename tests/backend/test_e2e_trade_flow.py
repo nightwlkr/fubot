@@ -96,7 +96,8 @@ async def _scenario():
                                    settings={"rr_min": 3.0, "risk_percent": 1.0,
                                              "trade_neutral_markets": True,
                                              "trade_min_trend_strength": "WEAK",
-                                             "strategy_fvg_enabled": True})
+                                             "strategy_fvg_enabled": True,
+                                             "regime_filter_enabled": False})
     strategy_service = StrategyService(risk_service, order_service, binance=binance,
                                        session_factory=Session,
                                        settings={"rr_min": 3.0, "max_positions": 50,

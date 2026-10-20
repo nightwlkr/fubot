@@ -194,7 +194,8 @@ def test_scan_persists_pending_fvg_signal():
         signals, persisted = await _scan_and_fetch(
             "flat", svc_settings={"rr_min": 3.0, "trade_neutral_markets": True,
                                   "trade_min_trend_strength": "WEAK",
-                                  "strategy_fvg_enabled": True})
+                                  "strategy_fvg_enabled": True,
+                                  "regime_filter_enabled": False})
         try:
             fvg = [s for s in signals if s.strategy_type == "FVG"]
             assert fvg, "the trailing FVG pattern must yield a candidate"
@@ -397,17 +398,18 @@ def test_stale_pending_signals_are_expired():
 
 
 def test_scan_skips_neutral_market():
-    """With trade_neutral_markets=false, a NEUTRAL trend bias skips the signal
-    (default is now TRUE — neutral allowed — per the 2026-10-13 backtest)."""
     async def scenario():
         signals, persisted = await _scan_and_fetch(
             "neutral_1h", svc_settings={"rr_min": 3.0, "trade_neutral_markets": False,
-                                       "strategy_fvg_enabled": True})
+                                       "strategy_fvg_enabled": True,
+                                       "regime_filter_enabled": False})
         try:
-            assert signals, "candidate generated but gated"
+            assert signals, "candidate is still generated, but filtered"
             assert signals[0].status == "SKIPPED"
             assert signals[0].skip_reason == "Trend filter: neutral market"
+            assert len(persisted) == 1
             assert persisted[0]["status"] == "SKIPPED"
+            assert persisted[0]["skip_reason"] == "Trend filter: neutral market"
         finally:
             await _cleanup()
     _run(scenario())
