@@ -142,11 +142,22 @@ async def dashboard_overview(
     trades_today_count = daily.total_trades if daily else 0
     remaining_daily_trades = max(0, max_daily_trades - trades_today_count)
 
-    # Weekly drawdown status (day-based to match guard)
+    # Weekly drawdown status — respect DB-persisted reset point if present
     day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    reset_row = await db.execute(
+        select(Setting).where(Setting.key == "weekly_reset_from")
+    )
+    reset_row_val = reset_row.scalar_one_or_none()
+    week_start = day_start
+    if reset_row_val and reset_row_val.value:
+        try:
+            rs = datetime.fromisoformat(reset_row_val.value)
+            week_start = rs.replace(hour=0, minute=0, second=0, microsecond=0)
+        except Exception:
+            pass
     weekly_result = await db.execute(
         select(Trade.pnl_r)
-        .where(Trade.closed_at >= day_start)
+        .where(Trade.closed_at >= week_start)
         .where(Trade.pnl_r < 0)
     )
     weekly_losses = weekly_result.fetchall()
@@ -243,11 +254,22 @@ async def today_stats(
     trades_today_count = daily.total_trades if daily else 0
     remaining_daily_trades = max(0, max_daily_trades - trades_today_count)
 
-    # Weekly drawdown status (day-based to match guard)
+    # Weekly drawdown status — respect DB-persisted reset point if present
     day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    reset_row = await db.execute(
+        select(Setting).where(Setting.key == "weekly_reset_from")
+    )
+    reset_row_val = reset_row.scalar_one_or_none()
+    week_start = day_start
+    if reset_row_val and reset_row_val.value:
+        try:
+            rs = datetime.fromisoformat(reset_row_val.value)
+            week_start = rs.replace(hour=0, minute=0, second=0, microsecond=0)
+        except Exception:
+            pass
     weekly_result = await db.execute(
         select(Trade.pnl_r)
-        .where(Trade.closed_at >= day_start)
+        .where(Trade.closed_at >= week_start)
         .where(Trade.pnl_r < 0)
     )
     weekly_losses = weekly_result.fetchall()

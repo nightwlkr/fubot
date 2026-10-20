@@ -239,6 +239,19 @@ async def reset_weekly_drawdown_guard(
     if weekly_guard is None:
         raise HTTPException(status_code=503, detail="Weekly drawdown guard not initialized")
     # Full reset: ignore all historical trades, start fresh
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
     weekly_guard.manual_reset(full_reset=True)
+    # Persist to DB so the dashboard sees it too
+    try:
+        from sqlalchemy import insert as _ins
+        from backend.models.setting import Setting as _Setting  # noqa: F811
+        async with get_db() as db:
+            await db.execute(
+                _ins(_Setting).values(key="weekly_reset_from", value=now.isoformat())
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning("Failed to persist weekly reset to DB: %s", e)
     logger.info("Weekly drawdown guard FULLY reset by user '%s'", user.username)
     return {"ok": True, "message": "Weekly drawdown guard fully reset"}

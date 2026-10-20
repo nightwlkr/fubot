@@ -7,6 +7,7 @@ bad session could erase weeks of gains.
 This module tracks rolling 7-day PnL in R units and halts the bot when the
 weekly loss exceeds the configured threshold (default: -5R).
 """
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable
@@ -158,10 +159,50 @@ class WeeklyDrawdownGuard:
             self._reset_from = now
             self._manual_reset_time = None
             logger.info("Weekly drawdown guard FULLY reset — historical trades ignored from %s", now)
+            # Persist the reset point to DB so the dashboard also sees it
+            try:
+                asyncio.ensure_future(self._save_reset_to_db(now))
+            except Exception:
+                pass
         else:
             self._manual_reset_time = now
             self._reset_from = None
             logger.info("Weekly drawdown guard manually reset (grace through UTC midnight)")
+
+    async def _save_reset_to_db(self, reset_at: datetime) -> None:
+        """Persist weekly_reset_from setting; cleared at next UTC midnight."""
+        try:
+            tomorrow = (reset_at + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            wait = (tomorrow - datetime.now(timezone.utc)).total_seconds()
+            await asyncio.sleep(wait)
+        except Exception:
+            pass
+        try:
+            async with self.session_factory() as session:
+                from sqlalchemy import update
+                from backend.models.setting import Setting  # noqa: F811
+                await session.execute(
+                    update(Setting).where(Setting.key == "weekly_reset_from").values(value=None)
+                )
+                await session.commit()
+        except Exception:
+            pass
+
+    async def _get_reset_from(self):
+        """Load the persisted weekly_reset_from timestamp from DB, or return None."""
+        try:
+            async with self.session_factory() as session:
+                from sqlalchemy import select as _select
+                from backend.models.setting import Setting  # noqa: F811
+                row = (await session.execute(_select(Setting).where(Setting.key == "weekly_reset_from"))
+                       ).scalar_one_or_none()
+                if row and row.value:
+                    return datetime.fromisoformat(row.value)
+        except Exception:
+            pass
+        return None
 
     async def get_weekly_stats(self) -> dict:
         """Get weekly PnL statistics (current UTC week, Mon-Sun)."""
