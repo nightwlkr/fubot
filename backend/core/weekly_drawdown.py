@@ -103,11 +103,11 @@ class WeeklyDrawdownGuard:
             return True
 
         # Determine the start of the weekly window.
-        # If a full reset was requested, use that timestamp as the cutoff.
+        # If a full reset was requested, use that exact timestamp as the cutoff.
         # Otherwise use the natural Monday boundary.
         now = datetime.now(timezone.utc)
         if self._reset_from is not None:
-            week_start = self._reset_from.replace(hour=0, minute=0, second=0, microsecond=0)
+            week_start = self._reset_from
         else:
             monday = now - timedelta(days=now.weekday())
             week_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)

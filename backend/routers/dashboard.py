@@ -152,7 +152,9 @@ async def dashboard_overview(
     if reset_row_val and reset_row_val.value:
         try:
             rs = datetime.fromisoformat(reset_row_val.value)
-            week_start = rs.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Use exact reset timestamp, not midnight — this excludes ALL
+            # historical trades, not just those before Monday.
+            week_start = rs
         except Exception:
             pass
     weekly_result = await db.execute(
@@ -264,7 +266,9 @@ async def today_stats(
     if reset_row_val and reset_row_val.value:
         try:
             rs = datetime.fromisoformat(reset_row_val.value)
-            week_start = rs.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Use exact reset timestamp, not midnight — this excludes ALL
+            # historical trades, not just those before Monday.
+            week_start = rs
         except Exception:
             pass
     weekly_result = await db.execute(
