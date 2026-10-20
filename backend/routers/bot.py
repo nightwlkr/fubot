@@ -246,11 +246,10 @@ async def reset_weekly_drawdown_guard(
     try:
         from sqlalchemy import insert as _ins
         from backend.models.setting import Setting as _Setting  # noqa: F811
-        async with get_db() as db:
-            await db.execute(
-                _ins(_Setting).values(key="weekly_reset_from", value=now.isoformat())
-            )
-            await db.commit()
+        await db.execute(
+            _ins(_Setting).values(key="weekly_reset_from", value=now.isoformat())
+        )
+        await db.commit()
     except Exception as e:
         logger.warning("Failed to persist weekly reset to DB: %s", e)
     logger.info("Weekly drawdown guard FULLY reset by user '%s'", user.username)
