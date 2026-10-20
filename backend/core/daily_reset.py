@@ -221,8 +221,12 @@ class DailyResetService:
 
         return self._zero_stats(today)
 
-    async def check_and_enforce_limit(self) -> bool:
-        """Called before every new trade. Returns True if trading is allowed."""
+    async def check_and_enforce_limit(self, open_positions: Optional[dict] = None) -> bool:
+        """Called before every new trade. Returns True if trading is allowed.
+
+        Includes unrealized PnL from open positions so the daily limit accounts
+        for losses already accumulated in trades that haven't closed yet.
+        """
         # Self-clear the latch at the UTC day boundary (date-based).
         self.check_and_reset()
 
@@ -232,6 +236,11 @@ class DailyResetService:
         stats = await self.get_daily_stats()
         limit = stats["limit_r"]
         used = stats["used_r"]
+
+        # Add unrealized losses from open positions
+        if open_positions:
+            unrealized_r_loss = self._unrealized_loss_in_r(open_positions)
+            used = used + unrealized_r_loss
 
         if used >= limit:
             await self._trigger_daily_stop()
@@ -243,6 +252,25 @@ class DailyResetService:
                 await self.alerts.daily_limit_warning(used, limit)
 
         return True
+
+    def _unrealized_loss_in_r(self, open_positions: dict) -> float:
+        """Calculate unrealized loss in R units from open positions.
+
+        Only counts losses (negative unrealized PnL), ignoring profits.
+        """
+        total_unrealized_r = 0.0
+        for symbol, pos in open_positions.items():
+            unrealized_pnl = float(pos.get("unrealizedPnl", 0) or 0)
+            if unrealized_pnl < 0:
+                entry = float(pos.get("entryPrice", 0) or 0)
+                qty = float(pos.get("quantity", 0) or 0)
+                # Use a reasonable risk distance estimate if not stored
+                # For futures, 1R is typically ~1% of entry price
+                risk_distance = abs(entry) * 0.01 if entry > 0 else 0
+                if qty > 0 and risk_distance > 0:
+                    r_multiple = unrealized_pnl / (qty * risk_distance)
+                    total_unrealized_r += r_multiple
+        return total_unrealized_r
 
     async def _trigger_daily_stop(self):
         """Emergency stop: bot stops trading for the rest of the day."""

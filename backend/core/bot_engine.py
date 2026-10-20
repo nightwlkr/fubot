@@ -206,7 +206,7 @@ class BotEngine:
                     continue
 
                 # Check daily loss limit
-                if not await self.daily_reset.check_and_enforce_limit():
+                if not await self.daily_reset.check_and_enforce_limit(open_positions):
                     logger.info(f"Daily limit reached, skipping {symbol}")
                     stats = await self.daily_reset.get_daily_stats()
                     await self.alerts.daily_limit_hit(stats["used_r"], stats["limit_r"])

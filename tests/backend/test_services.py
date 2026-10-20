@@ -684,7 +684,7 @@ class TestOvertradingGuard:
             self._n = total_trades
         async def get_daily_stats(self):
             return {"total_trades": self._n, "used_r": 0.0, "limit_r": 3.0}
-        async def check_and_enforce_limit(self):
+        async def check_and_enforce_limit(self, open_positions=None):
             return True
 
     async def _make_engine(self, daily, session_factory=None):
@@ -884,7 +884,7 @@ class TestCloseAllPositions:
             return {"total_trades": 0, "used_r": 0.0, "limit_r": 3.0}
         async def update_daily_summary(self, *a, **k):
             return None
-        async def check_and_enforce_limit(self):
+        async def check_and_enforce_limit(self, open_positions=None):
             return True
 
     async def test_close_all_closes_open_positions(self):
