@@ -57,6 +57,7 @@ export interface TodayStats {
   trades_count: number
   wins: number
   losses: number
+  available_balance_usdt: number  // for USD approximations
   daily_limit_status: DailyLimitStatus
   daily_trades_limit_status: DailyTradesLimitStatus
   weekly_limit_status: WeeklyLimitStatus

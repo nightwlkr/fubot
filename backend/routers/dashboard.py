@@ -261,6 +261,24 @@ async def today_stats(
     weekly_remaining_r = max(0.0, weekly_limit - weekly_used_r)
     weekly_paused = weekly_used_r >= weekly_limit
 
+    # Fetch live account balance for USD approximations
+    available_balance_usdt = 0.0
+    try:
+        from backend.models.account import Account
+        from backend.encryption import decrypt
+        from backend.services.binance_service import BinanceService
+        acc_result = await db.execute(
+            select(Account).where(Account.is_active == True, Account.testnet == False).limit(1))
+        acc = acc_result.scalar_one_or_none()
+        if acc:
+            api_key = decrypt(acc.api_key_encrypted)
+            api_secret = decrypt(acc.api_secret_encrypted)
+            binance = BinanceService(api_key=api_key, api_secret=api_secret)
+            equity = await binance.get_account_equity()
+            available_balance_usdt = equity.get("available_balance", 0.0)
+    except Exception as e:
+        logger.debug(f"Failed to fetch balance for today stats: {e}")
+
     return TodayStats(
         realized_pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
         unrealized_pnl_usdt=0.0,
@@ -271,6 +289,7 @@ async def today_stats(
         wins=daily.wins if daily else 0,
         losses=daily.losses if daily else 0,
         trades_count=daily.total_trades if daily else 0,
+        available_balance_usdt=available_balance_usdt,
         daily_limit_status=DailyLimitStatus(
             used_r=used_r,
             limit_r=limit_r,

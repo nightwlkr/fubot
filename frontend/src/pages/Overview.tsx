@@ -187,6 +187,11 @@ export default function Overview() {
   const weeklyRemaining = (weeklyLimitStatus?.remaining_r ?? weeklyLimit)
   const weeklyPaused = weeklyLimitStatus?.is_paused ?? false
 
+  // USD approximation helper: 1R = 5% of available balance
+  const balanceUsdt = todayStats?.available_balance_usdt ?? 0
+  const rToUsd = balanceUsdt > 0 ? balanceUsdt * 0.05 : 0
+  const approxUsd = (r: number) => rToUsd > 0 ? ` ($${(Math.abs(r) * rToUsd).toFixed(0)})` : ''
+
   return (
     <div className="space-y-6">
       <div>
@@ -285,6 +290,7 @@ export default function Overview() {
               <p className="text-xs text-muted uppercase tracking-wide">P&L</p>
               <p className={clsx('text-3xl font-mono font-bold mt-0.5', pnlR >= 0 ? 'text-success' : 'text-danger')}>
                 {pnlR >= 0 ? '+' : ''}{pnlR.toFixed(2)}R
+                {rToUsd > 0 && <span className="text-sm font-normal text-muted ml-1">≈{pnlR >= 0 ? '+' : ''}${Math.abs(pnlUsdt).toFixed(0)}</span>}
               </p>
               <p className={clsx('text-sm font-mono mt-0.5', pnlUsdt >= 0 ? 'text-success/70' : 'text-danger/70')}>
                 {pnlUsdt >= 0 ? '+' : ''}{pnlUsdt.toFixed(2)} USDT
@@ -314,10 +320,21 @@ export default function Overview() {
               <span className="text-muted uppercase tracking-wide">Daily Limit</span>
               <span className={clsx('font-mono', remaining <= 0 ? 'text-danger' : 'text-muted')}>
                 {used.toFixed(2)}R / {limit}R
+                {rToUsd > 0 && (
+                  <span className="text-muted ml-1 text-[10px]">
+                    (≈${(used * rToUsd).toFixed(0)} / ≈${(limit * rToUsd).toFixed(0)})
+                  </span>
+                )}
                 {limitStatus != null && limitStatus.used_r == null && (
                   <span className="text-danger ml-1">(halted — daily total unreadable)</span>
                 )}
-                {remaining > 0 && <span className="text-success ml-1">({remaining.toFixed(2)}R left)</span>}
+                {remaining > 0 && (
+                  <span className="text-success ml-1">
+                    ({remaining.toFixed(2)}R left
+                    {rToUsd > 0 && ` ≈${(remaining * rToUsd).toFixed(0)} USD`}
+                    )
+                  </span>
+                )}
               </span>
             </div>
             <div className="h-2 bg-surface2 rounded-full overflow-hidden">
@@ -358,7 +375,18 @@ export default function Overview() {
               </div>
               <span className={clsx('font-mono', weeklyRemaining <= 0 ? 'text-danger' : 'text-muted')}>
                 {weeklyUsed.toFixed(1)}R / {weeklyLimit}R
-                {weeklyRemaining > 0 && <span className="text-success ml-1">({weeklyRemaining.toFixed(1)}R left)</span>}
+                {rToUsd > 0 && (
+                  <span className="text-muted ml-1 text-[10px]">
+                    (≈${(weeklyUsed * rToUsd).toFixed(0)} / ≈${(weeklyLimit * rToUsd).toFixed(0)})
+                  </span>
+                )}
+                {weeklyRemaining > 0 && (
+                  <span className="text-success ml-1">
+                    ({weeklyRemaining.toFixed(1)}R left
+                    {rToUsd > 0 && ` ≈${(weeklyRemaining * rToUsd).toFixed(0)} USD`}
+                    )
+                  </span>
+                )}
               </span>
             </div>
             <div className="h-2 bg-surface2 rounded-full overflow-hidden">

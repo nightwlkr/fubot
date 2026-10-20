@@ -67,6 +67,7 @@ class TodayStats(BaseModel):
     wins: int = 0
     losses: int = 0
     trades_count: int = 0
+    available_balance_usdt: float = 0.0  # for USD approximations in UI
     daily_limit_status: Optional[DailyLimitStatus] = None
     daily_trades_limit_status: Optional[DailyTradesLimitStatus] = None
     weekly_limit_status: Optional[WeeklyLimitStatus] = None
