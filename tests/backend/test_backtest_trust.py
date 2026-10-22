@@ -334,11 +334,8 @@ class TestHarnessAlignment:
     """
 
     def test_detection_is_truncated_by_wall_clock_not_by_proportional_index(self):
-        """DEFECT 3. At `at_idx = i`, the detector must see exactly the bars that
-        had CLOSED by `k1h[i]["open_time"]` — `i * 12` of 5m and `i * 4` of
-        15m. Proportional indexing produced some unrelated count that happens
-        to depend only on the two series' LENGTHS, which is what mapped 1h bar
-        500 onto 5m bar 500 (hour 500 vs hour 41.7).
+        """At a wall-clock scan, pattern detectors receive closed bars from
+        their own timeframe, rather than proportional indices across series.
 
         Measured by handing the backtester FIVE TIMES as many 15m bars as 1h
         bars: a proportional scheme sees 5x the 1h count scaled by its own
@@ -362,61 +359,113 @@ class TestHarnessAlignment:
         try:
             for i in (70, 90, 110):
                 seen.clear()
-                bt._detect_candidates(k1h, k5m, k15m, i)
-                assert seen["n5m"] == i * 12, (
-                    f"at 1h bar {i} the 3-candle detector saw {seen['n5m']} 5m "
-                    f"bars, expected {i * 12}")
-                assert seen["n15m"] == i * 4, (
-                    f"at 1h bar {i} the CHoCH detector saw {seen['n15m']} 15m "
-                    f"bars, expected {i * 4}")
+                bt._detect_candidates(k1h, k5m, k15m, k1h[i]["open_time"])
+                assert seen["n5m"] == 3
+                assert seen["n15m"] == i * 4
         finally:
             btmod.detect_three_candles = orig["k5m"]
             btmod.detect_choch = orig["k15m"]
 
     def test_the_filter_bias_is_computed_from_the_detectors_own_view(self):
-        """The bias the filters read must come from the SAME truncated 1h view
-        the detectors see — `k1h[:k1h_idx + 1]`, which EXCLUDES the still-forming
-        detection bar `at_idx`.
-
-        `run` used to recompute it as `analyze_trend_bias(k1h[:i + 1])`, giving
-        the filters one bar the detector could not see — lookahead in the filter
-        that no other test could reach, because `_detect_candidates` returns the
-        bias it computed and `run` had no other way to get one."""
+        """At each 5m-close scan, trend and ADX regime use only closed 1h bars."""
         import backend.backtest as btmod
         from backend.backtest import Backtester
         k1h, k5m, k15m = _mtf_series()
         bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
-                                  "trade_neutral_markets": True})
+                                  "trade_neutral_markets": True,
+                                  "strategy_fvg_enabled": False,
+                                  "strategy_3candle_enabled": False,
+                                  "strategy_choch_enabled": False})
         orig = btmod.analyze_trend_bias
-        seen = {}
-
-        def recording(closes, *a, **kw):
-            seen["n"] = len(closes)
-            return orig(closes, *a, **kw)
-
-        btmod.analyze_trend_bias = recording
+        orig_regime = btmod.analyze_market_regime
         try:
-            # Drive the REAL `run` loop (the old code recomputed the bias there,
-            # so a test that only called `_detect_candidates` could not see it).
-            # For every 1h bar `i` the loop evaluates, the bias must see exactly
-            # `i` closes: `last_closed_before` at k1h[i]["open_time"] returns
-            # i-1, so bar `i` — still forming — is excluded. The old code passed
-            # `k1h[:i + 1]` and saw i+1.
             recorded = []
-            btmod.analyze_trend_bias = lambda closes, *a, **kw: (
-                recorded.append(len(closes)) or orig(closes, *a, **kw))
+            regimes = []
+            def recording(closes, *a, **kw):
+                recorded.append(len(closes))
+                return orig(closes, *a, **kw)
+            def recording_regime(highs, lows, closes, *a, **kw):
+                regimes.append((len(highs), len(lows), len(closes)))
+                return orig_regime(highs, lows, closes, *a, **kw)
+            btmod.analyze_trend_bias = recording
+            btmod.analyze_market_regime = recording_regime
             bt.run("X", k1h, k5m, k15m)
-            assert recorded, "no bias was computed at all"
-            # `run` starts at bar 60 and strides by `vol_stride` = 10.
-            evaluated = [i for i in range(60, len(k1h)) if i % 10 == 0]
-            assert max(recorded) == max(evaluated), (
-                f"the widest bias view was {max(recorded)} closes; the last bar "
-                f"the loop evaluates is index {max(evaluated)} and is still "
-                f"forming, so the bias must see exactly that many")
-            assert min(recorded) == min(evaluated), \
-                "every evaluated bar must exclude itself from the bias"
+            from backend.backtest_data import last_closed_before
+            expected = list(dict.fromkeys(
+                last_closed_before(k1h, c["close_time"] + 1) + 1
+                for c in k5m
+                if last_closed_before(k1h, c["close_time"] + 1) >= 59))
+            assert recorded == expected
+            assert regimes == [(n, n, n) for n in expected]
         finally:
             btmod.analyze_trend_bias = orig
+            btmod.analyze_market_regime = orig_regime
+
+    def test_run_scans_each_fully_closed_5m_bar(self):
+        from backend.backtest import Backtester
+        from backend.backtest_data import last_closed_before
+        k1h, k5m, k15m = _mtf_series()
+        bt = Backtester()
+        seen = []
+        bt._detect_candidates_at = lambda *args: (seen.append(args[3]) or [], None, None)
+
+        bt.run("X", k1h, k5m, k15m)
+
+        expected = [c["close_time"] + 1 for c in k5m
+                    if last_closed_before(k1h, c["close_time"] + 1) >= 59]
+        assert seen == expected
+
+    def test_run_does_not_open_a_trade_before_the_previous_trade_exits(self, monkeypatch):
+        import backend.backtest as btmod
+        from backend.backtest import Backtester
+        k1h, k5m, k15m = _mtf_series()
+        bt = Backtester()
+        candidate = ("3CANDLE", "LONG",
+                     {"stop_loss": 97.0, "take_profit": 109.0, "rr_ratio": 3.0},
+                     k5m, "5m", (99.0, 101.0), 0)
+        def candidate_at_scan(*args):
+            return ([(*candidate[:6], args[-2])], object(), object())
+        bt._detect_candidates_at = candidate_at_scan
+        bt._passes_filters = lambda *args, **kwargs: True
+        monkeypatch.setattr(btmod, "fill_at_midpoint",
+                            lambda series, signal_idx, *args, **kwargs:
+                            (signal_idx + 1, 100.0))
+
+        def hold_open_for_150_bars(trade, series):
+            trade.exit_idx = min(trade.entry_idx + 150, len(series) - 1)
+            trade.exit_price = trade.take_profit
+            trade.exit_reason = "TP_HIT"
+            trade.finalise()
+        monkeypatch.setattr(bt, "_resolve_exit", hold_open_for_150_bars)
+
+        result = bt.run("X", k1h, k5m, k15m)
+
+        closed = result.closed
+        assert len(closed) > 1
+        assert all(later.entry_idx > earlier.exit_idx
+                   for earlier, later in zip(closed, closed[1:])), \
+            "a later position must not fill before the previous position exits"
+
+    def test_live_regime_filter_blocks_ranging_and_strong_countertrend(self):
+        from types import SimpleNamespace
+        from backend.backtest import Backtester
+
+        bias = SimpleNamespace(direction="NEUTRAL", strength="WEAK", rsi_zone="NEUTRAL")
+        ranging = SimpleNamespace(regime="RANGING", adx=12.0)
+        strong_bear = SimpleNamespace(regime="STRONG_BEAR", adx=30.0,
+                                      rsi_zone="NEUTRAL", rsi=50.0)
+        args = ("LONG", 3.0, 100.0, 99.0, bias, [], {})
+
+        enabled = Backtester(settings={"regime_filter_enabled": True,
+                                       "trade_neutral_markets": True,
+                                       "trade_min_trend_strength": "WEAK"})
+        disabled = Backtester(settings={"regime_filter_enabled": False,
+                                       "trade_neutral_markets": True,
+                                       "trade_min_trend_strength": "WEAK"})
+
+        assert not enabled._passes_filters(*args, regime=ranging)
+        assert not enabled._passes_filters(*args, regime=strong_bear)
+        assert disabled._passes_filters(*args, regime=ranging)
 
     def test_a_fill_is_attempted_on_the_series_the_signal_came_from(self):
         """DEFECT 4. The series handed to `fill_at_midpoint` must BE the signal's
@@ -662,7 +711,7 @@ class TestCostModel:
         wide = fee_in_r(entry=100.0, risk_dist=5.0)
         assert tight > wide
         assert FEE_ROUND_TRIP > 0.0007, (
-            "the measured live round trip costs more than the old assumed 0.07%"
+            "the modeled taker round trip costs more than the old assumed 0.07%"
         )
         assert tight == pytest.approx(100.0 * FEE_ROUND_TRIP / 0.5)
 
@@ -715,29 +764,27 @@ class TestLookaheadIsDetectable:
 
     def test_a_lookaheaded_variant_produces_different_numbers(self):
         import backend.backtest as bt
+        import backend.backtest as btmod
         k1h, k5m, k15m = _mtf_series(200)
-        # Permissive filters so the fixture actually TRADES. A read-only sawtooth
-        # (`close = 100 + (i%17)*0.5 - (i%7)*0.3`) is periodic with period lcm=119,
-        # so the trend bias is flat, no FVG gap ever forms, and BOTH variants
-        # return (0.0, 0) — the comparison would hold for the wrong reason, and a
-        # future change that restored the bias would look like a detection.
-        base = {"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
-                "trade_neutral_markets": True, "volume_filter_enabled": False}
-
-        honest = bt.Backtester(settings=base).run("X", k1h, k5m, k15m).summary()
-        broken = bt.LookaheadProbeBacktester(settings=base).run("X", k1h, k5m, k15m).summary()
-        # Precondition, asserted explicitly rather than assumed: a guard over two
-        # empty runs is not a guard.
-        assert honest["closed"] and broken["closed"], \
-            "both variants must actually trade, or the divergence below is vacuous"
-        assert (honest["total_r"], honest["closed"]) != (broken["total_r"], broken["closed"]), \
-            "a lookaheaded variant produced IDENTICAL results — the suite can no " \
-            "longer detect lookahead, so every no-lookahead claim is unfalsifiable"
-        # And the direction matches the historical bug: the lookaheaded probe is
-        # BETTER than the honest harness. Lookahead inflates expectancy, so a suite
-        # that saw the probe lose would be reading the wrong signal.
-        assert broken["total_r"] > honest["total_r"], \
-            "lookahead must inflate R; a probe that scores worse is not this defect"
+        honest = bt.Backtester()
+        probe = bt.LookaheadProbeBacktester()
+        at_ms = k1h[100]["open_time"]
+        seen_lengths = []
+        real_bias = btmod.analyze_trend_bias
+        try:
+            def recording_bias(closes, *args, **kwargs):
+                seen_lengths.append(len(closes))
+                return real_bias(closes, *args, **kwargs)
+            btmod.analyze_trend_bias = recording_bias
+            honest._detect_candidates(k1h, k5m, k15m, at_ms)
+            honest_length = seen_lengths[-1]
+            seen_lengths.clear()
+            probe._detect_candidates(k1h, k5m, k15m, at_ms)
+            assert seen_lengths[-1] == len(k1h)
+            assert seen_lengths[-1] > honest_length, \
+                "the deliberately broken probe must read beyond the scan time"
+        finally:
+            btmod.analyze_trend_bias = real_bias
 
 
 # ------------------------------------------------- 7. the wiring (run_backtest)

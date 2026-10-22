@@ -12,6 +12,7 @@ Wired by: BotEngine (scan loop) and the /signals API route.
 """
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -33,6 +34,19 @@ logger = logging.getLogger(__name__)
 # mathematically exactly rr_min — but float division can land a hair under it and
 # fail `is_valid`. This tolerance matches the backtest harness (RR_EPSILON).
 RR_EPSILON = 1e-9
+_ADX_REASON_VALUE = re.compile(r"(\bADX\s+)[+-]?\d+(?:\.\d+)?", re.IGNORECASE)
+
+
+def _rejection_reason_key(reason: Optional[str]) -> Optional[str]:
+    """Normalize changing ADX readings while preserving other skip details."""
+    if reason is None:
+        return None
+    return _ADX_REASON_VALUE.sub(r"\1*", reason)
+
+
+def _rejection_zone_key(value) -> Decimal:
+    """Use the same exact decimal representation for DB and detector zones."""
+    return Decimal(str(value)).normalize()
 
 # OB detection needs this much 5m history before the first candle is considered
 # (see detect_order_blocks' start_idx).
@@ -310,7 +324,7 @@ class SignalService:
         return signals
 
     async def _persist_signals(self, symbol: str, to_persist: list[tuple[Signal, bool]]) -> None:
-        """Insert new PENDING/SKIPPED signal rows, deduped per (symbol, strategy, direction).
+        """Persist actionable signals and sample each rejected setup once per expiry window.
 
         A duplicate (same strategy+direction already PENDING) is NOT inserted
         and its in-memory Signal gets db_id=None. It is also marked SKIPPED here
@@ -322,7 +336,11 @@ class SignalService:
         and a previously-skipped setup becomes valid. Deduping against SKIPPED
         rows made 43 stale rejections permanently block all new signals for
         those symbol+strategy+direction combos (observed live: 43 SKIPPED rows,
-        zero new signals in 43 min of scanning).
+        zero new signals in 43 min of scanning). We still persist a newly
+        eligible candidate immediately, and only suppress a SKIPPED row when
+        the exact setup and rejection reason were already recorded within the
+        normal signal-expiry window. This avoids writing the same unchanged
+        rejection every scan without reserving a strategy/direction slot.
         """
         if self.session_factory is None or not to_persist:
             return
@@ -335,6 +353,26 @@ class SignalService:
                     )
                 )
                 seen = set(existing.fetchall())
+                max_age_min = float(self.settings.get("signal_max_age_minutes", 60))
+                cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_min)
+                recent_rejections = await session.execute(
+                    select(
+                        SignalModel.strategy_type,
+                        SignalModel.direction,
+                        SignalModel.entry_zone_min,
+                        SignalModel.entry_zone_max,
+                        SignalModel.skip_reason,
+                    ).where(
+                        SignalModel.symbol == symbol,
+                        SignalModel.status.in_(("SKIPPED", "EXPIRED")),
+                        SignalModel.created_at >= cutoff,
+                    )
+                )
+                rejected = {
+                    (row[0], row[1], _rejection_zone_key(row[2]),
+                     _rejection_zone_key(row[3]), _rejection_reason_key(row[4]))
+                    for row in recent_rejections.fetchall()
+                }
                 for signal, volume_confirmed in to_persist:
                     key = (signal.strategy_type, signal.direction)
                     if key in seen:
@@ -342,6 +380,15 @@ class SignalService:
                         # not execute it (no db row), just record as deduped.
                         signal.status = "SKIPPED"
                         signal.skip_reason = "Duplicate of existing signal"
+                        continue
+                    rejection_key = (
+                        signal.strategy_type,
+                        signal.direction,
+                        _rejection_zone_key(signal.entry_zone_min),
+                        _rejection_zone_key(signal.entry_zone_max),
+                        _rejection_reason_key(signal.skip_reason),
+                    )
+                    if signal.status == "SKIPPED" and rejection_key in rejected:
                         continue
                     model = SignalModel(
                         symbol=symbol,
@@ -360,6 +407,8 @@ class SignalService:
                     await session.flush()
                     signal.db_id = model.id
                     seen.add(key)
+                    if signal.status == "SKIPPED":
+                        rejected.add(rejection_key)
                 await session.commit()
         except Exception:
             logger.exception("[%s] Failed to persist signals", symbol)

@@ -28,13 +28,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Binance USDS-M Futures VIP 0 taker fee is 0.04%. With 10% BNB fee discount
-# (paying fees in BNB), this becomes 0.036%. The old constant 0.045% was the
-# SPOT trading rate (0.05% - 10%) mistakenly applied to futures — it
-# overstates per-trade fees by ~0.009%/side and inflates round-trip cost
-# by ~0.018%, which understates realized PnL vs Binance's actual statement.
+# Account-calibrated Binance USDS-M rates (2026-10-20): commissionRate returned
+# 0.05% taker / 0.02% maker on the active account; 312 account-wide fills over
+# seven days paid an effective ~0.0446% per fill when BNB commissions were
+# converted to USDT. The 0.045% taker model reflects the observed BNB discount.
+# These fills are account-wide and are not attributable to bot trades (the bot
+# database had no trade rows during the same read-only check).
 MAKER_FEE = 0.00018   # 0.018% — 0.02% maker * 0.9 BNB discount
-TAKER_FEE = 0.00036   # 0.036% — 0.04% taker * 0.9 BNB discount
+TAKER_FEE = 0.00045   # 0.045% — observed 0.05% taker * ~0.9 BNB discount
 
 #: Charged per side against the fill price. Deliberately conservative: a
 #: STOP_MARKET in a thin book fills through the bid/ask.
@@ -82,7 +83,7 @@ class CostModel:
         """Round-trip cost expressed in R.
 
         Fees are a fraction of NOTIONAL while R divides by the risk distance,
-        so the same 0.09% costs ~4x more R at a 0.25% stop than at a 1% one.
+        so the same 0.11% costs ~4x more R at a 0.25% stop than at a 1% one.
         That inverse relationship IS the dominant cost drag on this strategy:
         panel cycle 1 measured a tight-stop variant at gross +0.039R and net
         -0.320R for exactly this reason.
@@ -92,10 +93,11 @@ class CostModel:
         return (entry * self.round_trip) / risk_dist
 
 
-#: What live actually pays. Not the optimistic 0.0007 the harness previously
-#: assumed.
+#: Modeled live execution case: taker entry and exit using the fee and
+#: per-side slippage assumptions above.
 LIVE = CostModel.for_fill_mode("taker")
 
-#: Kept for callers that still read the flat constant. Now the measured live
-#: round trip (0.0009 + 0.0002 slippage), NOT the old assumed 0.0007.
+#: Kept for callers that still read the flat constant. The modeled round trip
+#: is 0.00090 taker fees + 0.00020 slippage = 0.00110, above the old assumed
+#: 0.0007.
 FEE_ROUND_TRIP = LIVE.round_trip

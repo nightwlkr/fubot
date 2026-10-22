@@ -152,6 +152,39 @@ class TestUsedRFrom:
             "an unreadable daily total must STOP trading, not allow it"
         assert stopped, "the fail-closed path must trip the daily stop"
 
+    def test_unrealized_loss_alert_reports_combined_usage_and_fires_once(self):
+        """The halt threshold includes open losses, so its alert must report
+        the same amount and a latched check must not alert again."""
+        import asyncio
+        from backend.core.daily_reset import DailyResetService
+
+        class Alerts:
+            def __init__(self):
+                self.hits = []
+            async def daily_limit_hit(self, used_r, limit_r):
+                self.hits.append((used_r, limit_r))
+
+        class Bot:
+            async def stop(self):
+                pass
+
+        async def scenario():
+            alerts = Alerts()
+            svc = DailyResetService(settings={"daily_loss_limit_r": -3.0},
+                                    bot_engine=Bot(), alert_service=alerts)
+            async def stats():
+                return {"used_r": 0.0, "limit_r": 3.0}
+            svc.get_daily_stats = stats
+            positions = {"BTCUSDT": {"unrealizedPnl": -3.0,
+                                     "entryPrice": 100.0, "quantity": 1.0,
+                                     "initialRiskDistance": 1.0}}
+
+            assert await svc.check_and_enforce_limit(positions) is False
+            assert await svc.check_and_enforce_limit(positions) is False
+            assert alerts.hits == [(3.0, 3.0)]
+
+        asyncio.run(scenario())
+
 
 # -------------------------------------------------------------------- today_utc
 

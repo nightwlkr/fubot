@@ -29,6 +29,11 @@ from backend.core.websocket_manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
+
+class BotModeConflictError(RuntimeError):
+    """Raised when a running engine is asked to start in another mode."""
+
+
 # Bounds on the scan cadence. Mirrors config.py (ge=10, le=300) but enforced
 # at the point of use as well, so a bad settings row cannot spin the loop.
 MIN_SCAN_INTERVAL = 10
@@ -72,6 +77,8 @@ class BotEngine:
         self.position_manager = None  # set by main.py after construction
 
         self._running = False
+        self._stopping = False
+        self._lifecycle_generation = 0
         self._mode: str = settings.get("bot_mode", "paper")
         self._task: Optional[asyncio.Task] = None
         self._last_scan: Optional[datetime] = None
@@ -91,34 +98,70 @@ class BotEngine:
         mode = mode.lower()
         if mode not in ("paper", "live"):
             raise ValueError("Mode must be 'paper' or 'live'")
+        if self._stopping:
+            raise BotModeConflictError("Bot is stopping; retry after it finishes")
 
+        if self._running:
+            # `_running` is set before the first await below, so concurrent
+            # requests on this event loop see the in-progress start too.
+            if self._task is None or not self._task.done():
+                if mode != self._mode:
+                    raise BotModeConflictError(
+                        f"Bot is already running in {self._mode} mode; stop it before switching modes"
+                    )
+                logger.info("BotEngine: duplicate start ignored in %s mode", mode)
+                return
+            # Recover if a loop exited unexpectedly while leaving the flag set.
+            self._running = False
+        elif self._task is not None and not self._task.done():
+            raise BotModeConflictError("Bot is still shutting down; retry after it finishes")
+
+        self._lifecycle_generation += 1
+        generation = self._lifecycle_generation
         self._running = True
         self._mode = mode
         # Tell the position manager the mode — in live mode it must update
         # exchange stops on BE-trailing and cancel/place orders on close.
         if self.position_manager is not None:
             self.position_manager._mode = mode
-            await self.position_manager.set_mode(mode)
+            try:
+                await self.position_manager.set_mode(mode)
+            except BaseException:
+                if generation == self._lifecycle_generation:
+                    self._running = False
+                raise
+        if generation != self._lifecycle_generation or not self._running:
+            raise BotModeConflictError("Bot start was interrupted by a stop request")
         self._started_at = datetime.now(timezone.utc)
         self._task = asyncio.create_task(self._main_loop())
         await self.alerts.bot_started(mode)
+        if generation != self._lifecycle_generation or not self._running:
+            raise BotModeConflictError("Bot start was interrupted by a stop request")
         await ws_manager.broadcast({"type": "bot_status",
                                     "data": {"status": "running", "mode": mode}})
         logger.info(f"BotEngine: started in {mode} mode")
 
     async def stop(self):
         """Gracefully stop the bot."""
+        if self._stopping:
+            return
+        self._stopping = True
+        self._lifecycle_generation += 1
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        await self.alerts.bot_stopped()
-        await ws_manager.broadcast({"type": "bot_status",
-                                    "data": {"status": "stopped", "mode": self._mode}})
-        logger.info("BotEngine: stopped")
+        task = self._task
+        try:
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            await self.alerts.bot_stopped()
+            await ws_manager.broadcast({"type": "bot_status",
+                                        "data": {"status": "stopped", "mode": self._mode}})
+            logger.info("BotEngine: stopped")
+        finally:
+            self._stopping = False
 
     async def _main_loop(self):
         """Main trading loop — runs every check_interval_seconds."""
@@ -130,6 +173,8 @@ class BotEngine:
                 start = datetime.now(timezone.utc)
 
                 await self._scan_and_evaluate()
+                if not self._running:
+                    break
 
                 # Equity snapshot every 5 scans
                 if self._scan_count % 5 == 0:
@@ -193,7 +238,50 @@ class BotEngine:
         try:
             open_positions = await self.orders.get_all_open_positions()
         except Exception as exc:
-            logger.warning("Could not fetch open positions for the scan: %s", exc)
+            if self._mode == "live":
+                logger.error(
+                    "Could not fetch open positions for the scan; skipping this pass because "
+                    "account exposure is unknown (%s)", type(exc).__name__)
+                return
+            # Paper positions are tracked in the local DB; a missing exchange
+            # snapshot must not disable offline/paper evaluation.
+            logger.warning(
+                "Could not fetch exchange positions in paper mode; continuing with "
+                "local position checks only (%s)", type(exc).__name__)
+            open_positions = {}
+
+        if self._mode == "live" and open_positions:
+            # Unrealized loss must use the position's frozen entry-to-stop risk,
+            # not a generic percent-of-entry proxy. Pull the bases in one DB
+            # read only when there is live exposure to account for.
+            try:
+                if self.session_factory is None:
+                    raise RuntimeError("DB session factory unavailable for open-position risk bases")
+                async with self.session_factory() as session:
+                    result = await session.execute(
+                        select(Position.symbol, Position.initial_risk_distance).where(
+                            Position.status == "OPEN",
+                            Position.mode == "live",
+                        )
+                    )
+                    rows = result.fetchall()
+                risk_by_symbol = {}
+                for row in rows:
+                    if row[0] in risk_by_symbol:
+                        raise RuntimeError(f"Multiple open DB positions for {row[0]}")
+                    risk_by_symbol[row[0]] = (
+                        float(row[1]) if row[1] is not None else None)
+                for symbol, position in open_positions.items():
+                    position["initialRiskDistance"] = risk_by_symbol.get(symbol)
+            except Exception as exc:
+                logger.error(
+                    "Could not load frozen risk bases for open live positions; "
+                    "skipping this pass (%s)", type(exc).__name__)
+                return
+        # The breaker needs exchange PnL and the frozen R basis from this
+        # snapshot. Keep it separate from the scan occupancy map, which is
+        # updated as new positions execute below.
+        daily_guard_positions = dict(open_positions) if self._mode == "live" else {}
 
         for symbol in symbols:
             if not self._running:
@@ -206,10 +294,8 @@ class BotEngine:
                     continue
 
                 # Check daily loss limit
-                if not await self.daily_reset.check_and_enforce_limit(open_positions):
+                if not await self.daily_reset.check_and_enforce_limit(daily_guard_positions):
                     logger.info(f"Daily limit reached, skipping {symbol}")
-                    stats = await self.daily_reset.get_daily_stats()
-                    await self.alerts.daily_limit_hit(stats["used_r"], stats["limit_r"])
                     break
 
                 # Per-symbol cooldown: don't re-enter a symbol traded recently
@@ -244,6 +330,23 @@ class BotEngine:
                     )
 
                     if decision.decision == "EXECUTE":
+                        # Correlation and same-symbol guards run for later
+                        # candidates in this pass. Include this fill now; the
+                        # exchange snapshot above is otherwise stale until the
+                        # next scan.
+                        plan = decision.plan or {}
+                        open_positions[signal.symbol] = {
+                            "side": signal.direction,
+                            "quantity": float(plan.get("size") or 1.0),
+                        }
+                        if self._mode == "live":
+                            daily_guard_positions[signal.symbol] = {
+                                "side": signal.direction,
+                                "quantity": float(plan.get("size") or 1.0),
+                                "unrealizedPnl": 0.0,
+                                "initialRiskDistance": float(
+                                    plan.get("initial_risk_distance") or 0.0),
+                            }
                         await ws_manager.broadcast({"type": "position_update", "data": {
                             "symbol": signal.symbol, "side": signal.direction,
                             "mode": self._mode}})

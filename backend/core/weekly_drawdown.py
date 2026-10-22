@@ -48,6 +48,7 @@ class WeeklyDrawdownGuard:
         # is ignored. This lets the user "start fresh" without waiting for the
         # natural Mon-Sun boundary.
         self._reset_from: Optional[datetime] = None
+        self._reset_from_loaded = False
 
     def get_weekly_limit_r(self) -> float:
         """Get the weekly drawdown limit in R (positive value)."""
@@ -77,6 +78,17 @@ class WeeklyDrawdownGuard:
         # Check if we already hit the limit this week
         now = datetime.now(timezone.utc)
         today = now.date()
+
+        # Full resets are persisted so they survive a service restart. Restore
+        # the cutoff before calculating the weekly window, or the first scan
+        # after restart counts the historical losses the user reset past.
+        if not self._reset_from_loaded:
+            self._reset_from = await self._get_reset_from()
+            self._reset_from_loaded = True
+
+        # A persisted reset only applies through its UTC calendar day.
+        if self._reset_from is not None and self._reset_from.date() < today:
+            self._reset_from = None
 
         # Clear manual reset grace at UTC midnight
         if self._manual_reset_time is not None:
@@ -155,6 +167,7 @@ class WeeklyDrawdownGuard:
         now = datetime.now(timezone.utc)
         self._weekly_limit_hit = False
         self._weekly_limit_date = None
+        self._reset_from_loaded = True
         if full_reset:
             self._reset_from = now
             self._manual_reset_time = None

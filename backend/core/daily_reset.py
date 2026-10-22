@@ -6,6 +6,7 @@ both the engine's scan loop and request handlers concurrently).
 import logging
 import math
 from datetime import datetime, date, timezone
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from sqlalchemy import select
@@ -237,13 +238,19 @@ class DailyResetService:
         limit = stats["limit_r"]
         used = stats["used_r"]
 
-        # Add unrealized losses from open positions
+        # Combine realized and unrealized PnL before applying the shared NET
+        # daily-loss rule. Profitable open positions offset losses, just as
+        # closed winners offset closed losses.
         if open_positions:
-            unrealized_r_loss = self._unrealized_loss_in_r(open_positions)
-            used = used + unrealized_r_loss
+            unrealized_pnl_r = self._unrealized_pnl_in_r(open_positions)
+            # If an alternate stats provider omits the net total, retain its
+            # known realized loss but never invent a realized-profit offset.
+            realized_pnl_r = float(stats.get("total_pnl_r", -used))
+            combined_pnl_r = realized_pnl_r + unrealized_pnl_r
+            used = used_r_from(SimpleNamespace(total_pnl_r=combined_pnl_r))
 
         if used >= limit:
-            await self._trigger_daily_stop()
+            await self._trigger_daily_stop(used, limit)
             return False
 
         # Warning at 80% of limit (epsilon: 3.0 * 0.8 == 2.4000000000000004)
@@ -253,26 +260,36 @@ class DailyResetService:
 
         return True
 
-    def _unrealized_loss_in_r(self, open_positions: dict) -> float:
-        """Calculate unrealized loss in R units from open positions.
+    def _unrealized_pnl_in_r(self, open_positions: dict) -> float:
+        """Calculate signed unrealized PnL in R using each frozen risk basis.
 
-        Only counts losses (negative unrealized PnL), ignoring profits.
+        A live position without a finite positive frozen risk basis is
+        unmeasurable; fail closed so it cannot create free daily loss capacity.
         """
-        total_unrealized_r = 0.0
+        total_unrealized_pnl_r = 0.0
         for symbol, pos in open_positions.items():
-            unrealized_pnl = float(pos.get("unrealizedPnl", 0) or 0)
-            if unrealized_pnl < 0:
-                entry = float(pos.get("entryPrice", 0) or 0)
-                qty = float(pos.get("quantity", 0) or 0)
-                # Use a reasonable risk distance estimate if not stored
-                # For futures, 1R is typically ~1% of entry price
-                risk_distance = abs(entry) * 0.01 if entry > 0 else 0
-                if qty > 0 and risk_distance > 0:
-                    r_multiple = unrealized_pnl / (qty * risk_distance)
-                    total_unrealized_r += r_multiple
-        return total_unrealized_r
+            required = ("unrealizedPnl", "quantity", "initialRiskDistance")
+            if any(key not in pos or pos[key] is None for key in required):
+                logger.error("Open position %s is missing a daily-risk input", symbol)
+                return math.inf
+            try:
+                unrealized_pnl = float(pos["unrealizedPnl"])
+                quantity = float(pos["quantity"])
+                risk_distance = float(pos["initialRiskDistance"])
+            except (TypeError, ValueError, OverflowError):
+                logger.error("Open position %s has an unreadable daily-risk input", symbol)
+                return math.inf
+            if not all(math.isfinite(value) for value in
+                       (unrealized_pnl, quantity, risk_distance)):
+                logger.error("Open position %s has a non-finite daily-risk input", symbol)
+                return math.inf
+            if quantity <= 0 or risk_distance <= 0:
+                logger.error("Open position %s has no valid frozen risk basis", symbol)
+                return math.inf
+            total_unrealized_pnl_r += unrealized_pnl / (quantity * risk_distance)
+        return total_unrealized_pnl_r
 
-    async def _trigger_daily_stop(self):
+    async def _trigger_daily_stop(self, used_r: float, limit_r: float):
         """Emergency stop: bot stops trading for the rest of the day."""
         self._limit_hit_today = True
         today = today_utc()
@@ -292,8 +309,7 @@ class DailyResetService:
             await self.bot.stop()
 
         if self.alerts:
-            stats = await self.get_daily_stats()
-            await self.alerts.daily_limit_hit(stats["used_r"], stats["limit_r"])
+            await self.alerts.daily_limit_hit(used_r, limit_r)
 
     async def update_daily_summary(self, pnl_r: float, pnl_usdt: float) -> None:
         """Called after each trade closes to update the daily summary.

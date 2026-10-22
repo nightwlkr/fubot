@@ -21,6 +21,7 @@ from backend.indicators.three_candle import detect_three_candles, evaluate_three
 from backend.indicators.choch import detect_choch
 from backend.indicators.trend import analyze_trend_bias
 from backend.indicators.volume_profile import get_volume_confirmed_filter
+from backend.indicators.regime import analyze_market_regime, should_trade_regime
 from backend.core.cost_model import LIVE as COST_MODEL
 from backend.backtest_data import last_closed_before
 from backend.backtest_data import align_window, bars_expected, fetch_klines, window_for_days
@@ -33,7 +34,8 @@ logger = logging.getLogger(__name__)
 # as maker. Live entries are GTC (not GTX post-only) at the zone midpoint with
 # gate 4 admitting +-1%, so they cross the spread as a TAKER — measured: 27 of
 # 30 consecutive fills came in BETTER than the planned midpoint, which a resting
-# maker order never does. Costs are now the measured 0.0011 round trip.
+# maker order never does. Modeled costs are 0.00110 per round trip: 0.00090
+# account-calibrated taker fees plus 0.00020 assumed slippage.
 
 #: Re-exported so `scripts/backtest.py` and existing callers keep working. The
 #: value is derived from COST_MODEL, never defined twice.
@@ -45,8 +47,8 @@ def fee_in_r(entry: float, risk_dist: float) -> float:
 
     Fees are a fraction of NOTIONAL; R divides by the risk distance. So the same
     ~0.11% costs 4x more R at a 0.5% stop than at a 2% stop — the effect panel
-    cycle 1 measured as the dominant cost drag, and the reason this strategy
-    loses money: at the observed 0.123% stops a round trip costs ~0.90R.
+    cycle 1 measured as the dominant cost drag. At the observed 0.123% stop, a
+    round trip costs about 0.90R under the current account-calibrated model.
 
     `risk_dist` is a PRICE distance (entry - stop), not a stop fraction.
     """
@@ -249,6 +251,7 @@ class Backtester:
         self.trade_neutral = bool(self.settings.get("trade_neutral_markets", True))
         self.min_strength = str(self.settings.get("trade_min_trend_strength", "MODERATE")).upper()
         self.volume_filter_enabled = bool(self.settings.get("volume_filter_enabled", False))
+        self.regime_filter_enabled = bool(self.settings.get("regime_filter_enabled", True))
         self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
         self.signal_max_age_ms = int(
             self.settings.get("signal_max_age_minutes", DEFAULT_SIGNAL_MAX_AGE_MIN)) * 60_000
@@ -258,6 +261,10 @@ class Backtester:
         self.three_candle_enabled = bool(self.settings.get("strategy_3candle_enabled", True))
         self.choch_enabled = bool(self.settings.get("strategy_choch_enabled", True))
         self._strength_rank = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
+        self._context_cache: dict[int, tuple[float, object, object]] = {}
+        self._last_fvg_idx: Optional[int] = None
+        self._last_choch_idx: Optional[int] = None
+        self._last_choch_signature: Optional[tuple[str, int]] = None
 
     def _source_index(self, candles: list[dict], at_ms: int) -> int:
         """Index in `candles` of the last bar fully closed at `at_ms`.
@@ -268,48 +275,56 @@ class Backtester:
         """
         return last_closed_before(candles, at_ms)
 
+    @staticmethod
+    def _advance_closed_index(candles: list[dict], index: int, at_ms: int) -> int:
+        """Advance a sorted candle cursor to the last bar closed by ``at_ms``."""
+        while index + 1 < len(candles):
+            close_time = candles[index + 1].get("close_time")
+            if close_time is None or close_time >= at_ms:
+                break
+            index += 1
+        return index
+
     def _detect_candidates(self, k1h: list[dict], k5m: list[dict], k15m: list[dict],
-                           at_idx: int) -> tuple[list[tuple], object]:
-        """Detect + evaluate signals using only candles knowable at `at_idx`.
+                           at_ms: int) -> tuple[list[tuple], object, object]:
+        """Detect new signals from bars closed by `at_ms`.
 
-        Mirrors signal_service.scan_symbol: 1h context (ATR/trend), FVG on 1h,
-        3-candle on 5m, CHoCH on 15m.
-
-        Each interval's "up to now" view is truncated by WALL-CLOCK TIME via
-        `_source_index`, not by proportional index arithmetic. The old code
-        scaled each lower series' length by the 1h index, which mapped 1h bar 500
-        (hour 500) onto 5m bar 500 (hour 41.7) whenever the two series spanned
-        different periods — so the trend filter read a different month than the
-        entries it filtered.
-
-        NOTE the 1h view is `k1h[:k1h_idx + 1]` and `k1h_idx` is the last bar
-        CLOSED at `at_idx`'s open_time — i.e. bar `at_idx` itself is EXCLUDED,
-        because it is still forming. Anything computed from the returned bias
-        therefore shares the detector's exact view; computing the bias in the
-        caller from `k1h[:at_idx + 1]` gave the filters one bar the detector
-        could not see, which is lookahead in the filter.
-
-        Returns `(candidates, bias)` where each candidate is
-        `(strategy, direction, evaluation, vol_source, timeframe, zone)` and
-        `zone` is the entry ZONE `(lo, hi)` the live bot rests its LIMIT
-        midpoint inside — not the point estimate. All three detectors expose a
-        real zone, so no synthetic fallback is needed here.
+        The scan clock is the close of each 5m bar. A 3CANDLE can therefore be
+        new on every scan, while FVG and CHoCH are evaluated only when their
+        own 1h or 15m interval advances. Candidate tuples include the index of
+        their signal bar in its source interval.
         """
-        at_ms = k1h[at_idx]["open_time"]
         k1h_idx = self._source_index(k1h, at_ms)
         k5m_idx = self._source_index(k5m, at_ms)
         k15m_idx = self._source_index(k15m, at_ms)
+        return self._detect_candidates_at(
+            k1h, k5m, k15m, at_ms, k1h_idx, k5m_idx, k15m_idx)
+
+    def _detect_candidates_at(
+        self, k1h: list[dict], k5m: list[dict], k15m: list[dict], at_ms: int,
+        k1h_idx: int, k5m_idx: int, k15m_idx: int,
+    ) -> tuple[list[tuple], object, object]:
+        """Detect only signals confirmed on the latest closed interval bars."""
         if k1h_idx < 0 or k5m_idx < 0 or k15m_idx < 0:
-            return [], None
+            return [], None, None
 
         # need enough history for indicators
         k1h_u = k1h[:k1h_idx + 1]
         if len(k1h_u) < 60:
-            return [], None
+            return [], None, None
         k5m_u = k5m[:k5m_idx + 1]
         k15m_u = k15m[:k15m_idx + 1]
-        atr = calculate_atr(k1h_u, 14) or 0.0
-        bias = analyze_trend_bias([c["close"] for c in k1h_u])
+        if k1h_idx not in self._context_cache:
+            self._context_cache[k1h_idx] = (
+                calculate_atr(k1h_u, 14) or 0.0,
+                analyze_trend_bias([c["close"] for c in k1h_u]),
+                analyze_market_regime(
+                    [c["high"] for c in k1h_u],
+                    [c["low"] for c in k1h_u],
+                    [c["close"] for c in k1h_u],
+                ),
+            )
+        atr, bias, regime = self._context_cache[k1h_idx]
 
         # Strategy toggles, mirroring signal_service.scan_symbol. Without them a
         # backtest cannot isolate one strategy's fill path: `run` takes a single
@@ -319,31 +334,40 @@ class Backtester:
         # D1; the harness silently did not, which is why FVG-only results could
         # never be checked against a 3CANDLE-only or CHOC-only run.
         cands: list[tuple] = []
-        if self.fvg_enabled:
-            for f in detect_fvg(k1h_u, ""):
+        if self.fvg_enabled and self._last_fvg_idx != k1h_idx:
+            self._last_fvg_idx = k1h_idx
+            for f in detect_fvg(k1h_u[-3:], ""):
                 e = evaluate_fvg_entry(f, atr, self.rr_min)
                 if e["is_valid"]:
                     cands.append(("FVG", "LONG" if f.direction == "BULLISH" else "SHORT", e,
-                                  k1h_u, "1h", (f.zone_min, f.zone_max)))
+                                  k1h_u, "1h", (f.zone_min, f.zone_max), k1h_idx))
         if self.three_candle_enabled:
-            for p in detect_three_candles(k5m_u, "", "5m"):
+            for p in detect_three_candles(k5m_u[-3:], "", "5m"):
                 e = evaluate_three_candle_entry(p, atr, self.rr_min)
                 if e["is_valid"]:
                     cands.append(("3CANDLE", "LONG" if p.direction == "BULLISH" else "SHORT", e,
-                                  k5m_u, "5m", (p.entry_zone_min, p.entry_zone_max)))
-        if self.choch_enabled:
-            for ch in detect_choch(k15m_u, "", "15m", atr, self.rr_min):
-                if ch.is_valid:
+                                  k5m_u, "5m", (p.entry_zone_min, p.entry_zone_max), k5m_idx))
+        if self.choch_enabled and self._last_choch_idx != k15m_idx:
+            self._last_choch_idx = k15m_idx
+            found = [ch for ch in detect_choch(k15m_u, "", "15m", atr, self.rr_min)
+                     if ch.is_valid]
+            if found:
+                ch = found[-1]
+                signature = (ch.direction, ch.index)
+                if signature != self._last_choch_signature:
                     e = {"entry_price": (ch.pullback_entry_zone[0] + ch.pullback_entry_zone[1]) / 2,
                          "stop_loss": ch.stop_loss, "take_profit": ch.take_profit,
                          "rr_ratio": ch.rr_ratio or 0.0, "is_valid": True}
                     cands.append(("CHOC", "LONG" if ch.direction == "BULLISH" else "SHORT", e,
                                   k15m_u, "15m", (ch.pullback_entry_zone[0],
-                                                  ch.pullback_entry_zone[1])))
-        return cands, bias
+                                                  ch.pullback_entry_zone[1]), k15m_idx))
+                self._last_choch_signature = signature
+            else:
+                self._last_choch_signature = None
+        return cands, bias, regime
 
     def _passes_filters(self, direction: str, rr: float, entry: float, sl: float,
-                        bias, vol_candles: list[dict], skip: dict) -> bool:
+                        bias, vol_candles: list[dict], skip: dict, regime=None) -> bool:
         """Apply the same filter chain as scan_symbol. Returns True if tradable."""
         min_rank = self._strength_rank.get(self.min_strength, 2)
         aligned = ((bias.direction == "BULLISH" and direction == "LONG") or
@@ -367,7 +391,24 @@ class Backtester:
         if bias.rsi_zone == "OVERSOLD" and direction == "SHORT":
             skip["rsi_oversold"] = skip.get("rsi_oversold", 0) + 1
             return False
-        if (self.volume_filter_enabled
+        regime_bypasses_volume = False
+        if self.regime_filter_enabled:
+            if regime is None:
+                skip["unknown_regime"] = skip.get("unknown_regime", 0) + 1
+                return False
+            if regime.regime == "RANGING":
+                skip["ranging_regime"] = skip.get("ranging_regime", 0) + 1
+                return False
+            if regime.regime in ("STRONG_BULL", "STRONG_BEAR"):
+                regime_ok, _ = should_trade_regime(regime, direction)
+                if not regime_ok:
+                    skip["regime_counter_trend"] = skip.get("regime_counter_trend", 0) + 1
+                    return False
+                # The live signal pipeline's strong-regime branch bypasses its
+                # volume check; preserve that behavior for the replay.
+                regime_bypasses_volume = True
+
+        if (self.volume_filter_enabled and not regime_bypasses_volume
                 and not get_volume_confirmed_filter(direction, vol_candles).passes_filter):
             skip["volume"] = skip.get("volume", 0) + 1
             return False
@@ -415,10 +456,10 @@ class Backtester:
         trailing stop "catch" a move it could not have been placed in time for.
         The live engine re-checks every ~30s and would often do better than this.
 
-        KNOWN LIMITATION, stated rather than hidden: this resolves each trade to
-        completion before the outer loop advances, so it is correct on interval
-        and strictly post-fill, but it is not an event loop — overlapping
-        positions cannot overlap in time, and `max_open > 1` is not honoured.
+        `run` resolves each trade to completion before resuming its 5m scan and
+        holds the simulated slot through the exit candle close. This is a
+        conservative single-position replay, not a portfolio event loop;
+        `max_open > 1` is not supported.
         """
         t = trade
         # Live defaults (routers/settings.py). `None` disables a rule.
@@ -476,11 +517,10 @@ class Backtester:
 
     def run(self, symbol: str, k1h: list[dict], k5m: list[dict], k15m: list[dict],
             max_open: int = 1) -> BacktestResult:
-        """Walk the 1h series forward; on each bar detect signals, then resolve
-        each fill to its exit on the signal's OWN interval.
+        """Scan each closed 5m bar and resolve one position at a time.
 
         No-lookahead guarantees, precisely:
-          - detection uses only candles CLOSED at the detection bar's open_time,
+          - detection uses only candles CLOSED at the scan time,
             so the still-forming 1h bar is excluded from the detectors AND from
             the bias the filters read (they share one truncated view);
           - a fill lands strictly AFTER the signal bar, on the signal's own
@@ -491,16 +531,31 @@ class Backtester:
         See `_resolve_exit` for what this deliberately does NOT model.
         """
         result = BacktestResult(symbol=symbol, candles=len(k1h))
-        vol_stride = 10  # re-evaluate volume every N candles (matches scan cadence)
+        if max_open != 1:
+            logger.warning("Backtester supports one open position; max_open=%s ignored", max_open)
+        busy_until_ms = -1
+        indices = {"1h": -1, "5m": -1, "15m": -1}
+        series = {"1h": k1h, "5m": k5m, "15m": k15m}
 
-        for i in range(60, len(k1h)):
-            if i % vol_stride != 0:
+        for scan_candle in k5m:
+            close_time = scan_candle.get("close_time")
+            if close_time is None:
                 continue
-
-            cands, bias = self._detect_candidates(k1h, k5m, k15m, i)
+            at_ms = int(close_time) + 1
+            for tf in indices:
+                indices[tf] = self._advance_closed_index(series[tf], indices[tf], at_ms)
+            if indices["1h"] < 59:
+                continue
+            cands, bias, regime = self._detect_candidates_at(
+                k1h, k5m, k15m, at_ms, indices["1h"], indices["5m"], indices["15m"])
             if bias is None:
                 continue
-            for strategy, direction, e, vol_src, tf, zone in cands:
+            if at_ms < busy_until_ms:
+                continue
+            for candidate in cands:
+                strategy, direction, e, vol_src, tf, zone = candidate[:6]
+                signal_idx = (candidate[6] if len(candidate) > 6 else
+                              self._source_index(vol_src, at_ms))
                 sl = e["stop_loss"]
                 tp = e["take_profit"]
                 zone_lo, zone_hi = zone
@@ -513,13 +568,13 @@ class Backtester:
                 entry = (zone_lo + zone_hi) / 2.0
                 vol_window = vol_src[-15:-5] if len(vol_src) > 15 else vol_src
                 if not self._passes_filters(direction, e["rr_ratio"], entry, sl,
-                                            bias, vol_window, result.skipped):
+                                            bias, vol_window, result.skipped, regime=regime):
                     continue
                 # Live fill semantics: a LIMIT resting at the zone midpoint on
                 # the signal's OWN interval, not the next 1h open. Filling on the
                 # wrong interval was a 12x time-scale mismatch.
                 tf_candles = {"1h": k1h, "5m": k5m, "15m": k15m}[tf]
-                sig_idx = self._source_index(tf_candles, k1h[i]["open_time"])
+                sig_idx = signal_idx
                 filled = fill_at_midpoint(
                     tf_candles, sig_idx, zone_lo, zone_hi, self.signal_max_age_ms)
                 if filled is None:
@@ -542,8 +597,13 @@ class Backtester:
                 trade._risk_dist = risk_dist  # type: ignore[attr-defined]
                 result.trades.append(trade)
                 self._resolve_exit(trade, tf_candles)
-                break  # one position at a time (max_open is not honoured; see
-                       # `_resolve_exit`'s KNOWN LIMITATION)
+                if trade.exit_idx is None:
+                    busy_until_ms = float("inf")
+                else:
+                    exit_close = tf_candles[trade.exit_idx].get("close_time")
+                    busy_until_ms = (float("inf") if exit_close is None
+                                     else int(exit_close) + 1)
+                break
 
         return result
 
@@ -567,8 +627,11 @@ class LookaheadProbeBacktester(Backtester):
     fail this way cannot be trusted when it says "no lookahead".
     """
 
-    def _detect_candidates(self, k1h, k5m, k15m, at_idx):
-        return super()._detect_candidates(k1h, k5m, k15m, len(k1h) - 1)
+    def _detect_candidates(self, k1h, k5m, k15m, at_ms):
+        candidates, _, regime = super()._detect_candidates(k1h, k5m, k15m, at_ms)
+        # Deliberately leak the final hourly context into every historical scan.
+        bias = analyze_trend_bias([c["close"] for c in k1h])
+        return candidates, bias, regime
 
 
 async def run_backtest(symbol: str, days: int = 30, settings: Optional[dict] = None,

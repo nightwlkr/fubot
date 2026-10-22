@@ -40,11 +40,12 @@ from backend.indicators.vwap import detect_vwap_reversion
 from backend.indicators.orb import detect_orb
 from backend.indicators.order_block import detect_order_blocks, fvg_within_order_block
 from backend.indicators.fvg import detect_fvg, evaluate_fvg_entry
+from backend.core.cost_model import DEFAULT_SLIPPAGE, TAKER_FEE
 
-# Fee model: taker 0.05% × 2 (entry + exit) + slippage 0.02% × 2 = 0.14% round-trip
-FEE_RATE = 0.0005       # 0.05% per side (taker)
-SLIPPAGE = 0.0002       # 0.02% per side
-ROUND_TRIP_COST = (FEE_RATE + SLIPPAGE) * 2  # 0.14% total
+# Keep prototype comparisons aligned with the account-calibrated shared model.
+FEE_RATE = TAKER_FEE
+SLIPPAGE = DEFAULT_SLIPPAGE
+ROUND_TRIP_COST = (FEE_RATE + SLIPPAGE) * 2
 
 # Binance klines max per request
 KLINCE_MAX = 1000
@@ -382,7 +383,7 @@ async def main() -> None:
     if args.days * 288 > KLINCE_MAX:
         print(f"  ⚠️  WARNING: --days {args.days} requested {args.days*288} bars but Binance caps at {KLINCE_MAX}.")
         print(f"     Actual window is ~{actual_days:.1f} days, NOT {args.days}.")
-    print(f"Fee model: {FEE_RATE*100:.2f}% taker x 2 + {SLIPPAGE*100:.2f}% slippage x 2 = {ROUND_TRIP_COST*100:.2f}% round-trip")
+    print(f"Fee model: {FEE_RATE*100:.3f}% taker x 2 + {SLIPPAGE*100:.3f}% slippage x 2 = {ROUND_TRIP_COST*100:.3f}% round-trip")
     print(f"R:R target: {args.rr_min}:1  |  Max open/symbol: {args.max_open}")
     print(f"ATR: per-index series (lookahead-free)")
     print()

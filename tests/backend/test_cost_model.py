@@ -46,10 +46,10 @@ class TestFillModes:
 
 
 class TestMagnitude:
-    def test_live_round_trip_is_above_the_old_assumed_constant(self):
-        """The harness used to charge 0.0007. Real cost is higher."""
+    def test_modeled_taker_round_trip_is_above_the_old_assumed_constant(self):
+        """The harness used to charge 0.0007; modeled taker cost is 0.00110."""
         assert FEE_ROUND_TRIP > 0.0007
-        assert FEE_ROUND_TRIP == pytest.approx(0.0010, abs=0.0002)
+        assert FEE_ROUND_TRIP == pytest.approx(0.00110, abs=1e-12)
 
     def test_round_trip_includes_both_fees_and_both_slippages(self):
         m = CostModel()
@@ -89,28 +89,26 @@ class TestInverseWithStopDistance:
         assert LIVE.round_trip_in_r(100.0, -1.0) == float("inf")
 
 
-class TestMatchesMeasuredLiveTrade:
+class TestModeledCostOnMeasuredLiveTrade:
     """Trade 423 (UNIUSDT LONG, real fill 7.201, frozen risk distance 0.008838).
 
     This is the number that explains the losses. The stop was 0.123% of entry
-    while a round trip costs ~0.10% of notional, so costs came to 0.90R — nearly
-    a whole R per trade. Against a 3R target that demands a ~30% win rate just
-    to break even, and the measured live win rate is ~11%.
+    while the model charges 0.11% of notional round trip, so modeled costs are
+    ~0.90R. This consumes most of the initial risk budget and makes this tight
+    stop materially more expensive than the wider-stop trades.
     """
 
     def test_a_tight_stop_makes_a_round_trip_cost_almost_a_whole_r(self):
         cost = LIVE.round_trip_in_r(7.201, 0.008838)
-        # With corrected fees (0.036% taker), round-trip cost ≈ 0.75R at a
-        # 0.123% stop. Still nearly a whole R — the strategy must win ~27% of
-        # 3R trades just to break even.
-        assert cost == pytest.approx(0.75, abs=0.05)
+        # Two 0.045% taker fees plus two 0.01% slippage allowances make the
+        # round-trip cost ≈ 0.90R at a 0.123% stop.
+        assert cost == pytest.approx(0.90, abs=0.05)
         assert cost > 0.60, (
-            "at a 0.123% stop the round trip costs ~0.75R — the strategy must "
-            "win ~27% of 3R trades just to break even"
+            "at a 0.123% stop the round trip consumes most of the initial risk"
         )
 
     def test_the_wider_the_stop_the_more_viable_the_math(self):
-        """Same strategy, same ~0.10% cost; only the stop width changes.
+        """Same strategy, same ~0.11% cost; only the stop width changes.
 
         NOTE THE UNITS: `round_trip_in_r` takes the risk DISTANCE IN PRICE
         TERMS (entry - stop), not a stop percentage. Passing 0.00123 for a
@@ -121,7 +119,7 @@ class TestMatchesMeasuredLiveTrade:
         tight = LIVE.round_trip_in_r(entry, entry * 0.00123)   # observed stop
         wide = LIVE.round_trip_in_r(entry, entry * 0.0100)     # 1% stop
         assert wide < tight / 7
-        assert wide < 0.12, "a 1% stop brings costs down to a survivable ~0.10R"
+        assert wide < 0.12, "a 1% stop brings costs down to ~0.11R"
 
 
 class TestUnitsAreUnambiguous:
@@ -133,8 +131,8 @@ class TestUnitsAreUnambiguous:
     def test_price_distance_gives_the_sane_answer(self):
         entry = 100.0
         # 1% stop = a price distance of 1.0 on a $100 entry.
-        # With corrected fee (0.036% taker + 0.01% slippage round-trip = 0.092%)
-        assert LIVE.round_trip_in_r(entry, 1.0) == pytest.approx(0.092, abs=0.005)
+        # 0.045% taker fees plus 0.01% slippage per side = 0.11% round trip.
+        assert LIVE.round_trip_in_r(entry, 1.0) == pytest.approx(0.11, abs=1e-12)
 
     def test_a_fraction_mistaken_for_a_distance_is_obviously_wrong(self):
         """If a caller passes 0.01 (the 1% stop as a FRACTION) instead of 1.0

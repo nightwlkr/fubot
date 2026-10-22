@@ -285,7 +285,7 @@ class TestLiveCloseOrdering:
     def test_manual_close_places_the_close_before_cancelling_protection(self):
         import backend.core.position_manager as pm
         src = inspect.getsource(pm.PositionManager._close_position)
-        live_branch = src[src.index('elif self._mode == "live":'):]
+        live_branch = src[src.index('elif position_mode == "live":'):]
         close_at = live_branch.index("_market_close(")
         cancel_at = live_branch.index("_cancel_exchange_orders(")
         assert close_at < cancel_at, (

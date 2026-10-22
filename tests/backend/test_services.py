@@ -556,8 +556,9 @@ class TestOrderService:
         assert order["status"] == "NEW"
         assert order["simulate"] is False
 
-    async def test_get_current_position_without_binance_is_none(self):
-        assert await OrderService().get_current_position("BTCUSDT") is None
+    async def test_get_current_position_without_binance_is_unknown(self):
+        with pytest.raises(RuntimeError, match="position state is unknown"):
+            await OrderService().get_current_position("BTCUSDT")
 
 
 async def test_signal_service_scan_without_binance_returns_empty():
@@ -735,6 +736,27 @@ class TestOvertradingGuard:
         engine.weekly_guard.session_factory = lambda **kw: _NoOpSession()
         await engine._scan_and_evaluate()
         assert scanned == ["BTCUSDT"], "scans normally below the cap"
+
+    async def test_latched_daily_limit_does_not_emit_a_duplicate_alert(self):
+        class DailyStopped:
+            async def get_daily_stats(self):
+                return {"total_trades": 0, "used_r": 0.0, "limit_r": 3.0}
+            async def check_and_enforce_limit(self, open_positions=None):
+                return False
+
+        engine = await self._make_engine(DailyStopped())
+        alerts = []
+        async def daily_limit_hit(used_r, limit_r):
+            alerts.append((used_r, limit_r))
+        async def positions():
+            return {}
+        engine.alerts.daily_limit_hit = daily_limit_hit
+        engine.orders = SimpleNamespace(get_all_open_positions=positions)
+        engine._get_enabled_symbols = lambda: _async_list(["BTCUSDT"])
+
+        await engine._scan_and_evaluate()
+
+        assert alerts == [], "DailyResetService owns the one-shot halt alert"
 
     async def test_minutes_since_last_trade(self):
         """Cooldown helper: None when no trades, minutes when a recent trade."""

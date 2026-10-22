@@ -65,7 +65,8 @@ class PositionManager:
         # position must also place a market order on the exchange (manual close)
         # or leave the exchange SL/TP to fire (auto TP/SL); the exchange SL/TP
         # must always be cancelled when the position closes.
-        self._mode: str = "paper"
+        configured_mode = settings.get("bot_mode", "paper")
+        self._mode: str = configured_mode if configured_mode in ("paper", "live") else "paper"
 
     @property
     def mode(self) -> str:
@@ -73,9 +74,20 @@ class PositionManager:
 
     async def start(self):
         """Start the position manager loop."""
+        if self._running:
+            return
         self._running = True
-        await self._reconcile_exchange_positions()
-        self._task = asyncio.create_task(self._loop())
+        try:
+            # The manager starts during app startup, before the bot's first
+            # /start request. Restore the persisted mode now so live positions
+            # are reconciled and the user stream is connected even when the
+            # trading engine is currently stopped.
+            await self.set_mode(self._mode)
+            await self._reconcile_exchange_positions()
+            self._task = asyncio.create_task(self._loop())
+        except BaseException:
+            self._running = False
+            raise
 
     async def stop(self):
         """Stop the position manager loop."""
@@ -311,6 +323,7 @@ class PositionManager:
                     "stop_loss": float(r["stop_loss"]) if r["stop_loss"] is not None else None,
                     "take_profit": float(r["take_profit"]) if r["take_profit"] is not None else None,
                     "signal_id": r["signal_id"],
+                    "mode": r["mode"],
                     "opened_at": r["opened_at"],
                     "initial_risk_distance": (
                         float(r["initial_risk_distance"])
@@ -810,13 +823,14 @@ class PositionManager:
             entry = float(row.entry_price)
             qty = float(row.quantity)
             side = row.side
+            position_mode = row.mode
 
             # Calculate realized P&L
             # LIVE: try to fetch actual realized PnL from Binance (includes fees)
             # PAPER: synthetic PnL (no fees)
             pnl_usdt = None
             synthetic_pnl = None
-            if self._mode == "live" and self.binance is not None:
+            if position_mode == "live" and self.binance is not None:
                 try:
                     # Scope income to THIS position's lifetime — the 7-day
                     # default window would also sum an earlier position's PnL
@@ -872,13 +886,13 @@ class PositionManager:
                 # Estimate fees for synthetic PnL (paper mode OR live fallback)
                 # Uses the cost_model constants which are correctly calibrated
                 # to Binance USDS-M Futures VIP0 + 10% BNB discount.
-                if self._mode == "paper" or self._mode == "live":
+                if position_mode in ("paper", "live"):
                     notional_entry = entry * qty
                     notional_exit = exit_price * qty
-                    fee_rate = TAKER_FEE  # 0.036% — see cost_model.py
+                    fee_rate = TAKER_FEE  # account-calibrated 0.045%; see cost_model.py
                     fees = (notional_entry + notional_exit) * fee_rate
                     pnl_usdt -= fees
-                    if self._mode == "paper":
+                    if position_mode == "paper":
                         logger.debug(
                             "[%s] Paper PnL after fees: %.4f (raw: %.4f, fees: %.4f)",
                             row.symbol, pnl_usdt, pnl_usdt + fees, fees
@@ -927,7 +941,7 @@ class PositionManager:
                 pnl_r=pnl_r,
                 exit_reason=reason,
                 strategy_type=strategy_type,
-                mode=self._mode,
+                mode=position_mode,
                 closed_at=datetime.now(timezone.utc),
             )
             session.add(trade)
@@ -969,7 +983,7 @@ class PositionManager:
         #     resting orders suffices; a redundant market close would OPEN an
         #     opposite position. MANUAL_CLOSE/CLOSED_LOOP/force: we must
         #     actively close on the exchange).
-        if self._mode == "live" and reason in ("TP_HIT", "SL_HIT"):
+        if position_mode == "live" and reason in ("TP_HIT", "SL_HIT"):
             await self._cancel_exchange_orders(position["id"], position["symbol"])
             # The engine's own price check can fire without the exchange's
             # resting order having filled (observed live: the BE stop placement
@@ -977,9 +991,9 @@ class PositionManager:
             # check — the position stayed open and NAKED on the exchange).
             # Verify and flatten instead of assuming the exchange closed it.
             await self._ensure_flat(position["symbol"])
-        elif self._mode == "live" and reason == "EXTERNAL_CLOSE":
+        elif position_mode == "live" and reason == "EXTERNAL_CLOSE":
             await self._cancel_exchange_orders(position["id"], position["symbol"])
-        elif self._mode == "live":
+        elif position_mode == "live":
             # ORDER MATTERS: close on the exchange FIRST, cancel protection
             # second. The previous order (cancel, then market-close) left a
             # window where a failed close produced an open exchange position

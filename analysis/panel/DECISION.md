@@ -1085,3 +1085,276 @@ requesting would have found all four faster.
 **⚠️ NOTE:** The weekly drawdown guard halted the bot. This is a safety feature working as designed — cumulative weekly losses exceeded the limit. The engine was stopped until I restarted it. **The bot will halt again on next scan if the weekly drawdown is still over limit.** The AttributeError in the alert call is a minor bug (alert didn't fire, but halt worked).
 
 **Status:** Engine restarted and running. 3 positions open, all protected. Exchange and DB in sync. Daily +3.60R / +$3.43. **Weekly drawdown guard halted the bot — will halt again on next scan.** Minor bug: AlertService has no `.critical()` method.
+
+## Cost-model arithmetic clarification — 2026-10-20
+
+At the time of this replay, the shared backtest model computed **0.092% round trip**: two 0.036% taker fees plus two 0.01% slippage allowances. On Trade 423 geometry (entry 7.201, frozen risk distance 0.008838, a 0.123% stop), that model charged **0.75R**. These were the assumptions in effect for this historical analysis; the later account audit and 0.11% replay below supersede them for current cost-sensitive comparisons.
+
+This is the model's assumption, not a fresh reconciliation against the account's commission records. Historical Cycle 1 and Cycle 2 tables retain their stated 0.07% and 0.14% assumptions respectively; treat those as historical comparisons, not results under the current shared model. No strategy or live setting changed.
+
+## Corrected replay: stop-distance and entry-filter checks — 2026-10-20
+
+The first calculations in this section used an invalid harness cadence: it scanned once per 10 hourly bars, and the outer loop could open another trade before the first trade's simulated exit. `backend/backtest.py` now scans every fully closed 5m candle, caches hourly context, and keeps one simulated position slot occupied until the exit candle closes. The initial figures below are superseded and must not be used for a strategy decision. The corrected replay used the same read-only Binance sample in `/tmp/fubot_oos_klines.json.gz`, eight symbols, a 60-day train window and a disjoint 60-day holdout, 3CANDLE only, modeled 0.092% round-trip cost, and the same 3R minimum, moderate trend gate, neutral allowed, volume off, and 0.5R breakeven / 1R then 0.5R trail settings. Each symbol has its own one-position slot; this is not a portfolio-level simulation.
+
+| Minimum stop floor | Train closed | Train net R/trade | Holdout closed | Holdout net R/trade |
+|---:|---:|---:|---:|---:|
+| 0.05% (baseline) | 1,281 | −0.0909 | 1,277 | −0.0838 |
+| 0.50% | 1,185 | −0.0818 | 1,242 | −0.0741 |
+| 0.75% | 870 | −0.0512 | 1,091 | −0.0709 |
+| 1.00% | 553 | −0.0324 | 847 | −0.0624 |
+| 1.25% | 262 | +0.0139 | 619 | −0.0632 |
+
+The 1.25% floor was slightly positive in training but remained negative in holdout, and the holdout loss reduction came with 51.5% fewer trades. **Decision: do not deploy a stop-floor change from this replay.** These stop floors were simulated through the existing `min_risk_pct` guard; the setting is not exposed in `TradingSettingsUpdate`. Per-symbol counts and outcomes vary; this remains simulated evidence, not an account-level replay or an approval to change live risk.
+
+### Entry-filter comparison on the corrected replay
+
+Using the 0.05% baseline floor:
+
+| Filter | Train n / net R/trade | Holdout n / net R/trade | Holdout win rate |
+|---|---:|---:|---:|
+| Moderate, no volume (baseline) | 1,281 / −0.0909 | 1,277 / −0.0838 | 31.8% |
+| Strong, no volume | 221 / −0.1213 | 186 / −0.0783 | 32.8% |
+| Moderate + volume | 663 / −0.0893 | 684 / −0.1482 | 29.8% |
+| Strong + volume | 92 / −0.2716 | 96 / −0.1029 | 35.4% |
+
+**Decision: do not enable either filter from this sample.** The stronger gate loses less per trade in holdout but was worse in training; volume confirmation worsened holdout expectancy. The corrected cadence and one-slot rule remove the prior overlap/cadence defects, but limitations remain: fees are modeled rather than reconciled to account commissions, per-symbol positions are simulated independently, and shared capital, correlation, daily/weekly breakers, and exchange execution are not represented. Production remains read-only; the `fubot` database check found zero trade rows, so no live reconciliation was possible. No strategy setting or production state was changed.
+
+
+### Current production profile and portfolio-cap check
+
+A read-only VPS settings query on 2026-10-20 showed the live profile is 3CANDLE only (`strategy_3candle_enabled=true`; FVG, CHoCH and OBFVG off), STRONG trend gate, 5% configured risk, three-position cap, daily −3R and weekly −5R. The corrected replay's STRONG/no-volume row matches its entry filters. A second replay combined each symbol's chronological trade candidates under a global three-slot cap and the code's realized daily/weekly R guards (unrealized open-position excursions excluded); net expectancy remained negative: train 203 accepted trades / −23.618R (−0.1163R per trade), holdout 169 / −10.685R (−0.0632R per trade). Candidate ordering for simultaneous entries is deterministic by fill time then symbol, so portfolio totals are approximate. The live DB currently has zero `trades` rows and zero OPEN `positions`, preventing trade-level reconciliation.
+The FVG-only alternate under the same STRONG gate had 36 training trades at −0.1525R/trade and 34 holdout trades at +0.1760R/trade. Its naive per-trade 95% normal interval on holdout was −0.0727R to +0.4248R (trade SD 0.7401R), which includes zero and ignores symbol/time clustering; this small, regime-reversing sample does not support enabling FVG.
+
+### Current-profile replay with regime, trailing, and funding filters (2026-10-20)
+
+The previous paragraph's portfolio result used an earlier harness/configuration and is superseded for the current live profile. Replayed the same eight-symbol 120-day window split at 2026-08-21 05:40 UTC, with 3CANDLE only, STRONG trend gate, ADX regime filter, 0.5R breakeven and 0.5R profit-lock/trail settings, 0.092% modeled round-trip cost, and a negative-funding cutoff of −0.0001. Historical funding is approximated by the most recent settled rate at each scan; live `premiumIndex.lastFundingRate` is intraperiod and unavailable in this dataset.
+
+| Window | Single-symbol closed trades | Net R | Net R/trade | Gross win rate |
+|---|---:|---:|---:|---:|
+| Train (2026-06-22 to 2026-08-21) | 93 | −15.786 | −0.1697 | 66.7% |
+| Holdout (2026-08-21 to 2026-10-20) | 61 | +5.655 | +0.0927 | 80.3% |
+
+A chronological portfolio replay with a global three-position cap and realized daily −3R / weekly −5R guards accepted 81 training trades (−16.157R, −0.1995R/trade) and all 61 holdout trades (+5.655R, +0.0927R/trade). No simultaneous-slot rejection occurred; 12 training trades were blocked by the realized guards. Unrealized open-position excursions were excluded, and simultaneous candidate ordering is approximate. The holdout edge reverses sign in training and is based on only 61 trades; funding is settlement-rate approximated. **Decision: retain current settings; this replay does not justify a strategy change.** Do not interpret the positive holdout as demonstrated profitability.
+
+### C3 body-quality filter check
+
+Checked the previously deferred condition that the confirmation candle body be at least 50% of its range, against the same funding-adjusted replay and split. The 50% threshold was fixed before this run, not selected by tuning the holdout. It reduced train trades from 93 to 69 and improved train net expectancy from −0.1697R to −0.0399R; holdout trades fell from 61 to 50 and holdout net expectancy declined from +0.0927R to +0.0360R. The realized daily/weekly replay blocked 12 baseline training entries but none with the filter; neither variant hit the global three-slot cap. The filtered train result is still negative, while the reduced holdout return and settlement-rate funding approximation leave the effect uncertain. **Decision: do not adopt this filter yet; keep it as a candidate for a longer untouched forward/paper evaluation.**
+
+**Risk-control defect found during this check:** `DailyResetService._unrealized_loss_in_r()` returned a negative R value for a losing open position, and `check_and_enforce_limit()` added it to the positive loss-used counter, reducing usage instead of increasing it. The local fix converts that loss to positive R, reports combined realized + unrealized usage in the one-shot halt alert, and removes BotEngine's duplicate alert on each denied scan. The deployed source remains at commit `9cefc0e`; production was not modified. Do not treat this local fix as live until separately deployed and verified.
+
+**Open-position R-basis gap — local fix, 2026-10-20:** the live scan now joins non-empty Binance exposure to OPEN live `Position.initial_risk_distance` values; the daily breaker computes unrealized loss as `abs(unrealizedPnl) / (quantity × initial_risk_distance)`. Missing, invalid, or non-finite inputs fail closed. The former 1%-of-entry proxy, which undercounted observed 0.77–0.92% stop widths by 8–23%, is removed. This local change is untested and not deployed; verify it against tests and a controlled paper/live snapshot before release.
+
+**Position visibility failed open:** `OrderService.get_current_position()` returned `None` on Binance errors, while `get_all_open_positions()` returned `{}`; the scan therefore treated unknown exposure as flat. A local change now propagates those errors, aborts a LIVE scan pass if the account-wide snapshot fails, and reuses that snapshot in `StrategyService.evaluate_signal()` to avoid one additional signed position-risk request per pending signal. A direct call without an account snapshot still uses the single-symbol fallback, which now propagates errors. Paper mode can continue when exchange data is unavailable, relying on its local position checks. This changes no entry criteria, but is untested and not deployed; validate before release.
+
+## Read-only production execution check — 2026-10-20
+
+On contabo01, `fubot.service` was active at commit `9cefc0e`. The live settings matched the profile above: 3CANDLE on; FVG/CHoCH/OBFVG off; STRONG gate; risk 5%; three positions; daily −3R, weekly −5R; regime and negative-funding filters on; BE/profit-lock/trail thresholds 0.5R. PostgreSQL showed **zero trades, zero positions, and zero orders**; in the last 24 hours it showed 6,351 EXPIRED and 14 SKIPPED signals, all 14 skipped for `RANGING` regime. This provides no live trade sample for expectancy or R:R analysis.
+
+Sanitized journal aggregation found 22 `Live order flow failed` events with Binance `-5022`, across BTCUSDT (14), ETHUSDT (5), and DOGEUSDT (3). Binance documents `-5022` as a GTX/Post Only order rejection when it cannot execute as maker ([error code](https://developers.binance.com/en/docs/products/derivatives-trading-portfolio-margin/error-code), [Futures order placement update](https://www.binance.com/en/support/announcement/detail/2164863753c14eebad14464a82419dff)). The deployed `BinanceService.place_limit_order()` catches `-5022` and retries as GTC (`backend/services/binance_service.py:656-710`); logs contained nine GTX fallback warnings, no GTC fallback failures, and no limit no-fill messages. The 22 failures therefore do not reconcile with the fallback and database counts yet. **Do not change the live entry mode based on this alone**; next evidence needed is a timestamped join between sanitized order-flow failures and their signal/order lifecycle. No settings, orders, or service state were changed.
+
+Follow-up read-only SQL join: none of the 26 sanitized failure/fallback timestamps had a matching `signals` row for that symbol within 24 hours. The current signal rows for the scanned symbols begin after the last reported failure, so the database cannot establish whether those failures came from repeated evaluation of one signal, a GTC retry, or a later order leg. The journal bursts were insufficient to measure failed-entry rate. A local, uncommitted logging change now adds the signal id and failing stage to outer order-flow errors and logs the exchange order id, time-in-force, and status after a LIMIT response; it changes no execution decisions and is not deployed. Correlate these fields on a future monitoring run before changing entry behavior.
+
+Seven-day read-only journal recheck (2026-10-20): 89 `Live order flow failed` log lines appeared on Oct 14 (41), Oct 15 (2), Oct 17 (24), and Oct 19 (22). Twenty-two lines carried `-5022` (BTCUSDT 14, ETHUSDT 5, DOGEUSDT 3); nine GTX fallback warnings were also present. The failure count is log lines, not unique signals or rejected entries: the deployed build lacks signal ids and stage labels, and the database still has zero trades/positions. Thus it cannot show whether the GTC retry itself failed or a later stage failed after the entry. The local correlation logging is still untested and undeployed. Do not infer a failure rate or alter entry mode from these counts.
+
+Follow-up read-only SSH/SQL snapshot on 2026-10-20: `fubot.service` was active at `9cefc0e`, `bot_mode=live`, with zero live trades, OPEN positions, or open orders. PostgreSQL reported `TimeZone=Europe/Berlin`; `now() - max(signals.created_at)` was approximately two hours, and the newest seven-symbol rejection batch became current after adding two hours. This matches `Signal.created_at`'s naive `datetime.utcnow()` default on a `timestamptz` column, not an idle scanner. The scanner was therefore active and rejecting candidates; observed reasons included ranging-regime and below-STRONG trend filters. The enabled profile was 3CANDLE only, STRONG trend, and regime filter on. Local-only correction: new signal timestamps now use aware UTC and rejection-zone keys canonicalize DB `Decimal` and detector float values. No historical rows were rewritten, no tests were run, and production was not modified. These findings still provide no bot-attributed trade sample and do not justify relaxing live filters or risk settings.
+
+## Exit policy comparison with the second-stage trail — 2026-10-20
+
+The standard `Backtester._resolve_exit()` models `be_trail_trigger_r` and first-stage `profit_lock_*`, but production also calls `PositionManager._check_profit_trailing_2()` (`backend/core/position_manager.py:544-577`), defaulting to a 1.0R trigger and 0.25R trail. The earlier exit-policy sweep omitted that live rule and is withdrawn. A temporary offline replay added the second stage in sequence after BE and first-stage updates; it used the same 8-symbol 120-day klines, 60-day train/holdout split, 0.092% modeled cost, and settled-funding approximation. Entries were merged chronologically under a global 3-position cap and realized daily −3R / weekly −5R guards. It does not model unrealized P&L in those guards, the 240-minute symbol cooldown, shared capital, or intrabar execution.
+
+The training-selected candidate disables the first-stage 0.5R BE and 0.5R profit trail, retaining the second-stage 1.0R / 0.25R trail. Portfolio results:
+
+| Window | Exit policy | Closed | Net R | Max drawdown | Worst day | Worst week |
+|---|---|---:|---:|---:|---:|---:|
+| Train | Current first + second stages | 81 | −15.606 | 16.024R | −3.627R | −6.268R |
+| Train | Second stage only | 80 | +0.476 | 13.151R | −3.627R | −6.316R |
+| Holdout | Current first + second stages | 62 | +7.613 | 3.114R | −1.116R | −0.933R |
+| Holdout | Second stage only | 60 | +10.749 | 5.634R | −1.355R | −2.754R |
+
+Removing first-stage management improved net R in both windows and reduced training drawdown, but holdout drawdown rose by 81% and worst-week loss widened from −0.933R to −2.754R. The realized guards also overshot their nominal limits on closing trades while other positions remained open. **Decision: do not change live exit settings from this replay.** The holdout risk trade-off is worse, the sample is small, and the production-equivalent exit model exists only in a temporary experiment. First update `backend/backtest.py` with second-stage trail support and regression coverage before relying on further exit-policy comparisons.
+
+**Guard semantics:** `main.init_bot()` starts `PositionManager` independently (`backend/main.py:198`), while `BotEngine.stop()` only cancels its scan task (`backend/core/bot_engine.py:109-121`). Daily and weekly breaches therefore stop new entries but leave existing positions under normal management; they are not hard caps on daily or weekly realized loss. The replay’s worst-day/week overshoots are consistent with this behavior. Whether a breach should also flatten existing positions is a live-risk policy decision and remains unimplemented pending explicit approval.
+
+## Current live sizing exposure — read-only check, 2026-10-20
+
+The latest read-only production settings are `risk_percent=5`, `max_position_notional_pct=500`, `max_positions=3`, `daily_loss_limit_r=-3`, and `weekly_drawdown_limit_r=5` in live mode. `StrategyService` sizes risk at 5% of balance, then caps notional at 5× balance (`backend/services/strategy_service.py:268-289`). With the historically observed 0.77–0.92% stop widths, the cap binds and limits modeled loss at the initial stop to approximately 3.85–4.60% of balance per position (`500% × stop_fraction`), or 11.55–13.80% across three positions if all reach their stops. This is a scenario calculation before fees, slippage, gaps, or changing equity, not a measured loss. Full 5% sizing at these stop widths would require roughly 543–649% notional per position. Combined with the entry-only drawdown guards above, the current settings do not bound account loss at −3R/−5R. No production settings were changed; reducing risk or flattening positions at a guard breach requires explicit approval.
+
+### Sizing snapshot refresh — 2026-10-20
+
+A second read-only query confirmed the live settings remain `risk_percent=5`, `max_position_notional_pct=500`, and `max_positions=3`. The latest stored `equity_log` balance returned was $200.49; the 212 records from the prior seven days ranged from $200.06 to $201.59. At $200.49, the 500% cap is $1,002.45 notional. For 0.77–0.92% stops, this implies about $7.72–$9.22 initial-stop loss per position, or $23.16–$27.67 if three positions all reach their stops (before fees, slippage, gaps, or stop execution failure). A 1% risk target would size approximately $2.00 initial-stop risk per position at this balance and stop range, below the current notional cap; that would reduce dollar exposure by about 5× without changing R-multiple expectancy. This is a sizing scenario, not a recommendation to change the live setting. **No setting was changed; changing live risk requires explicit approval.**
+
+## Repeated rejected-signal writes — read-only check, 2026-10-20
+
+A fresh read-only query at 08:19 UTC found `fubot.service` active at `9cefc0e`, zero trades and zero positions, and 8,694 3CANDLE signal rows created in the prior 24 hours (8,683 EXPIRED, 11 SKIPPED). Those rows represented only 33 distinct `(symbol, strategy_type, direction, entry_zone_min, entry_zone_max)` signatures; the most repeated signature appeared 633 times. The live scan interval is 30 seconds, the normal signal expiry is 60 minutes, and all sampled rejections were for the ranging-regime filter. This is a repeat-write/observability problem, not evidence that weakening the regime filter would improve expectancy.
+
+The local `SignalService._persist_signals()` change suppresses a second SKIPPED database row only when the exact zone and rejection reason are already recorded inside that 60-minute window. It does not reserve SKIPPED setups: if the same setup passes filters, it is persisted as PENDING immediately. This is an uncommitted local change; it was not regression-tested or deployed. The current production sample has no fills, so entry or exit strategy changes remain unsupported by live expectancy evidence.
+
+## Account-calibrated cost replay — 2026-10-20
+
+A read-only seven-day Binance account audit returned 312 fills across nine symbols: 306 taker, six maker, $26,319.06 turnover, and 0.01620739 BNB in commissions. Converting commissions at sampled 15-minute BNBUSDT closes gives approximately $11.73, or 0.0446% of turnover per fill. The account commission endpoint reported 0.05% taker and 0.02% maker; `backend/core/cost_model.py` now models 0.045% taker and retains 0.018% maker, reflecting the observed BNB discount. Slippage remains an assumption of 0.01% per side, making modeled round-trip cost 0.11%. The 312 fills are account-wide, not proven bot fills: production had zero trade and position rows in the same check.
+
+`scripts/strategy_compare.py` now imports the shared taker fee and slippage values rather than its former hardcoded 0.14% cost. That prototype harness still fetches at most 1000 5m candles (~3.5 days); historical results from its former fee assumption need a fresh run before use.
+
+The prior exit-policy replay used 0.092% cost. Replaying the same 8-symbol 120-day klines, 60-day train/holdout split, settled-funding approximation, global three-position cap, and realized daily −3R / weekly −5R guards at 0.11% gives:
+
+| Window | Exit policy | Closed | Net R | Net R/trade | Max drawdown | Worst day | Worst week |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Train | Current first + second stages | 81 | −17.466 | −0.2156 | 17.564R | −3.750R | −6.633R |
+| Train | Second stage only | 74 | −2.765 | −0.0374 | 13.896R | −3.750R | −6.650R |
+| Holdout | Current first + second stages | 62 | +6.569 | +0.1060 | 3.179R | −1.139R | −0.962R |
+| Holdout | Second stage only | 60 | +9.750 | +0.1625 | 5.917R | −1.391R | −2.846R |
+
+The changed fee estimate reduces net R in both windows. Both policies remain negative in training and positive in holdout, and disabling the first stage still increases holdout drawdown. The replay omits unrealized P&L in its guards, symbol cooldown, shared capital, and intrabar execution; settled funding is approximated. **Decision: do not change live exit settings.** The local fee-model and test expectation edits are untested and not deployed. The 0.092% results above are historical and should not be used for current cost-sensitive comparisons.
+
+## Minimum stop-distance filter replay — 2026-10-20
+
+Replayed minimum stop-distance floors of 0.05%, 0.50%, 0.75%, 1.00%, and 1.25% on the eight-symbol candle window from 2026-06-22 05:40 UTC to 2026-10-20 05:40 UTC, split chronologically into 60-day train and holdout windows. This is a **filter that rejects trades whose structural stop is narrower than the threshold**; it does not widen the stop. The replay used the current live-like 3CANDLE-only, STRONG trend, ADX regime and negative-funding profile, both production trail stages, account-calibrated 0.11% round-trip cost, three portfolio slots, and realized daily −3R / weekly −5R guards. It still omits unrealized P&L in guards, symbol cooldown, shared capital and intrabar execution.
+
+| Minimum stop distance | Train closed | Train net R | Train max DD | Holdout closed | Holdout net R | Holdout R/trade | Holdout max DD | Holdout worst day |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.05% (current backtest floor) | 81 | −17.466 | 17.564R | 62 | +6.569 | +0.1059 | 3.179R | −1.139R |
+| 0.50% | 82 | −12.605 | 13.672R | 62 | +6.569 | +0.1059 | 3.179R | −1.139R |
+| 0.75% | 53 | −7.423 | 7.423R | 54 | +5.060 | +0.0937 | 3.179R | −1.139R |
+| 1.00% | 29 | −0.213 | 2.288R | 37 | +1.318 | +0.0356 | 3.256R | −2.143R |
+| 1.25% | 6 | −0.664 | 1.123R | 26 | +0.508 | +0.0195 | 2.672R | −2.143R |
+
+Higher floors reduce training losses but also discard most of the trades. The 1.00% floor nearly flattens training expectancy, yet lowers holdout net R by 80% and increases holdout worst-day loss and drawdown; the 1.25% result has only 26 holdout trades. No threshold improves both return and downside risk out of sample. **Decision: do not change the live minimum-risk filter.** The 1.00% threshold is only a candidate for forward/paper observation, not a validated improvement. Production has no bot-attributed trade sample to corroborate this replay.
+
+## LIMIT fill can violate the minimum stop-distance guard — 2026-10-20
+
+`StrategyService.evaluate_signal()` enforces `min_risk_pct` against the planned midpoint before submission (`backend/services/strategy_service.py:252-260`). After a LIMIT fills, `_update_position_fill()` recalculates `Position.initial_risk_distance` from the actual fill, but the subsequent live validation checks only whether stop/target remain on the correct side of MARK (`backend/services/strategy_service.py:377-384`). It does not reapply the minimum stop-distance rule to the exchange fill.
+
+One directly reconstructed FUBOT-tagged BTCUSDT entry illustrates the gap: the BUY limit was $82,493.10, weighted fill $81,905.60, and the matched initial stop trigger $81,889.00. The planned stop distance was 0.732% (above the 0.05% floor); the actual fill was only 0.020% from the stop (below the floor). At the actual fill, the stored 1R basis therefore shrinks to $16.60 per BTC, making an ordinary price move produce an unusually large R result. The entry is identified by the deployed `fubot-` client-order-id prefix; the algo stop association is inferred from same-symbol, same-quantity, near-time order records because Binance algo child IDs are not FUBOT-prefixed. This one example proves the guard gap, not its frequency or strategy expectancy. The read-only production database had zero trade rows, so full P&L attribution is unavailable.
+
+**Candidate safety change, pending explicit user approval:** after fill and `_update_position_fill()`, validate `abs(fill_price - stop_loss) / fill_price >= min_risk_pct` using the actual fill, and revalidate directional R:R from that fill. If either check fails, place no new protection, flatten through the existing `_flatten_if_unprotected()` path, record the resulting trade, and mark the signal SKIPPED; if exchange state is unknown or flattening fails, retain the OPEN row for reconciliation. Do not widen the stop or resize after fill. This changes live entry acceptance and needs approval plus regression coverage before deployment. No code or production state was changed for this finding.
+
+## Minimum planned R:R sensitivity — 2026-10-20
+
+Replayed `rr_min` values of 2.5, 3.0 (current), and 4.0 on the same eight-symbol 120-day candle set, 60-day train/holdout split, 0.11% modeled round-trip cost, settled-funding cutoff, current 3CANDLE/STRONG/ADX profile, both first-stage 0.5R and second-stage 1.0R trails, three portfolio slots, and realized daily −3R / weekly −5R guards. The current `rr_min=3.0` control exactly reproduced the recorded portfolio replay (81 train trades / −17.466R; 62 holdout trades / +6.569R), validating this sweep's cost and exit wiring. As in the other portfolio replays, unrealized open-position P&L, symbol cooldown, shared capital sizing, and intrabar price paths are omitted; funding uses the last settled rate.
+
+| Planned minimum R:R | Train closed | Train net R | Train max DD | Holdout closed | Holdout net R | Holdout R/trade | Holdout max DD |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 2.5 | 70 | −10.972 | 14.376R | 52 | +2.213 | +0.0426 | 3.179R |
+| 3.0 (current) | 81 | −17.466 | 17.564R | 62 | +6.569 | +0.1059 | 3.179R |
+| 4.0 | 82 | −17.431 | 17.529R | 62 | +7.537 | +0.1216 | 3.179R |
+
+Lowering the threshold to 2.5 reduces training losses but cuts holdout net R by about two-thirds. Raising it to 4.0 changes training by only +0.035R and holdout by +0.968R, with the same holdout trade count and drawdown; that small holdout difference does not establish a robust edge. **Decision: retain `rr_min=3.0`; do not change live settings from this sweep.**
+
+## ADX regime-gate sensitivity — 2026-10-20
+
+Compared the production `regime_filter_enabled=true` setting to disabling that gate on the same eight-symbol 120-day dataset and 60-day train/holdout split. Both runs used the live 3CANDLE-only, STRONG trend, R:R 3.0, 0.05% minimum stop-distance, funding cutoff, both production trail stages, 0.11% modeled round-trip cost, three portfolio slots, and realized daily −3R / weekly −5R guards. The enabled control exactly matched the current-profile replay above. The toggle affects both the RANGING skip and strong-regime counter-trend check (`backend/backtest.py:395-406`; live counterpart `backend/services/signal_service.py:261-270`). Unrealized P&L, symbol cooldown, shared capital sizing, and intrabar execution are omitted; funding uses the last settled rate.
+
+| Regime gate | Window | Candidates | Closed | Net R | Net R/trade | Max DD | Worst day |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Enabled (current) | Train | 93 | 81 | −17.466 | −0.2156 | 17.564R | −3.750R |
+| Disabled | Train | 221 | 167 | −29.929 | −0.1792 | 32.765R | −3.750R |
+| Enabled (current) | Holdout | 62 | 62 | +6.569 | +0.1059 | 3.179R | −1.139R |
+| Disabled | Holdout | 189 | 171 | −1.419 | −0.0083 | 11.510R | −3.476R |
+
+Disabling the gate generated more trades but changed the holdout from positive to slightly negative and increased holdout max drawdown from 3.179R to 11.510R; the larger training sample also had substantially worse total loss and drawdown. The recent live scan's ranging rejections therefore do not justify weakening this filter. **Decision: retain the regime gate; do not change live settings.**
+
+## Exact live-symbol basket replay — 2026-10-20
+
+The earlier eight-symbol sample was not the live enabled-symbol universe. A read-only production query at 11:46 UTC+02 showed these seven enabled symbols: APEUSDT, BNBUSDT, BTCUSDT, LINKUSDT, OPUSDT, SOLUSDT, and UNIUSDT. I fetched a fresh common 120-day window of public Binance Futures candles and funding rates for exactly these symbols (2026-06-22 09:35 UTC to 2026-10-20 09:35 UTC; 2,879 1h, 11,519 15m, 34,560 5m bars and 360 funding observations per symbol). The replay used 3CANDLE only, STRONG trend, ADX regime gate, `rr_min=3`, 0.05% minimum stop distance, settled funding cutoff −0.0001, both production trail stages, 0.11% modeled round-trip cost, three portfolio slots, and realized daily −3R / weekly −5R guards. It used chronological train/holdout halves and the same deterministic entry ordering. Unrealized guard usage, cooldown, shared capital sizing, and intrabar paths remain unmodeled.
+
+| Basket | Window | Closed | Net R | Net R/trade | Max DD | Worst day |
+|---|---|---:|---:|---:|---:|---:|
+| All seven (current) | Train | 58 | −2.926 | −0.0504 | 6.549R | −3.480R |
+| Exclude BTCUSDT | Train | 46 | +0.614 | +0.0133 | 4.357R | −2.260R |
+| All seven (current) | Holdout | 43 | +6.795 | +0.1580 | 3.221R | −1.112R |
+| Exclude BTCUSDT | Holdout | 33 | +6.539 | +0.1982 | 3.204R | −1.112R |
+
+BTC exclusion was selected solely because it gave the best training net R among seven leave-one-symbol-out comparisons. The next 60 days retained nearly the same net R (−0.256R) and slightly lower drawdown, with ten fewer closed trades and higher R per trade. That is a risk/turnover trade-off, not a demonstrated increase in total return; selection across seven alternatives and the small trade count leave material overfit risk. **Decision: do not alter the live symbol universe.** BTC exclusion is only a candidate for an explicitly approved forward/paper observation. This exact-universe replay supersedes the earlier eight-symbol basket comparisons for decisions about the current production symbol list.
+
+### Exit-policy sensitivity on the exact live basket
+
+Reused the same candles, funding, costs, entries, portfolio cap, and chronological 60/60-day split to compare the current 0.5R first-stage trail plus 1.0R/0.25R second-stage trail with second-stage-only management. First-stage settings were ablated separately to identify which rule caused the difference.
+
+| Exit policy | Window | Closed | Net R | Net R/trade | Max DD | Worst day | Worst week |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Current (BE 0.5R + first trail 0.5R/0.5R + second 1.0R/0.25R) | Train | 58 | −2.926 | −0.0504 | 6.549R | −3.480R | −3.739R |
+| Second stage only | Train | 52 | +2.640 | +0.0508 | 6.653R | −3.480R | −3.283R |
+| Current | Holdout | 43 | +6.795 | +0.1580 | 3.221R | −1.112R | −1.340R |
+| Second stage only | Holdout | 43 | +12.435 | +0.2892 | 4.657R | −1.454R | −2.638R |
+
+Removing only the BE trigger produced the same results as current, consistent with the first 0.5R profit trail subsuming it in this replay. Removing only the first profit trail while retaining BE 0.5R and the second stage yielded +1.186R / 56 train trades and +5.552R / 43 holdout trades; max drawdown was 6.376R train and 3.294R holdout. Moving the first trail to 0.75R/0.50R yielded −2.426R train and +6.089R holdout. The strongest candidate is second-stage-only: it improves net R in both windows and training drawdown is similar, but holdout drawdown rises 45%, with a materially worse worst day/week. Cells are small, simulation omits shared-capital effects and intrabar paths, and exit-policy selection across variants carries overfit risk. **Decision: keep current live exits pending explicit approval; second-stage-only merits a paper/forward trial, not a live change based on this replay alone.**
+
+## Repeated rejected-signal writes — refreshed production audit, 2026-10-20
+
+At 10:00 UTC, a read-only SSH check showed `fubot.service` active on `9cefc0e` (started 05:17 UTC). The production database had 13,896 signal rows in the preceding 24 hours, but zero trades, zero OPEN positions, and zero orders in that period. Those rows covered only 44 distinct `(symbol, strategy_type, direction, entry_zone_min, entry_zone_max)` setup keys. The most repeated exact setup appeared 1,024 times and had 17 distinct `skip_reason` strings; the strings vary with the formatted ADX reading (for example, `Regime: ranging (ADX 12.4)`). `check_interval_seconds=30`, `signal_max_age_minutes=60`, and 3CANDLE was the only enabled strategy in the queried settings.
+
+The local, uncommitted `_persist_signals()` change (`backend/services/signal_service.py`) queries recent SKIPPED/EXPIRED rows and suppresses repeated setup/reason keys within the 60-minute expiry window. Because ADX is interpolated to one decimal place, the same still-ranging setup generates new rows as that value changes; the top setup's 17 reason variants bypassed exact-string deduplication. In the five local-hour buckets containing these rows, there were 297 distinct `(setup, full reason)` keys and 95 keys after removing only the numeric ADX reading. The local dedup key now normalizes that numeric ADX reading while the stored `skip_reason` keeps its full value. The bucket counts imply an upper bound of 95 inserts rather than 297 under the proposed normalization (versus 13,896 observed rows); this is an estimate, not a production measurement. Candidate eligibility and order decisions are unchanged. **The local change is not behaviorally verified or deployed; no production data, settings, or service state were changed.**
+
+At 10:08 UTC, a fresh read-only check showed the latest signal row at `10:07:51+02`, no signal rows in the preceding hour, and still zero trades/open positions/orders. The service remained active and `/health` returned HTTP 200, but unauthenticated `/api/bot/status` returned HTTP 401. Source confirms why those facts do not establish scanner state: `main.init_bot()` constructs the `BotEngine` without starting it (`backend/main.py:161-172`), while only the authenticated `POST /api/bot/start` calls `engine.start()` (`backend/routers/bot.py:34-56`). The saved `bot_mode=live` is only a mode preference, not proof that the scan task is running. An authenticated status/scan-count check is required to tell whether the engine was stopped or is scanning without persistable candidates.
+
+A later read-only snapshot on 2026-10-20 confirmed systemd `fubot.service` active (process started 07:17 CEST), saved mode `live`, unchanged risk settings (`risk_percent=5`, `max_position_notional_pct=500`, `max_positions=3`, 30-second interval), and the same seven enabled symbols. The DB still had zero live Trade rows and zero OPEN live Positions; the newest Signal was `SKIPPED` SOLUSDT at 08:35:49 UTC. This does not confirm that the scan loop is currently running; the user-facing authenticated status remains the required evidence. No production settings, positions, or orders were changed.
+
+At 10:40 UTC, the preceding 24-hour signal aggregation had 16,017 rows: 15,367 were rejected/expired by the RANGING ADX gate, 325 by the STRONG-trend threshold, and 325 by the bearish-trend filter. Hourly counts were present from 03:00 through 08:00 UTC, then absent for 09:00 and 10:00; the latest row remained 08:35:49 UTC. This suggests the scanner produced candidates earlier and then either stopped or encountered a period with no persistable candidates; without authenticated `/api/bot/status`, these cases cannot be distinguished. The independent holdout replay found disabling the regime gate worsened drawdown and net R, so the high ranging-rejection count alone is not evidence to weaken it. No sizing attempt is shown in these skip reasons.
+
+### Second-stage-only exits across four chronological 30-day blocks
+
+To check whether the 60-day train/holdout result was concentrated in one half, I replayed the same seven-symbol 120-day candle/funding set under current exits and second-stage-only exits, then measured accepted closed trades in four consecutive 30-day blocks. The global three-position cap and realized daily −3R / weekly −5R guards ran continuously across all blocks; only the reported P&L/drawdown measurements were segmented. Other assumptions remain as above: 0.11% modeled round-trip cost, settlement-rate funding cutoff, pessimistic stop-before-target intrabar ordering, and no unrealized guard usage, symbol cooldown, shared-capital sizing, or actual intrabar paths.
+
+| UTC block | Current n / net R / max DD | Second-only n / net R / max DD | Current worst day / week | Second-only worst day / week |
+|---|---:|---:|---:|---:|
+| Jun 22–Jul 22 | 26 / +0.184 / 4.342R | 22 / +0.064 / 5.129R | −1.110R / −3.283R | −2.258R / −3.283R |
+| Jul 22–Aug 21 | 32 / −3.110 / 6.549R | 30 / +2.575 / 6.653R | −3.480R / −3.739R | −3.480R / −2.942R |
+| Aug 21–Sep 20 | 24 / +2.741 / 1.991R | 23 / +4.514 / 3.620R | −1.112R / −0.456R | −1.077R / −2.541R |
+| Sep 20–Oct 20 | 19 / +4.055 / 3.221R | 20 / +7.920 / 4.657R | −1.096R / −1.340R | −1.454R / −2.638R |
+
+Second-stage-only improved net R in three of four blocks; under a simple one-sided sign test, 3/4 wins gives p=0.3125 even before correcting for policy selection, so this is not statistically persuasive evidence by itself. The full 120-day replay closed 95 trades for +15.074R versus 101 trades for +3.869R under current exits. Continuous-period maximum drawdown was 6.653R versus 6.549R, so cumulative net R / max DD was 2.266 versus 0.591. Worst day was −3.480R under both, while worst week was −3.283R for second-stage-only versus −3.739R current. Per-block max drawdown was higher under second-stage-only in all four blocks, and its worst-week result was worse in two of the final three blocks. These blocks contain only 19–32 trades each and are not independent because symbol/strategy selection preceded them. **Decision: second-stage-only is the strongest risk-adjusted paper/forward candidate, but retain current live exits until the user explicitly approves a trial.** This is offline replay evidence, not a verified increase in live performance.
+
+### Execution-cost stress
+
+Reran the same exact-universe replay at 0.16% round-trip cost: account-calibrated 0.09% taker fees plus 0.035% slippage per side (3.5× the current slippage assumption). Current exits produced −1.720R across 101 closed trades, 8.231R max drawdown, and −0.209 net-R/max-DD. Second-stage-only produced +9.892R across 95 closed trades, 7.818R max drawdown, and 1.265 net-R/max-DD. Worst day was −3.698R for both; worst week was −4.157R current versus −3.741R second-stage-only. This stress case strengthens the offline case for paper/forward evaluation, but the 0.035% per-side slippage is a scenario, not measured bot slippage, and all prior replay limitations and selection bias remain. Do not change live exits based on this replay alone.
+
+### Equity-weighted position-sizing sensitivity
+
+The R-only portfolio replay treats each 1R as equal account risk, but live sizing is `min(balance × risk_percent, balance × 5 × stop_fraction)` because the notional cap is 500% (`backend/services/risk_service.py:36-68`, `backend/services/strategy_service.py:267-294`). I replayed the same accepted trades and R-based daily/weekly guards with compounding, starting from the latest stored $200.49 solely as a dollar-scale anchor. This does not reconstruct historical account equity. It omits shared initial margin/capital, unrealized P&L in guards, cooldown, and intrabar price paths; therefore the returns below are scenario outcomes, not a forecast or realized performance.
+
+| Exit policy | Risk target | Closed trades | Effective stop risk / balance (avg) | Cap-bound trades | Compounded return | Max equity DD | Worst day / week |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Current | 5% | 101 | 4.30% | 49/101 | +22.80% | 18.60% | −$26.04 / −$31.14 |
+| Current | 1% | 101 | 1.00% | 0/101 | +3.66% | 6.41% | −$7.08 / −$7.62 |
+| Second-stage-only | 5% | 95 | 4.32% | 44/95 | +93.69% | 21.31% | −$32.56 / −$52.90 |
+| Second-stage-only | 1% | 95 | 1.00% | 0/95 | +15.73% | 6.54% | −$7.42 / −$6.51 |
+
+The 1% target reduced maximum equity drawdown to about 6.4–6.5% in these scenarios, versus 18.6–21.3% at the live 5% target; it also reduced compounded return. The candidate exit policy outperformed current exits at both risk levels in this replay, but each trade sequence is small, selected, and lacks shared-capital constraints. **Decision: use this only to frame a future paper/forward comparison; do not alter the live 5% risk setting or exits without explicit approval and live-representative verification.**
+
+## Configured leverage is not applied — 2026-10-20
+
+A read-only production check at 12:22+02 found live settings `risk_percent=5`, `max_position_notional_pct=500`, `max_positions=3`, `leverage_alts=5`, and `leverage_btc=10`; the service was active at `9cefc0e`, with zero OPEN positions and stored equity $201.59. In that deployed commit, `StrategyService._account_balance()` sizes from Binance `availableBalance` (`backend/services/strategy_service.py:564-570`), then `RiskService.cap_position_notional()` can allow notional up to 5× that available balance (`backend/services/strategy_service.py:262-294`). `_create_position()` copies the configured leverage into the DB row (`backend/services/strategy_service.py:572-599`), but `git grep set_leverage 9cefc0e -- backend` finds only the `BinanceService.set_leverage()` definition (`backend/services/binance_service.py:650-652`), with no call site. The actual exchange leverage therefore cannot be inferred from `leverage_alts`/`leverage_btc` in Settings or Position rows.
+
+The read-only Binance `fapi/v2/positionRisk` query on 2026-10-20 (using the app's decrypted Account-table credentials without printing them) returned all seven symbols at **5× cross margin**, with zero position amount and zero notional. BTC therefore does not currently use the configured 10× setting. This is consistent with the missing `set_leverage()` call site, though an operator may have configured exchange leverage separately. At 5×, a position at the per-position 500%-of-available-balance cap implies initial margin roughly equal to that available balance before fees and maintenance margin; the cap is not an aggregate portfolio budget and does not guarantee even one cap-sized entry is fundable. A separate aggregate account query returned wallet balance $200.49, total available balance $0, and initial margin $0 while there were no open positions. This is unexplained; live sizing reads the USDT asset's `availableBalance` (`backend/services/strategy_service.py:565-584`), so aggregate account totals do not prove what the sizing path sees. Do not infer that the bot can or cannot fund an order until the relevant USDT free balance is verified. The per-asset balance response has not been inspected. The previous equity-weighted replay still cannot establish that the 3-slot portfolio is executable because it omits shared initial margin and available-balance depletion. **No production data/settings were changed.** The exchange snapshot is time-bound; verify leverage/margin mode and model aggregate initial margin before treating the replay as executable. Wiring leverage and portfolio-margin enforcement would alter live order behavior and requires explicit approval.
+
+## Fresh-candle stop-distance screening — 2026-10-20
+
+Fetched a new, common 120-day public Binance Futures candle window for the seven enabled production symbols (APEUSDT, BNBUSDT, BTCUSDT, LINKUSDT, OPUSDT, SOLUSDT, UNIUSDT), ending at the last closed 5m boundary, 2026-06-22 10:25 UTC through 2026-10-20 10:25 UTC. Each symbol returned 2,879 hourly, 11,519 15m, and 34,560 5m bars. Compared minimum stop-distance floors of 0.05%, 0.50%, 0.75%, 1.00%, and 1.25% with the local `Backtester` on chronological 60-day train and holdout windows, using 60 hours before each window as indicator warm-up and counting trades whose signal time fell inside that window. The run used 3CANDLE-only, STRONG trend, regime gate, R:R 3.0, and the account-calibrated 0.11% round-trip cost; the stop floor is tested at the planned zone midpoint, which is also the simulated fill price (`backend/backtest.py:418-423`, `:568-596`).
+
+| Minimum stop floor | Train closed | Train net R | Holdout closed | Holdout net R |
+|---|---:|---:|---:|---:|
+| 0.05% (current) | 38 | +0.309 | 39 | −4.757 |
+| 0.50% | 34 | +1.957 | 35 | −3.895 |
+| 0.75% | 22 | +2.101 | 24 | −1.731 |
+| 1.00% | 12 | −1.535 | 16 | +0.284 |
+| 1.25% | 9 | −0.278 | 15 | +1.385 |
+
+This is a screening run, not a portfolio-valid estimate: the canonical `Backtester` serializes one position per symbol and models the first BE/profit-lock stage but not production's second trail (`backend/backtest.py:425-469`, `:524-600`). The run also omits funding, global three-slot contention, daily/weekly realized guards, unrealized guard usage, and symbol cooldown. Holdout samples at 1.00% and 1.25% are below 20 trades and inconclusive; at 0.75%, net loss narrows but remains negative, and each stricter floor removes trades. **Decision: retain the live 0.05% floor; this fresh replay does not validate a stricter stop-distance rule.** No production settings or service state were changed.
+
+## Exact-live-basket planned R:R sensitivity — 2026-10-20
+
+Using the same exact seven-symbol 120-day candle/funding set, I compared planned `rr_min` values 2.0, 2.5, 3.0, 3.5, and 4.0 under the current 3CANDLE-only, STRONG-trend, ADX-regime profile, 0.05% minimum stop, both production trail stages, 0.11% modeled round-trip costs, funding cutoff −0.0001, global three-position cap, and realized daily −3R / weekly −5R guards. Entries were merged chronologically by fill time then symbol; train and holdout were the first and second 60-day windows. This extends the earlier eight-symbol R:R sensitivity to the exact live basket and uses the account-calibrated cost model.
+
+| Planned minimum R:R | Train closed | Train net R | Train max DD | Holdout closed | Holdout net R | Holdout max DD | 120-day net R | 120-day max DD |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2.0 | 58 | −2.896 | 6.554R | 43 | +6.795 | 3.221R | +3.899 | 6.554R |
+| 2.5 | 41 | +1.516 | 3.441R | 32 | +2.011 | 2.160R | +3.527 | 3.441R |
+| 3.0 (current) | 58 | −2.926 | 6.549R | 43 | +6.795 | 3.221R | +3.869 | 6.549R |
+| 3.5 | 54 | −2.539 | 4.379R | 39 | +6.981 | 3.221R | +4.442 | 4.379R |
+| 4.0 | 58 | −2.896 | 6.554R | 43 | +6.795 | 3.221R | +3.899 | 6.554R |
+
+The training-selected 2.5R candidate was positive in both 60-day halves and closed 73 trades, versus 101 at the current 3R threshold. Its total was 0.342R lower over 120 days, while maximum drawdown fell from 6.549R to 3.441R, worst day from −3.480R to −1.461R, and worst week from −3.739R to −1.492R. In four separate 30-day blocks, 2.5R returned +2.420, −0.904, +1.643, and +0.368R; current 3R returned +0.184, −3.110, +2.741, and +4.055R. The 2.5R drawdown was lower in each block, but three of its four blocks had fewer than 20 trades. The 3.5R threshold returned +4.442R / 93 trades with 4.379R max drawdown; its first two 30-day blocks lost −1.573R and −0.966R, while the final two gained +3.147R and +3.833R, so its holdout strength follows a losing training window. The sweep searched five thresholds, so selection bias remains; holdout net R was materially lower at 2.5R (+2.011R) than at 3R (+6.795R), while 3.5R's +6.981R holdout gain was only +0.186R over 3R. Results omit unrealized guard usage, the 240-minute symbol cooldown, shared-capital/margin constraints, and actual intrabar paths. **Decision: 2.5R is the lower-drawdown candidate; 3.5R is the higher-total-R but less stable alternative. Neither is a live recommendation. Retain live `rr_min=3.0` unless the user explicitly approves a controlled trial.**
+
+## Signal timestamp correction — read-only production audit, 2026-10-20
+
+The earlier 10:08/10:40 notes inferred that scanning might have stopped from raw `signals.created_at` values. That inference was wrong: production PostgreSQL uses `Europe/Berlin`, and the model default `datetime.utcnow()` supplied a naive timestamp that was interpreted as local time, shifting rows two hours behind UTC. A read-only SQL snapshot at 13:09+02 found a newest row from the 13:10+02 scan after correcting the stored offset; seven enabled symbols were producing ranging or below-STRONG rejections. The service was active at `9cefc0e`, saved mode was live, and the DB had zero live trades, OPEN positions, or open orders. Local-only fix: `Signal.created_at` now defaults to aware UTC; rejection-zone keys normalize DB `Decimal` values and detector floats. Historical rows were not rewritten, no production state was changed, and behavior tests remain unrun.

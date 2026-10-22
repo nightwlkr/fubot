@@ -18,14 +18,19 @@ class OrderService:
         self.pending: dict[int, dict] = {}  # id -> order dict
 
     async def get_current_position(self, symbol: str) -> Optional[dict]:
-        """Open position on `symbol` from Binance, or None when flat/unknown."""
+        """Open position on `symbol`, or None after a successful flat response.
+
+        Exchange errors propagate so callers cannot mistake an unknown position
+        state for a flat account.
+        """
         if self.binance is None:
-            return None
+            raise RuntimeError("Binance client is unavailable; position state is unknown")
         try:
             pos = await self.binance.get_position(symbol)
         except Exception as exc:
-            logger.debug("get_current_position(%s) failed: %s", symbol, exc)
-            return None
+            logger.warning("get_current_position(%s) failed; position state is unknown (%s)",
+                           symbol, type(exc).__name__)
+            raise
         return pos or None
 
     async def get_all_open_positions(self) -> dict[str, dict]:
@@ -38,12 +43,13 @@ class OrderService:
         400/429) and the per-symbol loop was tripping it every pass.
         """
         if self.binance is None:
-            return {}
+            raise RuntimeError("Binance client is unavailable; account exposure is unknown")
         try:
             positions = await self.binance.get_all_positions()
         except Exception as exc:
-            logger.debug("get_all_open_positions failed: %s", exc)
-            return {}
+            logger.warning("get_all_open_positions failed; account exposure is unknown (%s)",
+                           type(exc).__name__)
+            raise
         return {
             p["symbol"]: p for p in positions
             if p.get("symbol") and p.get("quantity", 0) > 0

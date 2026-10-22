@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.schemas.bot import BotStartRequest, BotStatusResponse
+from backend.core.bot_engine import BotModeConflictError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/bot", tags=["bot"])
@@ -53,7 +54,10 @@ async def start_bot(
         mode = (saved.value if saved and saved.value in ("paper", "live") else "paper")
     if mode not in ("paper", "live"):
         raise HTTPException(status_code=400, detail="Mode must be 'paper' or 'live'")
-    await _bot_engine.start(mode=mode)
+    try:
+        await _bot_engine.start(mode=mode)
+    except BotModeConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     # Persist the mode so a restart doesn't revert to paper
     from backend.models.setting import Setting
     from sqlalchemy import select
@@ -240,17 +244,28 @@ async def reset_weekly_drawdown_guard(
         raise HTTPException(status_code=503, detail="Weekly drawdown guard not initialized")
     # Full reset: ignore all historical trades, start fresh
     from datetime import datetime, timezone
+    from sqlalchemy import select as _select
+    from backend.models.setting import Setting as _Setting
     now = datetime.now(timezone.utc)
-    weekly_guard.manual_reset(full_reset=True)
-    # Persist to DB so the dashboard sees it too
     try:
-        from sqlalchemy import insert as _ins
-        from backend.models.setting import Setting as _Setting  # noqa: F811
-        await db.execute(
-            _ins(_Setting).values(key="weekly_reset_from", value=now.isoformat())
+        result = await db.execute(
+            _select(_Setting).where(_Setting.key == "weekly_reset_from")
         )
+        reset_setting = result.scalar_one_or_none()
+        if reset_setting is None:
+            db.add(_Setting(key="weekly_reset_from", value=now.isoformat()))
+        else:
+            reset_setting.value = now.isoformat()
         await db.commit()
     except Exception as e:
-        logger.warning("Failed to persist weekly reset to DB: %s", e)
+        await db.rollback()
+        logger.error("Failed to persist weekly reset to DB: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not persist weekly drawdown reset",
+        ) from e
+    # Apply the in-memory reset only after persistence succeeds, so the guard
+    # cannot report a successful reset that will be lost on a restart.
+    weekly_guard.manual_reset(full_reset=True)
     logger.info("Weekly drawdown guard FULLY reset by user '%s'", user.username)
     return {"ok": True, "message": "Weekly drawdown guard fully reset"}

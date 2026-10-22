@@ -138,7 +138,12 @@ class StrategyService:
             return TradeDecision("SKIP", skip_reason=f"Strategy {signal.strategy_type} disabled")
 
         # 1. Open position on this symbol? (exchange AND paper positions in DB)
-        existing = await self.order_svc.get_current_position(symbol)
+        # The engine passes the successful account-wide snapshot from the start
+        # of this scan. Reuse it rather than making another signed positionRisk
+        # request for every pending signal. Direct callers without a snapshot
+        # retain the single-symbol fallback.
+        existing = (open_positions.get(symbol) if open_positions is not None
+                    else await self.order_svc.get_current_position(symbol))
         if existing and existing.get("quantity", 0) > 0:
             return TradeDecision("SKIP", skip_reason=f"Position already open on {symbol}")
         if self.session_factory is not None and await self._has_open_db_position(symbol):
@@ -321,8 +326,10 @@ class StrategyService:
             )
         else:
             position_id = None
+            order_stage = "entry_limit"
             try:
-                fill = await self._enter_with_limit(symbol, side, float(entry), float(size))
+                fill = await self._enter_with_limit(
+                    symbol, side, float(entry), float(size), signal_id=signal.db_id)
                 if fill is None:
                     # The order may have filled without us confirming it (status
                     # read failure) — never leave that unprotected.
@@ -339,9 +346,11 @@ class StrategyService:
                 # The Position row is created AFTER the fill so its entry/qty
                 # are exchange truth from the start (the SL/TP records link to
                 # it via orders.position_id).
+                order_stage = "create_position"
                 position_id = await self._create_position(
                     signal, fill_price, size, False,
                     initial_risk_distance=risk_distance)
+                order_stage = "update_position_fill"
                 await self._update_position_fill(position_id, fill_price, fill_qty)
 
                 # 5d. The plan's SL/TP are only placeable while the market is
@@ -368,6 +377,7 @@ class StrategyService:
                 # considered and rejected — this is the only option that cannot
                 # leave a position with mis-sized risk, and it is the same rule
                 # as the entry itself: the planned price or no trade.
+                order_stage = "post_fill_mark_price"
                 mark_px = await self._mark_price(symbol)
                 stop_px, tp_px = float(signal.stop_loss), float(signal.take_profit)
                 violation = self._side_violation(signal.direction, stop_px, tp_px, mark_px)
@@ -401,21 +411,26 @@ class StrategyService:
                     return TradeDecision(
                         "SKIP", skip_reason=f"Setup void after fill: {violation}")
 
+                order_stage = "persist_entry_order"
                 await self.order_svc.place_order(
                     symbol, side, "LIMIT", size, price=Decimal(str(fill_price)),
                     simulate=False, binance_order_id=fill["orderId"],
                     position_id=position_id,
                 )
+                order_stage = "place_stop"
                 sl_res = await self.binance.modify_position_stop(
                     symbol, signal.direction, float(signal.stop_loss), fill_qty)
+                order_stage = "persist_stop_order"
                 await self.order_svc.place_order(
                     symbol, "SELL" if signal.direction == "LONG" else "BUY",
                     "STOP_MARKET", size, price=signal.stop_loss,
                     simulate=False, binance_order_id=sl_res.get("orderId"),
                     position_id=position_id,
                 )
+                order_stage = "place_take_profit"
                 tp_res = await self.binance.place_take_profit_order(
                     symbol, signal.direction, float(signal.take_profit), fill_qty)
+                order_stage = "persist_take_profit_order"
                 await self.order_svc.place_order(
                     symbol, "SELL" if signal.direction == "LONG" else "BUY",
                     "TAKE_PROFIT_MARKET", size, price=signal.take_profit,
@@ -423,7 +438,9 @@ class StrategyService:
                     position_id=position_id,
                 )
             except Exception as exc:
-                logger.error("[%s] Live order flow failed: %s", symbol, exc)
+                logger.error(
+                    "[%s] Live order flow failed signal_id=%s stage=%s: %s",
+                    symbol, signal.db_id, order_stage, exc)
                 # The entry may already have filled before the failure. Never
                 # leave an UNPROTECTED position behind (live 2026-10-15: a
                 # rejected SL left XRPUSDT and BTCUSDT open and naked for
@@ -651,7 +668,7 @@ class StrategyService:
             logger.exception("Failed to mark signal %s as %s", db_id, status)
 
     async def _enter_with_limit(self, symbol: str, side: str, price: float,
-                                size: float,
+                                size: float, signal_id: Optional[int] = None,
                                 timeout_s: Optional[float] = None) -> Optional[dict]:
         """Place a LIMIT at the planned zone price and wait briefly for the fill.
 
@@ -663,6 +680,9 @@ class StrategyService:
         """
         res = await self.binance.place_limit_order(symbol, side, price, size)
         order_id = res.get("orderId")
+        logger.info(
+            "[%s] LIMIT entry response signal_id=%s order_id=%s tif=%s status=%s",
+            symbol, signal_id, order_id, res.get("timeInForce"), res.get("status"))
         if not order_id:
             return None
 
