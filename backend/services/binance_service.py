@@ -978,6 +978,9 @@ class BinanceService:
         ``totalPnl`` silently degrades to GROSS — which is how every live
         ``pnl_usdt``, ``pnl_r`` and the -3R breaker ended up fee-blind for a month.
         ``income_type`` remains only as a client-side filter for narrow queries.
+        Commission assets other than USDT are converted at the close of the
+        Binance 1m candle containing each event; conversion failure raises rather
+        than mixing asset units.
 
         Args:
             symbol: Trading pair (e.g. "BTCUSDT").
@@ -992,7 +995,8 @@ class BinanceService:
                 same symbol cannot donate its fees to this close.
 
         Returns:
-            {"totalPnl": net, "realizedPnl": gross, "fees": <0, "funding": <0}
+            {"totalPnl": net_usdt, "realizedPnl": gross_usdt,
+             "fees": <0 USDT, "funding": <0 USDT}
         """
         if start_time is None:
             start_time = int(
@@ -1009,11 +1013,15 @@ class BinanceService:
         # NOTE: incomeType is deliberately NOT sent. See the docstring.
         data = await self._signed_request("GET", "fapi/v1/income", params)
         
-        # Sum income events
+        # Binance's income.amount is denominated in each row's `asset`. For
+        # USDS-M futures, realized PnL/funding are normally USDT, but discounted
+        # commissions can be charged in BNB. Never add raw BNB to USDT: convert
+        # those fees at the close of the minute containing each income event.
         realized_pnl = 0.0
         fees = 0.0
         funding = 0.0
-        
+        commissions_by_asset: dict[str, list[tuple[int, float]]] = {}
+
         for item in data:
             income = float(item.get("income", 0))
             itype = item.get("incomeType", "")
@@ -1023,10 +1031,48 @@ class BinanceService:
             if itype == "REALIZED_PNL":
                 realized_pnl += income
             elif itype == "COMMISSION":
-                fees += income  # negative
+                asset = str(item.get("asset") or "").upper()
+                if not asset:
+                    raise BinanceAPIError(0, "Commission income row is missing its asset")
+                if asset == "USDT":
+                    fees += income
+                else:
+                    try:
+                        event_time = int(item["time"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise BinanceAPIError(
+                            0, f"Commission income row for {asset} is missing a valid time") from exc
+                    commissions_by_asset.setdefault(asset, []).append((event_time, income))
             elif itype == "FUNDING_FEE":
                 funding += income
             # TRANSFER / WELCOME_BONUS / anything else is not PnL — skipped.
+
+        minute_ms = 60_000
+        for asset, commissions in commissions_by_asset.items():
+            symbol = f"{asset}USDT"
+            event_minutes = [event_time // minute_ms * minute_ms
+                             for event_time, _ in commissions]
+            start_ms = min(event_minutes)
+            end_ms = max(event_minutes) + minute_ms
+            prices: dict[int, float] = {}
+            cursor = start_ms
+            # Binance's klines endpoint caps each page at 1500 bars. Split long
+            # position lifetimes so every commission event receives a price.
+            while cursor < end_ms:
+                page_end = min(end_ms, cursor + 1500 * minute_ms)
+                bars = await self.get_klines_window(
+                    symbol, "1m", cursor, page_end - 1, limit=1500)
+                for bar in bars:
+                    prices[int(bar["open_time"])] = float(bar["close"])
+                cursor = page_end
+
+            for event_time, amount in commissions:
+                minute = event_time // minute_ms * minute_ms
+                price = prices.get(minute)
+                if price is None or price <= 0:
+                    raise BinanceAPIError(
+                        0, f"Could not convert {asset} commission to USDT for {symbol}")
+                fees += amount * price
         
         total = realized_pnl + fees + funding
         

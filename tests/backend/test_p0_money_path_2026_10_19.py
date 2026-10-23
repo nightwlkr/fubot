@@ -46,8 +46,8 @@ class TestIncomeIncludesFeesAndFunding:
         def handler(request):
             return httpx.Response(200, json=[
                 {"incomeType": "REALIZED_PNL", "income": "-5.0"},
-                {"incomeType": "COMMISSION", "income": "-0.3"},
-                {"incomeType": "FUNDING_FEE", "income": "-0.1"},
+                {"incomeType": "COMMISSION", "income": "-0.3", "asset": "USDT"},
+                {"incomeType": "FUNDING_FEE", "income": "-0.1", "asset": "USDT"},
             ])
 
         svc = _signed_service(handler)
@@ -118,6 +118,31 @@ class TestIncomeIncludesFeesAndFunding:
             await svc.close()
 
         assert out["totalPnl"] == pytest.approx(1.0)
+
+    async def test_bnb_commission_is_converted_to_usdt_at_event_minute_price(self):
+        def handler(request):
+            return httpx.Response(200, json=[
+                {"incomeType": "REALIZED_PNL", "income": "-5.0", "asset": "USDT", "time": 60_001},
+                {"incomeType": "COMMISSION", "income": "-0.001", "asset": "BNB", "time": 60_012},
+                {"incomeType": "FUNDING_FEE", "income": "-0.1", "asset": "USDT", "time": 60_030},
+            ])
+
+        svc = _signed_service(handler)
+        requested = []
+
+        async def klines(symbol, interval, start_ms, end_ms, limit=1500):
+            requested.append((symbol, interval, start_ms, end_ms, limit))
+            return [{"open_time": 60_000, "close": 600.0}]
+
+        svc.get_klines_window = klines
+        try:
+            out = await svc.get_position_income("BTCUSDT")
+        finally:
+            await svc.close()
+
+        assert requested == [("BNBUSDT", "1m", 60_000, 119_999, 1500)]
+        assert out["fees"] == pytest.approx(-0.6)
+        assert out["totalPnl"] == pytest.approx(-5.7)
 
 
 # ---------------------------------------------------------------------------
