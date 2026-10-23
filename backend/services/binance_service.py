@@ -199,6 +199,21 @@ class CircuitBreaker:
 class BinanceService:
     """Async wrapper around Binance Futures API."""
 
+    @staticmethod
+    def position_income_start_ms(opened_at: datetime | None) -> int | None:
+        """Include entry income that can predate the DB row's post-fill timestamp.
+
+        Some entries generate exchange commission events before the position row
+        is persisted. A short lookback keeps those fees in the position's income
+        query while still excluding earlier same-symbol activity in normal bot
+        operation.
+        """
+        if opened_at is None:
+            return None
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+        return int((opened_at - timedelta(minutes=5)).timestamp() * 1000)
+
     def __init__(self, api_key: str | None = None, api_secret: str | None = None, testnet: bool | None = None):
         self._api_key = api_key or settings.BINANCE_API_KEY
         self._api_secret = api_secret or settings.BINANCE_API_SECRET

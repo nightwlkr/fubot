@@ -223,7 +223,7 @@ Monitor the 72h paper run (scheduled checks). On pass: go-live decision (user), 
 
 ## Verification
 
-- Latest full-suite: `PYTHONPATH=. pytest tests/backend/ -q` — 695 passed, 0 failed, 235 existing deprecation warnings (2026-10-24, with configured local PostgreSQL access).
+- Latest full-suite: `PYTHONPATH=. pytest tests/backend/ -q` — 696 passed, 0 failed, 235 existing deprecation warnings (2026-10-24, with configured local PostgreSQL access).
 - `PYTHONPATH=. python -c "import backend.main"` — backend imports cleanly
 - `cd frontend && npm run build` — dashboard builds to `frontend/dist/`
 - `cd frontend && npm run lint` — oxlint; warnings tolerated, errors block

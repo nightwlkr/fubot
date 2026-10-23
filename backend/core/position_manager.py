@@ -1062,12 +1062,7 @@ class PositionManager:
                     # Scope income to THIS position's lifetime — the 7-day
                     # default window would also sum an earlier position's PnL
                     # on the same symbol.
-                    opened_at = row.opened_at
-                    start_ms = None
-                    if opened_at is not None:
-                        if opened_at.tzinfo is None:
-                            opened_at = opened_at.replace(tzinfo=timezone.utc)
-                        start_ms = int(opened_at.timestamp() * 1000) - 60_000
+                    start_ms = BinanceService.position_income_start_ms(row.opened_at)
                     income = await self.binance.get_position_income(
                         row.symbol, start_time=start_ms)
                     # Only trust the exchange PnL if income events were found.

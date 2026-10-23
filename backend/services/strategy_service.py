@@ -23,6 +23,7 @@ from sqlalchemy import select, update
 from backend.models.position import Position as PositionModel
 from backend.models.signal import Signal as SignalModel
 from backend.core import risk_units
+from backend.services.binance_service import BinanceService
 
 logger = logging.getLogger(__name__)
 
@@ -1052,8 +1053,7 @@ class StrategyService:
                     try:
                         income = await self.binance.get_position_income(
                             row.symbol,
-                            start_time=(int(row.opened_at.timestamp() * 1000)
-                                        if row.opened_at else None),
+                            start_time=BinanceService.position_income_start_ms(row.opened_at),
                         )
                         pnl_usdt = float(income.get("totalPnl", 0) or 0)
                         distance = risk_units.risk_distance(

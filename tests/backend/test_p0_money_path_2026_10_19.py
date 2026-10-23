@@ -15,6 +15,8 @@ implementation could still satisfy a naive behavioural test.
 
 No network access (httpx.MockTransport).
 """
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 
@@ -143,6 +145,13 @@ class TestIncomeIncludesFeesAndFunding:
         assert requested == [("BNBUSDT", "1m", 60_000, 119_999, 1500)]
         assert out["fees"] == pytest.approx(-0.6)
         assert out["totalPnl"] == pytest.approx(-5.7)
+
+    def test_position_income_window_includes_delayed_entry_income_events(self):
+        opened_at = datetime(2026, 10, 22, 1, 40, 23, tzinfo=timezone.utc)
+        expected_start = datetime(2026, 10, 22, 1, 35, 23, tzinfo=timezone.utc)
+        expected = int(expected_start.timestamp() * 1000)
+
+        assert BinanceService.position_income_start_ms(opened_at) == expected
 
 
 # ---------------------------------------------------------------------------
