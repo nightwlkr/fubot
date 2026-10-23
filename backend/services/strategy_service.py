@@ -12,6 +12,7 @@ them — the STEP7 requirement wins.
 """
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -912,9 +913,23 @@ class StrategyService:
                 symbol, exc)
             return LiveCleanupResult(flat=False, exposure_unknown=True)
 
-        qty = float((pos or {}).get("quantity", 0) or 0)
-        if qty <= 0:
-            return LiveCleanupResult(flat=True)  # entry never filled
+        try:
+            position_qty = Decimal(str((pos or {}).get("quantity", 0) or 0))
+            position_side = str((pos or {}).get("side", "")).upper()
+            qty = float(position_qty)
+            if (not position_qty.is_finite() or position_qty < 0 or
+                    not math.isfinite(qty)):
+                raise ValueError("non-finite or negative position quantity")
+            if position_qty == 0:
+                return LiveCleanupResult(flat=True)  # entry never filled
+            if position_side not in ("LONG", "SHORT"):
+                raise ValueError("unknown position side")
+        except Exception as exc:
+            logger.error(
+                "[%s] Invalid exchange position snapshot after failed flow (%s) "
+                "— refusing cleanup action; exposure is unknown", symbol,
+                type(exc).__name__)
+            return LiveCleanupResult(flat=False, position=pos, exposure_unknown=True)
 
         try:
             algos = await self.binance.get_open_algo_orders(symbol)
@@ -942,7 +957,7 @@ class StrategyService:
                 "(qty %s, mark %s); flattening the exchange position",
                 symbol, pos.get("side"), qty, pos.get("markPrice"))
 
-        close_side = "SELL" if (pos.get("side") or "LONG") == "LONG" else "BUY"
+        close_side = "SELL" if position_side == "LONG" else "BUY"
         try:
             await self.binance.place_market_order(
                 symbol, close_side, qty, reduce_only=True)

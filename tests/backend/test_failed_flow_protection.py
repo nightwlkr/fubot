@@ -77,6 +77,27 @@ def test_failed_flow_does_not_trust_an_undersized_resting_stop():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    "position",
+    [
+        {"side": "LONG", "quantity": "NaN", "markPrice": 100.0},
+        {"side": "LONG", "quantity": "Infinity", "markPrice": 100.0},
+        {"side": "LONG", "quantity": -1.0, "markPrice": 100.0},
+        {"side": "LONG", "quantity": "not-a-number", "markPrice": 100.0},
+        {"side": "UNKNOWN", "quantity": 1.0, "markPrice": 100.0},
+    ],
+)
+def test_failed_flow_does_not_trade_on_invalid_position_snapshot(position):
+    async def scenario():
+        exchange = _Exchange(position, [])
+        result = await _service(exchange)._flatten_if_unprotected("BTCUSDT")
+        assert result.flat is False
+        assert result.exposure_unknown is True
+        assert exchange.market_closes == []
+
+    asyncio.run(scenario())
+
+
 def test_failed_flow_keeps_position_when_valid_covering_stop_rests():
     async def scenario():
         exchange = _Exchange(
