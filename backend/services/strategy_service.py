@@ -1005,7 +1005,7 @@ class StrategyService:
                 if str(algo.get("workingType", "")).upper() != "MARK_PRICE":
                     continue
                 trigger = Decimal(str(algo.get("triggerPrice")))
-                if not trigger.is_finite():
+                if not trigger.is_finite() or trigger <= 0:
                     continue
                 close_all = (algo.get("closePosition") is True or
                              str(algo.get("closePosition")).lower() == "true")
