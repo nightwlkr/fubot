@@ -129,6 +129,7 @@ def test_settings_trading_roundtrip(client, test_user):
     res = client.get("/api/settings/trading")
     assert res.json()["risk_percent"] == original["risk_percent"]
     assert res.json()["max_positions"] == original["max_positions"]
+    assert res.json()["max_aggregate_risk_pct"] == 3.0
 
 
 def test_strategy_toggles_roundtrip(client, test_user):
@@ -168,17 +169,22 @@ def test_trading_settings_hot_reload_engine(client, test_user):
     original = client.get("/api/settings/trading").json()
     try:
         res = client.put("/api/settings/trading",
-                         json={"max_position_notional_pct": 250.0})
+                         json={"max_position_notional_pct": 250.0,
+                               "max_aggregate_risk_pct": 2.5})
         assert res.status_code == 200
         assert res.json()["max_position_notional_pct"] == 250.0
+        assert res.json()["max_aggregate_risk_pct"] == 2.5
 
         engine = getattr(app.state, "bot_engine", None)
         assert engine is not None, "engine not wired into app.state"
         assert float(engine.settings.get("max_position_notional_pct")) == 250.0, \
             "running engine did not pick up the new setting"
+        assert float(engine.settings.get("max_aggregate_risk_pct")) == 2.5, \
+            "running engine did not pick up the aggregate risk cap"
     finally:
         client.put("/api/settings/trading", json={
-            "max_position_notional_pct": original["max_position_notional_pct"]})
+            "max_position_notional_pct": original["max_position_notional_pct"],
+            "max_aggregate_risk_pct": original["max_aggregate_risk_pct"]})
 
 
 def test_spa_served_and_api_still_wins(client, test_user):

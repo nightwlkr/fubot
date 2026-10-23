@@ -238,6 +238,14 @@ class DailyResetService:
         limit = stats["limit_r"]
         used = stats["used_r"]
 
+        # Restore a breaker persisted by a prior process, including one that
+        # was triggered by unrealized PnL and therefore has no realized loss
+        # large enough to trip the threshold on its own.
+        if stats.get("limit_hit"):
+            self._limit_hit_today = True
+            self._limit_hit_date = today_utc()
+            return False
+
         # Combine realized and unrealized PnL before applying the shared NET
         # daily-loss rule. Profitable open positions offset losses, just as
         # closed winners offset closed losses.
@@ -250,7 +258,7 @@ class DailyResetService:
             used = used_r_from(SimpleNamespace(total_pnl_r=combined_pnl_r))
 
         if used >= limit:
-            await self._trigger_daily_stop(used, limit)
+            await self._latch_daily_limit(used, limit)
             return False
 
         # Warning at 80% of limit (epsilon: 3.0 * 0.8 == 2.4000000000000004)
@@ -289,8 +297,13 @@ class DailyResetService:
             total_unrealized_pnl_r += unrealized_pnl / (quantity * risk_distance)
         return total_unrealized_pnl_r
 
-    async def _trigger_daily_stop(self, used_r: float, limit_r: float):
-        """Emergency stop: bot stops trading for the rest of the day."""
+    async def _latch_daily_limit(self, used_r: float, limit_r: float):
+        """Latch the entry breaker for today without terminating the scan loop.
+
+        Keeping the loop alive lets ``check_and_reset`` observe the next UTC
+        day and resume automatically. The PositionManager remains independent,
+        so existing live positions continue to rely on their exchange stops.
+        """
         self._limit_hit_today = True
         today = today_utc()
         self._limit_hit_date = today
@@ -303,10 +316,15 @@ class DailyResetService:
                 summary = result.scalar_one_or_none()
                 if summary:
                     summary.daily_loss_limit_hit = True
-                    await session.commit()
-
-        if self.bot:
-            await self.bot.stop()
+                else:
+                    summary = DailySummary(
+                        date=today, total_trades=0, wins=0, losses=0,
+                        breakeven=0, total_pnl_r=0.0, total_pnl_usdt=0.0,
+                        worst_trade_r=0.0, best_trade_r=0.0,
+                        daily_loss_limit_hit=True,
+                    )
+                    session.add(summary)
+                await session.commit()
 
         if self.alerts:
             await self.alerts.daily_limit_hit(used_r, limit_r)

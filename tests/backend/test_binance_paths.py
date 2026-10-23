@@ -130,6 +130,29 @@ async def test_closing_orders_are_reduce_only():
     assert "type=TAKE_PROFIT_MARKET" in order_urls[1] and "reduceOnly=true" in order_urls[1]
 
 
+async def test_open_algo_orders_preserve_fields_needed_to_validate_stop_coverage():
+    def handler(request: httpx.Request):
+        assert request.url.path.endswith("/fapi/v1/openAlgoOrders")
+        return httpx.Response(200, json=[{
+            "algoId": 55, "symbol": "BTCUSDT", "orderType": "STOP_MARKET",
+            "side": "SELL", "positionSide": "BOTH", "triggerPrice": "90000",
+            "quantity": "0.01", "reduceOnly": True, "closePosition": False,
+            "workingType": "MARK_PRICE", "algoStatus": "NEW",
+        }])
+
+    svc = make_service(handler)
+    try:
+        orders = await svc.get_open_algo_orders("BTCUSDT")
+    finally:
+        await svc._client.aclose()
+    assert orders == [{
+        "algoId": 55, "symbol": "BTCUSDT", "orderType": "STOP_MARKET",
+        "side": "SELL", "positionSide": "BOTH", "triggerPrice": "90000",
+        "quantity": "0.01", "reduceOnly": True, "closePosition": False,
+        "workingType": "MARK_PRICE", "algoStatus": "NEW",
+    }]
+
+
 async def test_klines_window_carries_start_end_and_the_bar_cap():
     """`get_klines_window` is the backtest's only seam onto ranged history.
 

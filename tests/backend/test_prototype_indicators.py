@@ -619,6 +619,7 @@ class TestObFvgSettingsPlumbing:
         s = TradingSettingsResponse()
         assert s.strategy_obfvg_enabled is False
         assert s.strategy_obfvg_max_age_bars == 2
+        assert s.max_aggregate_risk_pct == 3.0
 
     def test_update_schema_accepts_the_new_keys(self):
         from backend.schemas.settings import TradingSettingsUpdate

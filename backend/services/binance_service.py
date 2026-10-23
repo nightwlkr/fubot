@@ -624,6 +624,7 @@ class BinanceService:
                     "side": "LONG" if float(p["positionAmt"]) > 0 else "SHORT",
                     "quantity": abs(float(p["positionAmt"])),
                     "entryPrice": float(p["entryPrice"]),
+                    "markPrice": float(p.get("markPrice", 0) or 0),
                     "unrealizedPnl": float(p.get("unRealizedProfit", 0)),
                     "leverage": int(p.get("leverage", 1)),
                     "margin": float(p.get("isolatedWallet", 0)),
@@ -945,8 +946,13 @@ class BinanceService:
                 "algoId": a.get("algoId"),
                 "symbol": a.get("symbol"),
                 "orderType": a.get("orderType"),
+                "side": a.get("side"),
+                "positionSide": a.get("positionSide"),
                 "triggerPrice": a.get("triggerPrice"),
                 "quantity": a.get("quantity"),
+                "reduceOnly": a.get("reduceOnly"),
+                "closePosition": a.get("closePosition"),
+                "workingType": a.get("workingType"),
                 "algoStatus": a.get("algoStatus"),
             }
             for a in data

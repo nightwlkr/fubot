@@ -4,7 +4,7 @@ Risk Service — position sizing, R:R validation, and daily loss enforcement.
 Wired by: StrategyService (gate entry before order placement) and DailyReset (reset limits).
 """
 import logging
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from typing import Optional
 
@@ -67,6 +67,59 @@ class RiskService:
             )
             return max_qty
         return qty
+
+    def cap_aggregate_stop_risk(
+        self,
+        qty: Decimal,
+        entry_price: Decimal,
+        stop_loss_price: Decimal,
+        balance_usdt: Decimal,
+        open_positions: dict[str, dict],
+        max_aggregate_risk_pct: Decimal,
+    ) -> Decimal:
+        """Cap a new quantity so all frozen initial-stop risk stays within budget.
+
+        The open-position snapshot must carry each position's exchange quantity
+        and frozen ``initialRiskDistance``. Missing or invalid risk data returns
+        zero so an unknown exposure cannot be treated as free capacity.
+        """
+        try:
+            if (not qty.is_finite() or qty <= 0 or
+                    not entry_price.is_finite() or entry_price <= 0 or
+                    not balance_usdt.is_finite() or balance_usdt <= 0 or
+                    not max_aggregate_risk_pct.is_finite() or
+                    max_aggregate_risk_pct <= 0 or open_positions is None):
+                return Decimal("0")
+            stop_distance = abs(entry_price - stop_loss_price)
+            if not stop_distance.is_finite() or stop_distance <= 0:
+                return Decimal("0")
+        except Exception:
+            return Decimal("0")
+
+        reserved_risk = Decimal("0")
+        for position in open_positions.values():
+            try:
+                position_qty = Decimal(str(position.get("quantity")))
+                if not position_qty.is_finite() or position_qty < 0:
+                    return Decimal("0")
+                if position_qty == 0:
+                    continue
+                risk_distance = Decimal(str(position.get("initialRiskDistance")))
+                if not risk_distance.is_finite() or risk_distance <= 0:
+                    return Decimal("0")
+                reserved_risk += position_qty * risk_distance
+                if not reserved_risk.is_finite():
+                    return Decimal("0")
+            except Exception:
+                return Decimal("0")
+
+        risk_budget = balance_usdt * max_aggregate_risk_pct / Decimal("100")
+        remaining_risk = risk_budget - reserved_risk
+        if remaining_risk <= 0:
+            return Decimal("0")
+        max_qty = (remaining_risk / stop_distance).quantize(
+            Decimal("0.000001"), rounding=ROUND_DOWN)
+        return min(qty, max_qty)
 
     def validate_rr_ratio(
         self,

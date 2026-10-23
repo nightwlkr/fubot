@@ -31,6 +31,9 @@ class TradingSettingsResponse(BaseModel):
     # it binds it reduces the effective risk below risk_percent (with ~1% stops,
     # a 50% cap turns a 5% risk target into ~$1-2 per trade).
     max_position_notional_pct: float = 200.0
+    # Maximum combined loss at the positions' frozen initial stops, as a
+    # percentage of the current account balance.
+    max_aggregate_risk_pct: float = 3.0
     # Move the stop to break-even once the trade is this many R in profit.
     be_trail_trigger_r: float = 0.5
     # Profit lock: at this many R in profit, start trailing the stop to lock in gains.
@@ -98,6 +101,7 @@ class TradingSettingsUpdate(BaseModel):
     # Negative values here produced a negative cap -> negative qty -> a paper
     # Position row with quantity=-5 (the zero guard does not catch negatives).
     max_position_notional_pct: float | None = Field(default=None, ge=0, le=1000)
+    max_aggregate_risk_pct: float | None = Field(default=None, ge=0.1, le=20.0)
     be_trail_trigger_r: float | None = Field(default=None, ge=0, le=10)
     profit_lock_trigger_r: float | None = Field(default=None, ge=0, le=20)
     profit_lock_trail_r: float | None = Field(default=None, ge=0, le=20)

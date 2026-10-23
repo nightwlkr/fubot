@@ -33,6 +33,15 @@ class TradeDecision:
     plan: Optional[dict] = None
     position_id: Optional[int] = None
     paper: bool = False
+    surviving_position: Optional[dict] = None
+    exposure_unknown: bool = False
+
+
+@dataclass
+class LiveCleanupResult:
+    flat: bool
+    position: Optional[dict] = None
+    exposure_unknown: bool = False
 
 
 class StrategyService:
@@ -136,6 +145,19 @@ class StrategyService:
         strategy_key = f"strategy_{signal.strategy_type.lower()}_enabled"
         if not bool(self.settings.get(strategy_key, True)):
             return TradeDecision("SKIP", skip_reason=f"Strategy {signal.strategy_type} disabled")
+
+        # A direct live caller must not silently bypass the portfolio risk cap
+        # by omitting the account-wide snapshot that BotEngine normally passes.
+        if not paper_mode and open_positions is None:
+            try:
+                open_positions = await self.order_svc.get_all_open_positions()
+            except Exception as exc:
+                logger.error("[%s] Cannot size live entry without account exposure (%s)",
+                             symbol, type(exc).__name__)
+                return TradeDecision("SKIP", skip_reason="Account exposure unavailable")
+        if not paper_mode and open_positions and not await self._ensure_open_risk_bases(open_positions):
+            return TradeDecision(
+                "SKIP", skip_reason="Open-position stop risk is unknown")
 
         # 1. Open position on this symbol? (exchange AND paper positions in DB)
         # The engine passes the successful account-wide snapshot from the start
@@ -292,8 +314,26 @@ class StrategyService:
                 symbol, float(notional_pct), float(size), float(capped),
                 float(intended_risk), float(eff_risk), eff_pct, float(risk_percent))
         size = capped
+
+        if not paper_mode:
+            aggregate_risk_pct = Decimal(str(
+                self.settings.get("max_aggregate_risk_pct", 3.0)))
+            aggregate_capped = self.risk_svc.cap_aggregate_stop_risk(
+                qty=size,
+                entry_price=Decimal(str(entry)),
+                stop_loss_price=signal.stop_loss,
+                balance_usdt=balance,
+                open_positions=open_positions,
+                max_aggregate_risk_pct=aggregate_risk_pct,
+            )
+            if aggregate_capped < size:
+                logger.warning(
+                    "[%s] Aggregate stop-risk cap %.2f%% binds — position cut from "
+                    "%.6f to %.6f qty", symbol, float(aggregate_risk_pct),
+                    float(size), float(aggregate_capped))
+            size = aggregate_capped
         if size == Decimal("0"):
-            return TradeDecision("SKIP", skip_reason="Position size too small")
+            return TradeDecision("SKIP", skip_reason="Position size too small or aggregate risk cap is full")
 
         plan = {
             "symbol": symbol,
@@ -305,6 +345,9 @@ class StrategyService:
             "rr_ratio": float(signal.rr_ratio),
             "initial_risk_distance": risk_distance,
         }
+        # The plan is assembled after both per-position and portfolio caps;
+        # downstream same-scan occupancy must reserve the capped risk budget.
+        plan["size"] = float(size)
 
         # 6. Execute — simulated fills in paper, real Binance orders in live.
         #
@@ -333,13 +376,14 @@ class StrategyService:
                 if fill is None:
                     # The order may have filled without us confirming it (status
                     # read failure) — never leave that unprotected.
-                    await self._flatten_if_unprotected(symbol)
+                    cleanup = await self._flatten_if_unprotected(symbol)
                     signal.status = "SKIPPED"
                     await self._mark_signal(
                         signal.db_id, "SKIPPED",
                         "Limit entry not filled at the plan price")
                     return TradeDecision(
-                        "SKIP", skip_reason="Limit entry not filled at the plan price")
+                        "SKIP", skip_reason="Limit entry not filled at the plan price",
+                        exposure_unknown=not cleanup.flat)
 
                 fill_price = fill["avgPrice"]
                 fill_qty = fill["executedQty"]
@@ -347,9 +391,16 @@ class StrategyService:
                 # are exchange truth from the start (the SL/TP records link to
                 # it via orders.position_id).
                 order_stage = "create_position"
+                actual_risk_distance = abs(float(fill_price) - float(signal.stop_loss))
+                # Keep the plan current before any database write can fail. If
+                # exchange cleanup later confirms a protected surviving fill,
+                # the scan snapshot can reserve its actual quantity and basis.
+                plan["size"] = float(fill_qty)
+                plan["entry"] = float(fill_price)
+                plan["initial_risk_distance"] = actual_risk_distance
                 position_id = await self._create_position(
                     signal, fill_price, size, False,
-                    initial_risk_distance=risk_distance)
+                    initial_risk_distance=actual_risk_distance)
                 order_stage = "update_position_fill"
                 await self._update_position_fill(position_id, fill_price, fill_qty)
 
@@ -388,8 +439,8 @@ class StrategyService:
                         "flattening at market instead of leaving the fill naked",
                         symbol, signal.direction, float(fill_price), violation,
                         mark_px, stop_px, tp_px)
-                    flattened = await self._flatten_if_unprotected(symbol)
-                    if flattened:
+                    cleanup = await self._flatten_if_unprotected(symbol)
+                    if cleanup.flat:
                         # Nothing is open on the exchange for this symbol — close
                         # the row AND record the realised Trade. The ~1s flatten
                         # is a real loss: it must reach `trades` (which every
@@ -408,8 +459,14 @@ class StrategyService:
                     await self._mark_signal(
                         signal.db_id, "SKIPPED",
                         f"Setup void after fill: {violation}")
+                    surviving = self._surviving_position(
+                        cleanup, plan, signal.stop_loss)
                     return TradeDecision(
-                        "SKIP", skip_reason=f"Setup void after fill: {violation}")
+                        "SKIP", skip_reason=f"Setup void after fill: {violation}",
+                        surviving_position=surviving,
+                        exposure_unknown=(cleanup.exposure_unknown or
+                                          (not cleanup.flat and
+                                           surviving is None)))
 
                 order_stage = "persist_entry_order"
                 await self.order_svc.place_order(
@@ -447,8 +504,8 @@ class StrategyService:
                 # hours). If the exchange holds a position for this symbol with
                 # no resting stop, flatten it. If a stop IS resting, keep the
                 # position — the reconcile adopts it with its SL/TP.
-                flattened = await self._flatten_if_unprotected(symbol)
-                if flattened:
+                cleanup = await self._flatten_if_unprotected(symbol)
+                if cleanup.flat:
                     # Nothing is open on the exchange for this symbol — undo the
                     # row we just created.
                     await self._close_position_row(position_id)
@@ -469,7 +526,12 @@ class StrategyService:
                 signal.status = "SKIPPED"
                 await self._mark_signal(
                     signal.db_id, "SKIPPED", f"Order placement failed: {exc}")
-                return TradeDecision("SKIP", skip_reason=f"Order placement failed: {exc}")
+                surviving = self._surviving_position(cleanup, plan, signal.stop_loss)
+                return TradeDecision(
+                    "SKIP", skip_reason=f"Order placement failed: {exc}",
+                    surviving_position=surviving,
+                    exposure_unknown=(cleanup.exposure_unknown or
+                                      (not cleanup.flat and surviving is None)))
 
         # 7. Mark the signal TRIGGERED (position row already created above)
         signal.status = "TRIGGERED"
@@ -500,6 +562,37 @@ class StrategyService:
                 select(PositionModel).where(PositionModel.status == "OPEN")
             )
             return len(result.scalars().all())
+
+    async def _ensure_open_risk_bases(self, open_positions: dict[str, dict]) -> bool:
+        """Attach missing frozen stop distances or reject unknown live exposure."""
+        missing = [
+            symbol for symbol, position in open_positions.items()
+            if position.get("quantity", 0) > 0 and not position.get("initialRiskDistance")
+        ]
+        if not missing:
+            return True
+        if self.session_factory is None:
+            return False
+        try:
+            async with self.session_factory() as session:
+                result = await session.execute(
+                    select(PositionModel.symbol, PositionModel.initial_risk_distance).where(
+                        PositionModel.status == "OPEN",
+                        PositionModel.mode == "live",
+                        PositionModel.symbol.in_(missing),
+                    )
+                )
+                bases = {symbol: distance for symbol, distance in result.fetchall()}
+            for symbol in missing:
+                distance = bases.get(symbol)
+                if distance is None or float(distance) <= 0:
+                    return False
+                open_positions[symbol]["initialRiskDistance"] = float(distance)
+            return True
+        except Exception as exc:
+            logger.error("Cannot read frozen risk basis for open positions (%s)",
+                         type(exc).__name__)
+            return False
 
     async def _current_price(self, symbol: str) -> Optional[float]:
         if self.binance is None:
@@ -749,7 +842,44 @@ class StrategyService:
                 "It may fill later and open an unmanaged position. Manual "
                 "cancellation on the exchange may be required.", symbol, order_id, exc)
 
-    async def _flatten_if_unprotected(self, symbol: str) -> bool:
+    @staticmethod
+    def _surviving_position(cleanup: LiveCleanupResult, plan: dict,
+                            stop_loss: Decimal) -> Optional[dict]:
+        """Build a conservative scan snapshot for a confirmed protected fill."""
+        if cleanup.flat or cleanup.exposure_unknown or not cleanup.position:
+            return None
+        try:
+            position = cleanup.position
+            quantity = Decimal(str(position.get("quantity")))
+            entry_price = Decimal(str(position.get("entryPrice")))
+            planned_entry = Decimal(str(plan.get("entry")))
+            planned_risk = Decimal(str(plan.get("initial_risk_distance")))
+            unrealized = Decimal(str(position.get("unrealizedPnl")))
+            if (not quantity.is_finite() or quantity <= 0 or
+                    not entry_price.is_finite() or entry_price <= 0 or
+                    not planned_entry.is_finite() or planned_entry <= 0 or
+                    not planned_risk.is_finite() or planned_risk <= 0 or
+                    not unrealized.is_finite()):
+                return None
+            exchange_risk = abs(entry_price - Decimal(str(stop_loss)))
+            risk_distance = max(planned_risk, exchange_risk)
+            if not risk_distance.is_finite() or risk_distance <= 0:
+                return None
+            side = str(position.get("side", "")).upper()
+            if side not in ("LONG", "SHORT"):
+                return None
+            result = dict(position)
+            result.update({
+                "side": side,
+                "quantity": float(quantity),
+                "initialRiskDistance": float(risk_distance),
+                "unrealizedPnl": float(unrealized),
+            })
+            return result
+        except Exception:
+            return None
+
+    async def _flatten_if_unprotected(self, symbol: str) -> LiveCleanupResult:
         """Close an exchange position left naked by a failed live order flow.
 
         Called after any live-flow exception. The entry can fill before a later
@@ -757,12 +887,9 @@ class StrategyService:
         on the exchange with no stop — and the reconcile can only adopt it
         UNPROTECTED (SL=None/TP=None).
 
-        Returns True when the exchange holds nothing for this symbol (nothing to
-        clean up, or it was successfully flattened) — only then may the caller
-        close the DB row. Returns False when the position is deliberately being
-        LEFT open (a protective stop rests) or when the exchange state could
-        not be determined; in both cases the caller MUST keep the row OPEN so
-        the reconcile adopts a tracked position.
+        A flat result allows the caller to close its DB row. A protected
+        survivor carries its exchange snapshot so the caller can reserve its
+        risk for this scan. Unknown state or failed flatten aborts new entries.
 
         The previous version returned None unconditionally, so the caller
         closed the row even when this method had deliberately left an exchange
@@ -770,7 +897,7 @@ class StrategyService:
         nothing ever managed it again.
         """
         if self.binance is None:
-            return True
+            return LiveCleanupResult(flat=True)
         try:
             pos = await self.binance.get_position(symbol)
         except Exception as exc:
@@ -783,11 +910,11 @@ class StrategyService:
                 "[%s] Could not verify position after failed flow (%s) — "
                 "state UNKNOWN, not flat. Keeping the row open for reconcile.",
                 symbol, exc)
-            return False
+            return LiveCleanupResult(flat=False, exposure_unknown=True)
 
         qty = float((pos or {}).get("quantity", 0) or 0)
         if qty <= 0:
-            return True  # entry never filled — nothing to clean up
+            return LiveCleanupResult(flat=True)  # entry never filled
 
         try:
             algos = await self.binance.get_open_algo_orders(symbol)
@@ -801,13 +928,19 @@ class StrategyService:
                 "[%s] Could not read resting algo orders after flow failure "
                 "(%s) — refusing to act. A stop may exist; the reconcile will "
                 "adopt it.", symbol, exc)
-            return False
+            return LiveCleanupResult(flat=False, exposure_unknown=True)
+
+        if self._has_covering_protective_stop(pos, algos):
+            logger.warning(
+                "[%s] Live flow failed but a valid covering SL exists — leaving the "
+                "position OPEN for reconcile to adopt (qty %s)", symbol, qty)
+            return LiveCleanupResult(flat=False, position=pos)
 
         if any(a.get("orderType") == "STOP_MARKET" for a in algos):
-            logger.warning(
-                "[%s] Live flow failed but a resting SL exists — leaving the "
-                "position OPEN for reconcile to adopt (qty %s)", symbol, qty)
-            return False
+            logger.error(
+                "[%s] Existing STOP_MARKET does not safely cover the %s position "
+                "(qty %s, mark %s); flattening the exchange position",
+                symbol, pos.get("side"), qty, pos.get("markPrice"))
 
         close_side = "SELL" if (pos.get("side") or "LONG") == "LONG" else "BUY"
         try:
@@ -816,12 +949,64 @@ class StrategyService:
             logger.error(
                 "[%s] Live flow failed with an UNPROTECTED %s %s on the exchange "
                 "— flattened at market", symbol, pos.get("side"), qty)
-            return True
+            return LiveCleanupResult(flat=True)
         except Exception as exc:
             logger.critical(
                 "[%s] FAILED to flatten naked %s %s after flow failure: %s — "
                 "manual intervention required", symbol, pos.get("side"), qty, exc)
+            return LiveCleanupResult(
+                flat=False, position=pos, exposure_unknown=True)
+
+    @staticmethod
+    def _has_covering_protective_stop(position: dict, algos: list[dict]) -> bool:
+        """Return whether an exchange stop protects the full current position.
+
+        A same-symbol STOP_MARKET is not enough: it must be reduce-only, close
+        the opposing side, cover the full quantity, and trigger on the
+        protective side of the current mark price. Missing or malformed
+        exchange fields never count as protection.
+        """
+        try:
+            side = str(position.get("side", "")).upper()
+            quantity = Decimal(str(position.get("quantity")))
+            mark_price = Decimal(str(position.get("markPrice")))
+            if (side not in ("LONG", "SHORT") or quantity <= 0 or
+                    mark_price <= 0 or not quantity.is_finite() or
+                    not mark_price.is_finite()):
+                return False
+        except Exception:
             return False
+
+        expected_close_side = "SELL" if side == "LONG" else "BUY"
+        for algo in algos:
+            try:
+                if str(algo.get("orderType", "")).upper() != "STOP_MARKET":
+                    continue
+                if str(algo.get("side", "")).upper() != expected_close_side:
+                    continue
+                position_side = str(algo.get("positionSide", "")).upper()
+                if position_side not in ("BOTH", side):
+                    continue
+                if str(algo.get("workingType", "")).upper() != "MARK_PRICE":
+                    continue
+                trigger = Decimal(str(algo.get("triggerPrice")))
+                if not trigger.is_finite():
+                    continue
+                close_all = (algo.get("closePosition") is True or
+                             str(algo.get("closePosition")).lower() == "true")
+                if not close_all:
+                    reduce_only = algo.get("reduceOnly")
+                    if reduce_only is not True and str(reduce_only).lower() != "true":
+                        continue
+                    stop_quantity = Decimal(str(algo.get("quantity")))
+                    if not stop_quantity.is_finite() or stop_quantity < quantity:
+                        continue
+                protective = trigger < mark_price if side == "LONG" else trigger > mark_price
+                if protective:
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def _close_position_row(self, position_id: Optional[int]) -> None:
         """Close a just-created position row AND record the realized Trade after

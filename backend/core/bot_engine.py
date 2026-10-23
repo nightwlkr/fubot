@@ -7,6 +7,7 @@ opens a short-lived session.
 """
 import asyncio
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -329,24 +330,22 @@ class BotEngine:
                         correlation_guard=self.correlation_guard,
                     )
 
+                    if not self._record_scan_exposure(
+                        signal, decision, open_positions, daily_guard_positions,
+                        mode=self._mode,
+                    ):
+                        logger.critical(
+                            "[%s] Live exposure after a failed entry could not be "
+                            "safely accounted; aborting the rest of this scan pass",
+                            signal.symbol,
+                        )
+                        return
+
                     if decision.decision == "EXECUTE":
                         # Correlation and same-symbol guards run for later
                         # candidates in this pass. Include this fill now; the
                         # exchange snapshot above is otherwise stale until the
                         # next scan.
-                        plan = decision.plan or {}
-                        open_positions[signal.symbol] = {
-                            "side": signal.direction,
-                            "quantity": float(plan.get("size") or 1.0),
-                        }
-                        if self._mode == "live":
-                            daily_guard_positions[signal.symbol] = {
-                                "side": signal.direction,
-                                "quantity": float(plan.get("size") or 1.0),
-                                "unrealizedPnl": 0.0,
-                                "initialRiskDistance": float(
-                                    plan.get("initial_risk_distance") or 0.0),
-                            }
                         await ws_manager.broadcast({"type": "position_update", "data": {
                             "symbol": signal.symbol, "side": signal.direction,
                             "mode": self._mode}})
@@ -364,6 +363,41 @@ class BotEngine:
             except Exception as e:
                 logger.error(f"Error scanning {symbol}: {e}", exc_info=True)
                 continue
+
+    @staticmethod
+    def _record_scan_exposure(signal, decision, open_positions: dict,
+                              daily_guard_positions: dict, mode: str) -> bool:
+        """Reserve fills and protected survivors in this pass's risk snapshots.
+
+        Return False when post-failure exchange state is unknown, so the caller
+        aborts before evaluating another candidate against stale exposure.
+        """
+        plan = (decision.plan if decision.decision == "EXECUTE"
+                else decision.surviving_position)
+        if plan:
+            try:
+                quantity = float(plan.get(
+                    "quantity", plan.get("size", 0)))
+                risk_distance = float(plan.get(
+                    "initialRiskDistance", plan.get("initial_risk_distance", 0)))
+                unrealized = float(plan.get("unrealizedPnl", 0) or 0)
+                if (not all(math.isfinite(x) for x in
+                            (quantity, risk_distance, unrealized)) or
+                        quantity <= 0 or risk_distance <= 0):
+                    return False
+                position = {
+                    "side": plan.get("side", signal.direction),
+                    "quantity": quantity,
+                    "initialRiskDistance": risk_distance,
+                }
+                open_positions[signal.symbol] = position
+                if mode == "live":
+                    daily_guard_positions[signal.symbol] = {
+                        **position, "unrealizedPnl": unrealized,
+                    }
+            except (TypeError, ValueError, AttributeError):
+                return False
+        return not decision.exposure_unknown
 
     async def _minutes_since_last_trade(self, symbol: str) -> Optional[float]:
         """Minutes since the most recent closed trade on `symbol` (None if no

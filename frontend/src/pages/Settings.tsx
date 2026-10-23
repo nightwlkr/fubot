@@ -26,6 +26,7 @@ interface TradingSettings {
   symbol_cooldown_minutes: number
   max_daily_trades: number
   max_position_notional_pct: number
+  max_aggregate_risk_pct: number
   be_trail_trigger_r: number
   profit_lock_trigger_r: number
   profit_lock_trail_r: number
@@ -221,6 +222,7 @@ function TradingParamsSection() {
   const [symbolCooldownMinutes, setSymbolCooldownMinutes] = useState(240)
   const [maxDailyTrades, setMaxDailyTrades] = useState(12)
   const [maxPositionNotionalPct, setMaxPositionNotionalPct] = useState(50)
+  const [maxAggregateRiskPct, setMaxAggregateRiskPct] = useState(3.0)
   const [beTrailTriggerR, setBeTrailTriggerR] = useState(0.5)
   const [profitLockTriggerR, setProfitLockTriggerR] = useState(1.0)
   const [profitLockTrailR, setProfitLockTrailR] = useState(0.5)
@@ -252,6 +254,7 @@ function TradingParamsSection() {
         setSymbolCooldownMinutes(s.symbol_cooldown_minutes ?? 240)
         setMaxDailyTrades(s.max_daily_trades ?? 12)
         setMaxPositionNotionalPct(s.max_position_notional_pct ?? 50)
+        setMaxAggregateRiskPct(s.max_aggregate_risk_pct ?? 3.0)
         setBeTrailTriggerR(s.be_trail_trigger_r ?? 0.5)
         setProfitLockTriggerR(s.profit_lock_trigger_r ?? 1.0)
         setProfitLockTrailR(s.profit_lock_trail_r ?? 0.5)
@@ -286,6 +289,7 @@ function TradingParamsSection() {
         symbol_cooldown_minutes: symbolCooldownMinutes,
         max_daily_trades: maxDailyTrades,
         max_position_notional_pct: maxPositionNotionalPct,
+        max_aggregate_risk_pct: maxAggregateRiskPct,
         be_trail_trigger_r: beTrailTriggerR,
         profit_lock_trigger_r: profitLockTriggerR,
         profit_lock_trail_r: profitLockTrailR,
@@ -322,7 +326,8 @@ function TradingParamsSection() {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
         {[
           { label: 'Risk Per Trade', value: riskPercent, setValue: setRiskPercent, min: 0.5, max: 20, step: 0.5, suffix: '%', desc: 'Percentage of balance risked per trade (high risk = larger swings)' },
-          { label: 'Max Position Notional', value: maxPositionNotionalPct, setValue: setMaxPositionNotionalPct, min: 50, max: 1000, step: 50, suffix: '%', desc: 'Hard cap on position notional as % of balance. This CAP overrides Risk Per Trade when it binds: with ~1% stops, 50% caps risk at ~$1-2 per $200 balance (raise to ~500% to actually risk 5%)' },
+          { label: 'Max Position Notional', value: maxPositionNotionalPct, setValue: setMaxPositionNotionalPct, min: 50, max: 1000, step: 50, suffix: '%', desc: 'Per-position notional ceiling as a percentage of balance.' },
+          { label: 'Max Aggregate Stop Risk', value: maxAggregateRiskPct, setValue: setMaxAggregateRiskPct, min: 0.5, max: 10, step: 0.5, suffix: '%', desc: 'Caps combined open-position loss at frozen initial stops. At $200, 3% reserves at most $6 of open stop risk across all positions.' },
           { label: 'BE Trail Trigger', value: beTrailTriggerR, setValue: setBeTrailTriggerR, min: 0, max: 3, step: 0.25, suffix: 'R', desc: 'Move the stop to break-even once the trade is this far in profit. 0 = immediately (many scratches), 0.5 = let it prove itself first' },
           { label: 'Profit Lock Trigger', value: profitLockTriggerR, setValue: setProfitLockTriggerR, min: 0.5, max: 3, step: 0.25, suffix: 'R', desc: 'At this profit level, start trailing the stop to lock in gains. 1.0 = lock once trade is +1R deep' },
           { label: 'Profit Lock Trail', value: profitLockTrailR, setValue: setProfitLockTrailR, min: 0.1, max: 2, step: 0.1, suffix: 'R', desc: 'How far behind price (in R) the profit-lock stop sits. 0.5 = locks in at least half the current profit' },

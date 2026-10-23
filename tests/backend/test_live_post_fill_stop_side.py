@@ -54,6 +54,11 @@ class FakeOrderService(OrderService):
     async def get_current_position(self, symbol):
         return self._open_position
 
+    async def get_all_open_positions(self):
+        # Live sizing now requires an account-wide exposure snapshot. These
+        # focused post-fill tests model a flat account before their entry.
+        return {}
+
 
 class FakeBinance:
     """Records every order call and serves controllable market data.

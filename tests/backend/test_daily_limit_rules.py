@@ -138,19 +138,12 @@ class TestUsedRFrom:
             async def __aexit__(self, *exc):
                 return False
 
-        stopped = []
-
-        class _Bot:
-            async def stop(self):
-                stopped.append(True)
-
         svc = DailyResetService(session_factory=lambda: _Session(),
-                                settings={}, bot_engine=_Bot())
+                                settings={})
         # get_daily_stats renders `float(summary.total_pnl_r)` for display, which
         # is NaN but does not raise, so the breaker path is reached.
         assert asyncio.run(svc.check_and_enforce_limit()) is False, \
             "an unreadable daily total must STOP trading, not allow it"
-        assert stopped, "the fail-closed path must trip the daily stop"
 
     def test_unrealized_loss_alert_reports_combined_usage_and_fires_once(self):
         """The halt threshold includes open losses, so its alert must report

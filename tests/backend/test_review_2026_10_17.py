@@ -368,6 +368,7 @@ class TestSettingsBounds:
         {"risk_percent": 100},
         {"max_positions": 9999},
         {"max_position_notional_pct": -5},
+        {"max_aggregate_risk_pct": 21.0},
     ])
     def test_disabling_payloads_are_rejected_on_write(self, payload):
         from pydantic import ValidationError
@@ -382,6 +383,7 @@ class TestSettingsBounds:
         {"risk_percent": 1.5},
         {"max_positions": 3},
         {"max_position_notional_pct": 500},
+        {"max_aggregate_risk_pct": 3.0},
         {"strategy_obfvg_max_age_bars": 2},
     ])
     def test_legitimate_values_still_accept(self, payload):
@@ -418,6 +420,7 @@ class TestSettingsBounds:
         {"rr_min": 3.0},
         {"check_interval_seconds": 30},
         {"max_position_notional_pct": 300.0},
+        {"max_aggregate_risk_pct": 3.0},
         {"be_trail_trigger_r": 0.5},
         {"profit_lock_trigger_r": 1.0},
         {"profit_lock_trail_r": 0.5},
@@ -626,16 +629,16 @@ class TestFailedFlowLeavesATrackedPosition:
     def test_flatten_returns_whether_it_actually_flattened(self):
         import backend.services.strategy_service as ss
         src = inspect.getsource(ss.StrategyService._flatten_if_unprotected)
-        assert "-> bool" in src
+        assert "-> LiveCleanupResult" in src
 
     def test_resting_stop_path_returns_false(self):
         """A resting SL means we are deliberately leaving it open — the caller
         must keep the row."""
         import backend.services.strategy_service as ss
         src = inspect.getsource(ss.StrategyService._flatten_if_unprotected)
-        branch = src[src.index('if any(a.get("orderType") == "STOP_MARKET"'):]
-        assert "return False" in branch.split("close_side")[0], \
-            "a resting SL must return False (position left open)"
+        branch = src[src.index("if self._has_covering_protective_stop(pos, algos)"):]
+        assert "LiveCleanupResult(flat=False, position=pos)" in branch.split("close_side")[0], \
+            "a verified protected survivor must return its exchange snapshot"
 
     def test_unknown_position_state_returns_false_not_nothing(self):
         """A `get_position` failure means UNKNOWN, not flat. Returning nothing
@@ -644,7 +647,7 @@ class TestFailedFlowLeavesATrackedPosition:
         src = inspect.getsource(ss.StrategyService._flatten_if_unprotected)
         assert "Could not verify position" in src
         branch = src[src.index("Could not verify position"):]
-        assert "return False" in branch[:400], \
+        assert "LiveCleanupResult(flat=False, exposure_unknown=True)" in branch[:500], \
             "an unverifiable position must fail closed (keep the row open)"
 
     def test_algo_read_failure_does_not_authorise_a_market_close(self):
@@ -656,19 +659,19 @@ class TestFailedFlowLeavesATrackedPosition:
         assert "algos = []" not in src, \
             "a failed algo read must not be treated as 'no stop resting'"
         idx = src.index("get_open_algo_orders")
-        # The guard is `return False` inside the except handler, after a long
+        # The guard returns an unknown cleanup result inside the except handler, after a long
         # explanatory comment — anchor on the handler's own statement, not a
         # fixed character window.
         handler = src[idx:src.index("close_side", idx)]
-        assert "return False" in handler, \
-            "a failed algo read must refuse to act and return False"
+        assert "exposure_unknown=True" in handler, \
+            "a failed algo read must refuse to act and mark exposure unknown"
 
     def test_caller_only_closes_the_row_when_flattened(self):
         import backend.services.strategy_service as ss
         src = inspect.getsource(ss.StrategyService.evaluate_signal)
-        assert "flattened = await self._flatten_if_unprotected(symbol)" in src, \
+        assert "cleanup = await self._flatten_if_unprotected(symbol)" in src, \
             "the caller must use the return value"
-        assert "if flattened:" in src, \
+        assert "if cleanup.flat:" in src, \
             "_close_position_row must be conditional on actually flattening"
 
     def test_failed_flow_marks_the_signal_skipped(self):

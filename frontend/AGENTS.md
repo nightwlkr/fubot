@@ -35,7 +35,7 @@ Status: **PHASE5 complete** — builds clean; bot-control and live-data flows wi
 3. **Trade Log** (`/trades`) — Filterable, paginated table + CSV export
 4. **Scanner** (`/scanner`) — Signal cards, filter tabs, auto-refresh
 5. **Performance** (`/performance`) — Equity chart, monthly returns, R distribution
-6. **Settings** (`/settings`) — API key entry, trading params sliders (Risk Per Trade + **Max Position Notional** — the cap that overrides it when it binds — plus filters/guards), symbol config
+6. **Settings** (`/settings`) — API key entry, trading params sliders (Risk Per Trade, **Max Position Notional**, and **Max Aggregate Stop Risk** — the portfolio-wide initial-stop risk budget — plus filters/guards), symbol config
 
 ### API Integration
 - REST: Axios to `/api/...` endpoints (typed helpers in `src/api/client.ts`, paths in `src/api/endpoints.ts`)

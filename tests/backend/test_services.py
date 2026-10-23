@@ -14,6 +14,29 @@ from backend.core.daily_reset import DailyResetService
 
 
 class TestRiskService:
+    def test_aggregate_risk_cap_reserves_open_stop_risk(self):
+        svc = RiskService()
+        capped = svc.cap_aggregate_stop_risk(
+            qty=Decimal("10"), entry_price=Decimal("100"),
+            stop_loss_price=Decimal("95"), balance_usdt=Decimal("200"),
+            open_positions={"ETHUSDT": {
+                "quantity": "0.5", "initialRiskDistance": "8",
+            }},
+            max_aggregate_risk_pct=Decimal("3"),
+        )
+        # $6 aggregate budget less $4 already reserved leaves $2 for this $5/qty risk.
+        assert capped == Decimal("0.400000")
+
+    def test_aggregate_risk_cap_fails_closed_without_existing_risk_basis(self):
+        svc = RiskService()
+        capped = svc.cap_aggregate_stop_risk(
+            qty=Decimal("1"), entry_price=Decimal("100"),
+            stop_loss_price=Decimal("95"), balance_usdt=Decimal("200"),
+            open_positions={"ETHUSDT": {"quantity": "0.5"}},
+            max_aggregate_risk_pct=Decimal("3"),
+        )
+        assert capped == Decimal("0")
+
     def test_position_size_math(self):
         """risk$ = balance*1% ; qty = risk$/(entry-SL)."""
         svc = RiskService()
@@ -104,13 +127,14 @@ class FakeBinance:
                 "executedQty": str(quantity), "avgPrice": str(self.price)}
 
     async def place_limit_order(self, symbol, side, price, quantity):
-        self.calls.append(("LIMIT", side, price))
+        self.calls.append(("LIMIT", side, price, quantity))
         self._limit_order_id = 101
+        self._limit_quantity = quantity
         return {"orderId": 101, "status": "NEW", "price": price, "quantity": quantity}
 
     async def get_order(self, symbol, order_id):
         return {"orderId": order_id, "status": "FILLED",
-                "executedQty": "10", "avgPrice": str(self.price)}
+                "executedQty": str(self._limit_quantity), "avgPrice": str(self.price)}
 
     async def cancel_order(self, symbol, order_id):
         self.calls.append(("CANCEL", order_id))
@@ -134,6 +158,9 @@ class FakeOrderService(OrderService):
 
     async def get_current_position(self, symbol):
         return self._open_position
+
+    async def get_all_open_positions(self):
+        return {}
 
 
 def make_signal(**over):
@@ -190,6 +217,73 @@ def valid_args(**over):
 
 
 class TestStrategyServiceEvaluateSignal:
+    async def test_live_entry_size_obeys_aggregate_stop_risk_cap(self):
+        class TwoHundredDollarBinance(FakeBinance):
+            async def get_account_balance(self):
+                return [{"asset": "USDT", "availableBalance": "200"}]
+
+        settings = {
+            "rr_min": 3.0, "max_positions": 3, "risk_percent": 5.0,
+            "max_position_notional_pct": 500.0,
+            "max_aggregate_risk_pct": 3.0,
+        }
+        decision = await make_strategy(
+            TwoHundredDollarBinance(price=100.5), FakeOrderService(), settings,
+        ).evaluate_signal(make_signal(), paper_mode=False, open_positions={})
+        assert decision.decision == "EXECUTE"
+        # Risk is $6 on a $200 balance, divided by the $10.5 stop distance.
+        assert abs(float(decision.plan["size"]) - (6 / 10.5)) < 1e-6
+
+    async def test_live_entry_uses_only_remaining_aggregate_risk_budget(self):
+        class TwoHundredDollarBinance(FakeBinance):
+            async def get_account_balance(self):
+                return [{"asset": "USDT", "availableBalance": "200"}]
+
+        settings = {
+            "rr_min": 3.0, "max_positions": 3, "risk_percent": 5.0,
+            "max_position_notional_pct": 500.0,
+            "max_aggregate_risk_pct": 3.0,
+        }
+        positions = {"ETHUSDT": {
+            "side": "LONG", "quantity": 0.5, "initialRiskDistance": 8.0,
+        }}
+        decision = await make_strategy(
+            TwoHundredDollarBinance(price=100.5), FakeOrderService(), settings,
+        ).evaluate_signal(make_signal(), paper_mode=False, open_positions=positions)
+        assert decision.decision == "EXECUTE"
+        # Existing stop risk is $4, leaving $2 of the $6 portfolio budget.
+        assert abs(float(decision.plan["size"]) - (2 / 10.5)) < 1e-6
+
+    async def test_live_entry_fails_closed_when_open_stop_risk_is_unknown(self):
+        class TwoHundredDollarBinance(FakeBinance):
+            async def get_account_balance(self):
+                return [{"asset": "USDT", "availableBalance": "200"}]
+
+        settings = {
+            "rr_min": 3.0, "max_positions": 3, "risk_percent": 1.0,
+            "max_aggregate_risk_pct": 3.0,
+        }
+        positions = {"ETHUSDT": {"side": "LONG", "quantity": 0.5}}
+        binance = TwoHundredDollarBinance(price=100.5)
+        decision = await make_strategy(
+            binance, FakeOrderService(), settings,
+        ).evaluate_signal(make_signal(), paper_mode=False, open_positions=positions)
+        assert decision.decision == "SKIP"
+        assert "risk" in decision.skip_reason.lower()
+        assert not binance.calls
+
+    async def test_live_entry_fails_closed_when_account_snapshot_fails(self):
+        class UnavailableOrderService(FakeOrderService):
+            async def get_all_open_positions(self):
+                raise RuntimeError("positionRisk unavailable")
+
+        settings = {"rr_min": 3.0, "max_positions": 3, "risk_percent": 1.0}
+        decision = await make_strategy(
+            FakeBinance(price=100.5), UnavailableOrderService(), settings,
+        ).evaluate_signal(make_signal(), paper_mode=False)
+        assert decision.decision == "SKIP"
+        assert decision.skip_reason == "Account exposure unavailable"
+
     async def test_paper_mode_executes_with_simulated_fill(self):
         binance = FakeBinance(price=100.5)
         order_svc = FakeOrderService()
@@ -373,10 +467,14 @@ class TestStrategyServiceEvaluateSignal:
             raise RuntimeError("Binance API Error 400")
 
         async def get_position(symbol):
-            return {"symbol": symbol, "side": "LONG", "quantity": 1.0}
+            return {"symbol": symbol, "side": "LONG", "quantity": 1.0,
+                    "entryPrice": 100.5, "markPrice": 100.5,
+                    "unrealizedPnl": -0.25}
 
         async def has_stop(symbol):
-            return [{"algoId": 1, "orderType": "STOP_MARKET"}]
+            return [{"algoId": 1, "orderType": "STOP_MARKET", "side": "SELL",
+                     "positionSide": "BOTH", "workingType": "MARK_PRICE",
+                     "quantity": "1", "triggerPrice": "99", "reduceOnly": True}]
 
         async def market_close(symbol, side, qty, reduce_only=False):
             closed.append((symbol, side, qty))
@@ -391,6 +489,28 @@ class TestStrategyServiceEvaluateSignal:
         assert decision.decision == "SKIP"
         assert not [c for c in closed if c[1] == "SELL"], \
             f"protected position was closed: {closed}"
+        assert decision.surviving_position == {
+            "symbol": "BTCUSDT", "side": "LONG", "quantity": 1.0,
+            "entryPrice": 100.5, "markPrice": 100.5,
+            "unrealizedPnl": -0.25, "initialRiskDistance": 10.5,
+        }
+        assert not decision.exposure_unknown
+
+    async def test_failed_live_flow_marks_unverified_exposure_unknown(self):
+        class UnverifiablePositionBinance(FakeBinance):
+            async def place_take_profit_order(self, symbol, side, tp_price, quantity):
+                raise RuntimeError("TP failed")
+
+            async def get_position(self, symbol):
+                raise RuntimeError("positionRisk unavailable")
+
+        decision = await make_strategy(
+            UnverifiablePositionBinance(price=100.5), FakeOrderService(),
+        ).evaluate_signal(make_signal(), paper_mode=False)
+
+        assert decision.decision == "SKIP"
+        assert decision.exposure_unknown
+        assert decision.surviving_position is None
 
     async def test_notional_cap_is_configurable(self):
         """The position-notional cap silently overrode risk_percent: with ~1%

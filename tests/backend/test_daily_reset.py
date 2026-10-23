@@ -1,7 +1,7 @@
-"""PHASE6_STEP2 — validate the -3R daily loss limit hard stop.
+"""PHASE6_STEP2 — validate the -3R daily loss entry breaker.
 
 Per FUBOT_STEPS PHASE6_STEP2 (Option B — direct DB manipulation):
-  - three -1R losses → check_and_enforce_limit() returns False, bot stopped
+  - three -1R losses → check_and_enforce_limit() returns False, scan loop stays alive
   - warning alert at ≥ 80% of the limit
   - wins must NOT count toward the limit (a winning day keeps trading)
   - midnight UTC reset clears the latch
@@ -66,7 +66,7 @@ async def _cleanup(engine):
     await engine.dispose()
 
 
-def test_three_consecutive_losses_trip_the_hard_stop():
+def test_daily_loss_limit_blocks_entries_until_next_utc_day(monkeypatch):
     async def scenario():
         engine, Session, svc, fired, bot = await _build()
         try:
@@ -80,11 +80,14 @@ def test_three_consecutive_losses_trip_the_hard_stop():
             assert stats["remaining_r"] == pytest.approx(0.1)
             assert bot.stopped is False
 
-            # third full -1R loss → 3.9R ≥ 3R → hard stop
+            # third full -1R loss → 3.9R ≥ 3R → block entries for today
             await svc.update_daily_summary(-1.0, -50)
             allowed = await svc.check_and_enforce_limit()
             assert allowed is False, "-3R must block trading"
-            assert bot.stopped is True, "daily stop must stop the bot engine"
+            assert bot.stopped is False, (
+                "the daily breaker must block entries without killing the scan loop; "
+                "the loop needs to remain alive to observe the next UTC day"
+            )
 
             stats = await svc.get_daily_stats()
             assert stats["limit_hit"] is True
@@ -92,6 +95,14 @@ def test_three_consecutive_losses_trip_the_hard_stop():
 
             # latched: enforcement keeps refusing
             assert await svc.check_and_enforce_limit() is False
+
+            # Once UTC advances, the still-running engine can clear the latch
+            # and continue with the new day's independent summary.
+            import backend.core.daily_reset as dr
+            from datetime import timedelta
+            monkeypatch.setattr(dr, "today_utc", lambda: TODAY + timedelta(days=1))
+            assert await svc.check_and_enforce_limit() is True
+            assert svc._limit_hit_today is False
 
             # the CRITICAL alert fired
             assert any(lvl == "CRITICAL" and "DAILY LOSS LIMIT HIT" in msg
@@ -111,6 +122,38 @@ def test_warning_fires_at_80_percent_of_limit():
             assert any(lvl == "WARNING" and "Daily limit warning" in msg
                        for lvl, msg in fired)
             assert bot.stopped is False
+        finally:
+            await _cleanup(engine)
+    asyncio.run(scenario())
+
+
+def test_persisted_daily_limit_latch_survives_service_restart():
+    async def scenario():
+        engine, Session, svc, fired, bot = await _build()
+        try:
+            # Model a breaker tripped by unrealized loss before any trade has
+            # closed: the daily summary row must be created so the latch
+            # survives a service reconstruction.
+            positions = {"BTCUSDT": {"unrealizedPnl": -3.0, "quantity": 1.0,
+                                     "initialRiskDistance": 1.0}}
+            assert await svc.check_and_enforce_limit(positions) is False
+            async with Session() as db:
+                result = await db.execute(
+                    select(DailySummary).where(DailySummary.date == TODAY)
+                )
+                summary = result.scalar_one()
+                assert summary.daily_loss_limit_hit is True
+                assert float(summary.total_pnl_r) == 0.0
+
+            restarted = DailyResetService(
+                session_factory=Session,
+                settings={"daily_loss_limit_r": -3.0},
+                bot_engine=RecordingBot(),
+                alert_service=svc.alerts,
+            )
+            assert await restarted.check_and_enforce_limit() is False
+            assert restarted._limit_hit_today is True
+            assert restarted._limit_hit_date == TODAY
         finally:
             await _cleanup(engine)
     asyncio.run(scenario())

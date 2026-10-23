@@ -41,7 +41,9 @@ class _Session:
 async def test_weekly_guard_restores_full_reset_timestamp_after_restart():
     from backend.core.weekly_drawdown import WeeklyDrawdownGuard
 
-    reset_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    # Keep the reset on today's UTC date; subtracting two hours can cross
+    # midnight and correctly expire the persisted cutoff before this assertion.
+    reset_at = datetime.now(timezone.utc) - timedelta(minutes=2)
     session = _Session(SimpleNamespace(value=reset_at.isoformat()))
     guard = WeeklyDrawdownGuard(
         session_factory=lambda: session,

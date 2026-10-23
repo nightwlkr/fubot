@@ -73,10 +73,54 @@ def test_successful_fill_is_added_to_the_same_scan_daily_guard_snapshot():
 
     source = Path(__file__).resolve().parents[2] / "backend/core/bot_engine.py"
     text = source.read_text()
-    start = text.index('                    if decision.decision == "EXECUTE":')
-    end = text.index('                        await ws_manager.broadcast', start)
-    execute_block = text[start:end]
+    assert "self._record_scan_exposure(" in text
+    helper_start = text.index("    def _record_scan_exposure(")
+    helper_end = text.index("    async def _minutes_since_last_trade(", helper_start)
+    helper = text[helper_start:helper_end]
+    assert 'open_positions[signal.symbol]' in helper
+    assert 'daily_guard_positions[signal.symbol]' in helper
+    assert '"initialRiskDistance"' in helper
+    assert '"unrealizedPnl"' in helper
 
-    assert "daily_guard_positions[signal.symbol]" in execute_block
-    assert '"initialRiskDistance"' in execute_block
-    assert '"unrealizedPnl"' in execute_block
+
+def test_protected_survivor_after_failed_entry_updates_same_scan_risk_snapshot():
+    from backend.core.bot_engine import BotEngine
+    from backend.services.strategy_service import TradeDecision
+
+    signal = type("Signal", (), {"symbol": "BTCUSDT", "direction": "LONG"})()
+    survivor = {
+        "symbol": "BTCUSDT", "side": "LONG", "quantity": 0.4,
+        "entryPrice": 100.5, "markPrice": 100.5,
+        "unrealizedPnl": -0.25, "initialRiskDistance": 10.5,
+    }
+    decision = TradeDecision(
+        "SKIP", skip_reason="take profit placement failed",
+        surviving_position=survivor,
+    )
+    occupancy = {}
+    daily_guard = {}
+
+    assert BotEngine._record_scan_exposure(
+        signal, decision, occupancy, daily_guard, mode="live")
+    assert occupancy["BTCUSDT"] == {
+        "side": "LONG", "quantity": 0.4, "initialRiskDistance": 10.5,
+    }
+    assert daily_guard["BTCUSDT"] == {
+        "side": "LONG", "quantity": 0.4,
+        "initialRiskDistance": 10.5, "unrealizedPnl": -0.25,
+    }
+
+
+def test_unknown_surviving_exposure_aborts_the_remaining_scan_pass():
+    from backend.core.bot_engine import BotEngine
+    from backend.services.strategy_service import TradeDecision
+
+    signal = type("Signal", (), {"symbol": "BTCUSDT", "direction": "LONG"})()
+    decision = TradeDecision("SKIP", exposure_unknown=True)
+    occupancy = {}
+    daily_guard = {}
+
+    assert not BotEngine._record_scan_exposure(
+        signal, decision, occupancy, daily_guard, mode="live")
+    assert occupancy == {}
+    assert daily_guard == {}
