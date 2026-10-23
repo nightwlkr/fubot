@@ -8,7 +8,7 @@ SQLAlchemy 2.0 async migrations for all FUBOT database tables. All schema change
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/alembic/`
-Status: local head `011_daily_risk_state`; production was last verified at `010_nullable_trade_pnl_r` before this migration and has not received 011; 10 revisions exist
+Status: local and production head `011_daily_risk_state` (production upgrade verified 2026-10-23 after commit `1138142`); 10 revisions exist
 
 ## Local Contracts
 
@@ -61,7 +61,7 @@ alembic history
 
 - `PYTHONPATH=. alembic history` — shows the full chain ending at `011_daily_risk_state (head)` (installed alembic 1.13.1 has no `--enumerate` flag)
 - `PYTHONPATH=. alembic upgrade head --sql` — renders the migration SQL offline; apply only after tests and deployment review
-- `PYTHONPATH=. alembic current` — checks the connected database; production must be checked again after applying 011
+- `PYTHONPATH=. alembic current` — checks the connected database; production reported `011_daily_risk_state (head)` after the 2026-10-23 deployment
 - All 10 tables + seed rows verified present in PostgreSQL
 
 ## Child DOX Index
