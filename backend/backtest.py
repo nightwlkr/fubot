@@ -23,6 +23,7 @@ from backend.indicators.choch import detect_choch
 from backend.indicators.trend import analyze_trend_bias
 from backend.indicators.volume_profile import get_volume_confirmed_filter
 from backend.indicators.regime import analyze_market_regime, should_trade_regime
+from backend.services.signal_service import OB_START_IDX, detect_obfvg_candidates
 from backend.core.cost_model import LIVE as COST_MODEL
 from backend.backtest_data import last_closed_before
 from backend.backtest_data import align_window, bars_expected, fetch_klines, window_for_days
@@ -287,11 +288,16 @@ class Backtester:
         self.fvg_enabled = bool(self.settings.get("strategy_fvg_enabled", True))
         self.three_candle_enabled = bool(self.settings.get("strategy_3candle_enabled", True))
         self.choch_enabled = bool(self.settings.get("strategy_choch_enabled", True))
+        # OBFVG is opt-in in this research harness, matching the live strategy
+        # toggle's explicit nature while preserving prior backtest defaults.
+        self.obfvg_enabled = bool(self.settings.get("strategy_obfvg_enabled", False))
+        self.obfvg_max_age_bars = int(self.settings.get("strategy_obfvg_max_age_bars", 2))
         self._strength_rank = {"WEAK": 1, "MODERATE": 2, "STRONG": 3}
         self._context_cache: dict[int, tuple[float, object, object]] = {}
         self._last_fvg_idx: Optional[int] = None
         self._last_choch_idx: Optional[int] = None
         self._last_choch_signature: Optional[tuple[str, int]] = None
+        self._seen_obfvg_zones: set[tuple[str, float, float]] = set()
 
     def _source_index(self, candles: list[dict], at_ms: int) -> int:
         """Index in `candles` of the last bar fully closed at `at_ms`.
@@ -391,6 +397,39 @@ class Backtester:
                 self._last_choch_signature = signature
             else:
                 self._last_choch_signature = None
+        if self.obfvg_enabled:
+            # Match scan_symbol: OBFVG consumes closed 5m/1h prefixes, applies
+            # the live freshness and OB-confluence rules, and enters from the
+            # 1h zone. Repeated scan passes can see the same fresh gap, so keep
+            # one signal per zone just as the live persistence layer dedupes it.
+            #
+            # The detector only accepts FVGs within max_age_bars and order
+            # blocks confirmed within 50 5m bars. Replaying it against the full
+            # growing history on every 5m candle is quadratic in window length.
+            # Keep exactly the context needed by those rules: OB pivots can be
+            # formed up to 11 bars before confirmation, and the detector's
+            # start_idx excludes the first 30 bars of its input.
+            ob_lookback = 50
+            ob_confirmation_lag = 11
+            ob_context_size = OB_START_IDX + ob_lookback + ob_confirmation_lag + 1
+            ob_age = max(0, self.obfvg_max_age_bars)
+            k5m_ob = k5m_u[-ob_context_size:]
+            k1h_ob = k1h_u[-(ob_age + 3):]
+            for fdir, zmin, zmax, sl, tp, rr in detect_obfvg_candidates(
+                k5m_ob, k1h_ob, atr, self.rr_min,
+                max_age_bars=ob_age,
+            ):
+                direction = "LONG" if fdir == "BULLISH" else "SHORT"
+                signature = (direction, float(zmin), float(zmax))
+                if signature in self._seen_obfvg_zones:
+                    continue
+                self._seen_obfvg_zones.add(signature)
+                entry_price = (float(zmin) + float(zmax)) / 2.0
+                e = {"entry_price": entry_price, "stop_loss": float(sl),
+                     "take_profit": float(tp), "rr_ratio": float(rr),
+                     "is_valid": True}
+                cands.append(("OBFVG", direction, e, k1h_u, "1h",
+                              (float(zmin), float(zmax)), k1h_idx))
         return cands, bias, regime
 
     def _passes_filters(self, direction: str, rr: float, entry: float, sl: float,

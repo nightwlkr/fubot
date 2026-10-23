@@ -22,7 +22,8 @@ async def get_db():
 async def init_db():
     """Create all tables (for initial setup only — use alembic for migrations in production)."""
     async with engine.begin() as conn:
-        from backend.models import User, Account, Symbol, Setting, Signal, Position, Trade, Order, EquityLog, DailySummary
+        from backend.models import (User, Account, Symbol, Setting, Signal, Position,
+                                    Trade, Order, EquityLog, DailySummary, DailyRiskState)
         await conn.run_sync(Base.metadata.create_all)
 
 

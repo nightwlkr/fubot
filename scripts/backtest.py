@@ -2,7 +2,8 @@
 """Backtest the FUBOT strategy over historical klines — validate before trusting a paper run.
 
 Replays the live scan pipeline (trend/volume/R:R/ATR-stop filters, FVG on 1h,
-3-candle on 5m, CHoCH on 15m) over N days of candles, simulating SL/TP exits.
+OBFVG on 1h with 5m OB confluence, 3-candle on 5m, CHoCH on 15m) over N days
+of candles, simulating SL/TP exits.
 
 Usage:
     python scripts/backtest.py --symbol BTCUSDT --days 30
@@ -52,6 +53,10 @@ async def main() -> None:
                     help="enable/disable the 3CANDLE strategy (default: harness setting)")
     ap.add_argument("--choch", action=argparse.BooleanOptionalAction, default=None,
                     help="enable/disable the CHoCH strategy (default: harness setting)")
+    ap.add_argument("--obfvg", action=argparse.BooleanOptionalAction, default=None,
+                    help="enable/disable the Order-Block-confirmed FVG strategy")
+    ap.add_argument("--obfvg-max-age-bars", type=int, default=2,
+                    help="closed 1h bars in which an OBFVG remains eligible (default: 2)")
     ap.add_argument("--no-volume", dest="volume", action="store_false", default=None,
                     help="disable the volume-confirmation filter")
     ap.add_argument("--volume", dest="volume", action="store_true",
@@ -77,13 +82,16 @@ async def main() -> None:
         **({"strategy_3candle_enabled": args.three_candle}
            if args.three_candle is not None else {}),
         **({"strategy_choch_enabled": args.choch} if args.choch is not None else {}),
+        **({"strategy_obfvg_enabled": args.obfvg} if args.obfvg is not None else {}),
+        "strategy_obfvg_max_age_bars": args.obfvg_max_age_bars,
         **({"min_risk_pct": args.min_risk_pct} if args.min_risk_pct is not None else {}),
     }
 
     print(f"Backtest: {', '.join(symbols)} | {args.days}d | "
           f"rr_min={args.rr_min} neutral={args.neutral} strength={args.strength} "
           f"entry_penetration={args.entry_penetration_bps:g}bps "
-          f"fvg={args.fvg} 3candle={args.three_candle} choch={args.choch}; "
+          f"fvg={args.fvg} 3candle={args.three_candle} choch={args.choch} "
+          f"obfvg={args.obfvg} (max_age={args.obfvg_max_age_bars}); "
           "stop gaps fill at the adverse bar open\n")
 
     header = (f"{'symbol':<10} {'sig':>4} {'closed':>6} {'win%':>6} "

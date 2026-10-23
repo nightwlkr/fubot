@@ -190,14 +190,36 @@ async def reset_daily_limit(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     from backend.models.daily_summary import DailySummary
+    from backend.models.daily_risk_state import DailyRiskState
     from sqlalchemy import select, update
     from datetime import datetime, timezone
 
     today = datetime.now(timezone.utc).date()
+    reset_at = datetime.now(timezone.utc)
+    mode = getattr(_bot_engine, "mode", getattr(_bot_engine, "_mode", "live"))
+    if mode not in ("live", "paper"):
+        raise HTTPException(status_code=409, detail="Bot mode is unavailable for daily reset")
 
-    # Reset the DailySummary row for today — the breaker reads from here, not
-    # from Setting rows. Reset ALL fields so wins/losses/trade_count are
-    # consistent after a manual reset.
+    # DailySummary remains an all-mode display aggregate. The risk guards use
+    # mode-scoped Trade rows, so persist a per-mode cutoff and clear that
+    # mode's latch rather than relying on this display row.
+    state_result = await db.execute(
+        select(DailyRiskState).where(
+            DailyRiskState.date == today,
+            DailyRiskState.mode == mode,
+        )
+    )
+    risk_state = state_result.scalar_one_or_none()
+    if risk_state is None:
+        db.add(DailyRiskState(
+            date=today, mode=mode, limit_hit=False, reset_at=reset_at,
+        ))
+    else:
+        risk_state.limit_hit = False
+        risk_state.reset_at = reset_at
+
+    # Reset the combined display row so the dashboard reflects the operator's
+    # reset; subsequent Trade closes continue to populate the aggregate.
     result = await db.execute(
         update(DailySummary)
         .where(DailySummary.date == today)
@@ -219,6 +241,10 @@ async def reset_daily_limit(
                   daily_loss_limit_hit=False))
 
     await db.commit()
+
+    daily_reset = getattr(_bot_engine, "daily_reset", None)
+    if daily_reset is not None:
+        daily_reset.clear_latch(mode)
 
     logger.info("Daily limit reset by user '%s'", user.username)
     return {"ok": True, "message": "Daily limit reset"}
@@ -247,13 +273,17 @@ async def reset_weekly_drawdown_guard(
     from sqlalchemy import select as _select
     from backend.models.setting import Setting as _Setting
     now = datetime.now(timezone.utc)
+    mode = getattr(_bot_engine, "mode", getattr(_bot_engine, "_mode", "live"))
+    if mode not in ("live", "paper"):
+        raise HTTPException(status_code=409, detail="Bot mode is unavailable for weekly reset")
+    reset_key = f"weekly_reset_from_{mode}"
     try:
         result = await db.execute(
-            _select(_Setting).where(_Setting.key == "weekly_reset_from")
+            _select(_Setting).where(_Setting.key == reset_key)
         )
         reset_setting = result.scalar_one_or_none()
         if reset_setting is None:
-            db.add(_Setting(key="weekly_reset_from", value=now.isoformat()))
+            db.add(_Setting(key=reset_key, value=now.isoformat()))
         else:
             reset_setting.value = now.isoformat()
         await db.commit()
@@ -266,6 +296,6 @@ async def reset_weekly_drawdown_guard(
         ) from e
     # Apply the in-memory reset only after persistence succeeds, so the guard
     # cannot report a successful reset that will be lost on a restart.
-    weekly_guard.manual_reset(full_reset=True)
+    weekly_guard.manual_reset(full_reset=True, mode=mode)
     logger.info("Weekly drawdown guard FULLY reset by user '%s'", user.username)
     return {"ok": True, "message": "Weekly drawdown guard fully reset"}

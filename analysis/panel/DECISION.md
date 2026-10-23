@@ -1372,3 +1372,16 @@ To reduce optimistic fill assumptions, the research harness now supports directi
 On public Binance 5m/15m/1h candles for the seven enabled symbols, a recent 60-day replay using 3CANDLE-only, STRONG trend, ADX regime filter, `rr_min=3`, and 0.11% modeled round-trip costs returned +3.85R over 40 closed trades with touch fills, versus +1.19R over 39 trades with 1bp directional penetration. The preceding, disjoint 60-day window using 1bp penetration returned −1.33R over 50 trades. A touch is therefore sensitive to queue-fill optimism, and the conservative sensitivity changes sign between windows. Neither result establishes a stable edge.
 
 These single-symbol harness runs serialize positions per symbol but do not enforce the live three-position portfolio cap, historical funding filter, shared collateral, or exchange queue/partial-fill behavior. Costs remain modeled, not measured per bot trade; actual live exchange fills are not currently attributable to the bot. They are OHLC sensitivity analyses rather than executable portfolio PnL. **Decision: do not change live entries, exits, stop floors, or strategy settings from these runs. Continue live monitoring only under the existing 1% per-trade and 3% aggregate stop-risk limits.** Backtest-only changes are not deployed because production does not import the harness.
+
+## OBFVG out-of-sample comparison — 2026-10-23
+
+Extended `backend/backtest.py` and `scripts/backtest.py` to test the live `detect_obfvg_candidates` detector on closed candle prefixes (`--obfvg`, max-age configurable; off by default in the harness). On the seven symbols enabled in production, compared current 3CANDLE-only settings with 3CANDLE plus OBFVG, using 1bp directional trade-through entry sensitivity, 0.11% modeled round-trip costs, and two disjoint 60-day windows. The harness bounds detector context to 92 five-minute bars and `max_age + 3` hourly bars to avoid quadratic rescanning.
+
+| Profile | Window | Trades | Gross R | Net R | Net R/trade |
+|---|---|---:|---:|---:|---:|
+| Current 3CANDLE | Earlier 60d | 50 | +5.526 | −1.321 | −0.0264 |
+| 3CANDLE + OBFVG | Earlier 60d | 53 | +2.591 | −4.752 | −0.0897 |
+| Current 3CANDLE | Recent 60d | 38 | +4.435 | +0.486 | +0.0128 |
+| 3CANDLE + OBFVG | Recent 60d | 42 | +6.369 | +1.765 | +0.0420 |
+
+OBFVG improves the recent window by +1.279R but worsens the earlier window by −3.431R. The windows disagree on the candidate's effect; the small trade samples, OHLC fills, omitted historical funding gate and three-position/shared-capital constraints prevent this from establishing a reliable edge. Production currently has OBFVG disabled. **Decision: leave live strategy settings unchanged; retain OBFVG as an unapproved paper/forward candidate.** Full backend suite passes (694 tests, 235 existing warnings); Alembic 011 history and offline SQL generation pass. The harness and risk fixes are not deployed.

@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.config import settings
 from backend.core.daily_reset import DailyResetService
 from backend.models.daily_summary import DailySummary
+from backend.models.daily_risk_state import DailyRiskState
+from backend.models.trade import Trade
 from backend.services.alert_service import AlertService
 
 TODAY = datetime.now(timezone.utc).date()
@@ -39,6 +41,8 @@ async def _build():
     # clean slate for today's summary
     async with Session() as db:
         await db.execute(delete(DailySummary).where(DailySummary.date == TODAY))
+        await db.execute(delete(DailyRiskState).where(DailyRiskState.date == TODAY))
+        await db.execute(delete(Trade).where(Trade.symbol == "DRTEST"))
         await db.commit()
 
     alerts = AlertService()
@@ -63,7 +67,22 @@ async def _build():
 async def _cleanup(engine):
     async with engine.begin() as conn:
         await conn.execute(DailySummary.__table__.delete().where(DailySummary.date == TODAY))
+        await conn.execute(DailyRiskState.__table__.delete().where(DailyRiskState.date == TODAY))
+        await conn.execute(Trade.__table__.delete().where(Trade.symbol == "DRTEST"))
     await engine.dispose()
+
+
+async def _record_trade(Session, svc, pnl_r, pnl_usdt):
+    """Record a real mode-tagged close before notifying the display aggregate."""
+    async with Session() as db:
+        db.add(Trade(
+            symbol="DRTEST", side="LONG", entry_price=100, exit_price=100,
+            quantity=1, pnl_usdt=pnl_usdt, pnl_r=pnl_r,
+            exit_reason="TEST", strategy_type="TEST", mode="live",
+            closed_at=datetime.now(timezone.utc),
+        ))
+        await db.commit()
+    await svc.update_daily_summary(pnl_r, pnl_usdt)
 
 
 def test_daily_loss_limit_blocks_entries_until_next_utc_day(monkeypatch):
@@ -72,7 +91,7 @@ def test_daily_loss_limit_blocks_entries_until_next_utc_day(monkeypatch):
         try:
             # 1R, 2R, 2.9R — still allowed (used < limit)
             for r in (-1.0, -1.0, -0.9):
-                await svc.update_daily_summary(r, -50 * abs(r))
+                await _record_trade(Session, svc, r, -50 * abs(r))
                 assert await svc.check_and_enforce_limit() is True
 
             stats = await svc.get_daily_stats()
@@ -81,7 +100,7 @@ def test_daily_loss_limit_blocks_entries_until_next_utc_day(monkeypatch):
             assert bot.stopped is False
 
             # third full -1R loss → 3.9R ≥ 3R → block entries for today
-            await svc.update_daily_summary(-1.0, -50)
+            await _record_trade(Session, svc, -1.0, -50)
             allowed = await svc.check_and_enforce_limit()
             assert allowed is False, "-3R must block trading"
             assert bot.stopped is False, (
@@ -117,7 +136,7 @@ def test_warning_fires_at_80_percent_of_limit():
         engine, Session, svc, fired, bot = await _build()
         try:
             # 2.4R used = 80% of 3R → warning, but trading still allowed
-            await svc.update_daily_summary(-2.4, -120)
+            await _record_trade(Session, svc, -2.4, -120)
             assert await svc.check_and_enforce_limit() is True
             assert any(lvl == "WARNING" and "Daily limit warning" in msg
                        for lvl, msg in fired)
@@ -164,7 +183,7 @@ def test_wins_do_not_count_toward_the_loss_limit():
         engine, Session, svc, fired, bot = await _build()
         try:
             # a big WINNING day must never trip the -3R stop
-            await svc.update_daily_summary(+10.0, +1000)
+            await _record_trade(Session, svc, +10.0, +1000)
             assert await svc.check_and_enforce_limit() is True
             stats = await svc.get_daily_stats()
             assert stats["used_r"] == 0.0, "wins must not count as used R"
@@ -179,7 +198,7 @@ def test_midnight_reset_clears_the_latch():
     async def scenario():
         engine, Session, svc, fired, bot = await _build()
         try:
-            await svc.update_daily_summary(-5.0, -250)
+            await _record_trade(Session, svc, -5.0, -250)
             assert await svc.check_and_enforce_limit() is False
             assert svc._limit_hit_today is True
 

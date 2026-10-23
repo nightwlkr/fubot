@@ -9,6 +9,7 @@ from backend.models.trade import Trade
 from backend.models.order import Order
 from backend.models.equity_log import EquityLog
 from backend.models.daily_summary import DailySummary
+from backend.models.daily_risk_state import DailyRiskState
 
 __all__ = [
     "User",
@@ -21,4 +22,5 @@ __all__ = [
     "Order",
     "EquityLog",
     "DailySummary",
+    "DailyRiskState",
 ]

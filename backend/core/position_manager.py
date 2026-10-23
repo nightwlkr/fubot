@@ -6,7 +6,9 @@ cancelled pass can never leave the shared state dirty.
 """
 import asyncio
 import logging
+import math
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Callable, Optional
 
 from sqlalchemy import update
@@ -67,6 +69,14 @@ class PositionManager:
         # must always be cancelled when the position closes.
         configured_mode = settings.get("bot_mode", "paper")
         self._mode: str = configured_mode if configured_mode in ("paper", "live") else "paper"
+        # Reconciliation uncertainty is an account-level unsafe condition.
+        # BotEngine consumes this before admitting new live entries.
+        self._unresolved_reconciliation_symbols: set[str] = set()
+
+    @property
+    def reconciliation_blocked(self) -> bool:
+        """Whether exchange exposure could not be verified/protected safely."""
+        return bool(self._unresolved_reconciliation_symbols)
 
     @property
     def mode(self) -> str:
@@ -184,10 +194,72 @@ class PositionManager:
             exchange_positions = await self.binance.get_all_positions()
         except Exception as e:
             logger.warning(f"Position reconcile: could not fetch exchange positions: {e}")
+            self._unresolved_reconciliation_symbols.add("*")
+            await self._critical_reconcile_alert(
+                "Could not read Binance positions; live entries must remain blocked.")
+            return
+
+        if not isinstance(exchange_positions, list):
+            self._unresolved_reconciliation_symbols.add("*")
+            await self._critical_reconcile_alert(
+                "Binance returned a malformed position snapshot; live entries remain blocked.")
+            return
+        # A clean snapshot supersedes prior unresolved markers; this pass will
+        # re-add any condition that is still unresolved.
+        self._unresolved_reconciliation_symbols.clear()
+
+        # Validate the whole snapshot before using it to infer that a DB row is
+        # flat. A malformed row makes absence ambiguous, so do not close any DB
+        # position based on this response.
+        normalized = []
+        malformed = False
+        for raw in exchange_positions:
+            if (not isinstance(raw, dict) or not isinstance(raw.get("symbol"), str)
+                    or not raw.get("symbol", "").strip()):
+                malformed = True
+                self._unresolved_reconciliation_symbols.add("*")
+                continue
+            if "quantity" not in raw:
+                malformed = True
+                symbol = raw["symbol"]
+                self._unresolved_reconciliation_symbols.add(symbol)
+                await self._critical_reconcile_alert(
+                    f"{symbol}: Binance position snapshot omitted quantity; "
+                    "exposure was not changed and new entries must remain blocked.")
+                continue
+            try:
+                qty = Decimal(str(raw["quantity"]))
+                if not qty.is_finite() or qty < 0:
+                    raise ValueError("non-finite or negative quantity")
+                if qty == 0:
+                    continue
+                side = str(raw.get("side", "")).upper()
+                entry = Decimal(str(raw.get("entryPrice")))
+                if side not in ("LONG", "SHORT") or not entry.is_finite() or entry <= 0:
+                    raise ValueError("invalid side or entry price")
+                leverage = int(raw.get("leverage", 1) or 1)
+                if leverage <= 0:
+                    raise ValueError("invalid leverage")
+                if not math.isfinite(float(qty)) or not math.isfinite(float(entry)):
+                    raise ValueError("position values overflow float range")
+                normalized.append((raw, qty, side, entry, leverage))
+            except (TypeError, ValueError, ArithmeticError):
+                malformed = True
+                self._unresolved_reconciliation_symbols.add(str(raw.get("symbol", "*")))
+                await self._critical_reconcile_alert(
+                    f"{raw.get('symbol', 'Unknown symbol')}: malformed Binance position data; "
+                    "exposure was not changed and new entries must remain blocked.")
+        if malformed:
             return
 
         # current DB OPEN positions per symbol
-        open_positions = await self._get_open_positions()
+        # The exchange snapshot represents LIVE exposure only. PAPER positions
+        # share the manager's price-monitoring cache but must never be inferred
+        # flat or adopted from Binance reconciliation.
+        open_positions = [
+            position for position in await self._get_open_positions()
+            if position.get("mode") == "live"
+        ]
         db_open = {p["symbol"]: p for p in open_positions}
 
         # Reverse direction: the DB says OPEN but the exchange holds nothing —
@@ -196,7 +268,7 @@ class PositionManager:
         # this the dashboard shows a phantom position with self-computed PnL
         # forever. Guard: ignore rows younger than 120s so a just-opened
         # position whose positionRisk row hasn't appeared yet isn't misjudged.
-        exchange_symbols = {ep["symbol"] for ep in (exchange_positions or [])}
+        exchange_symbols = {ep[0]["symbol"] for ep in normalized}
         for p in open_positions:
             if p["symbol"] in exchange_symbols:
                 continue
@@ -220,56 +292,211 @@ class PositionManager:
                 exit_price = p["entry_price"]
             await self._close_position(p, "EXTERNAL_CLOSE", exit_price)
 
-        for ep in exchange_positions or []:
+        for ep, qty_decimal, side, entry_decimal, leverage in normalized:
             # get_all_positions() returns TRANSFORMED dicts (symbol/side/quantity/
             # entryPrice/leverage) — NOT the raw positionRisk keys. Reading
             # "positionAmt" here silently skipped every position, so an
             # exchange-only position (e.g. one left naked by a rejected BE stop)
             # was never recorded and stayed invisible to the dashboard.
             symbol = ep.get("symbol")
-            qty = float(ep.get("quantity", 0) or 0)
-            if qty <= 0 or symbol in db_open:
-                continue  # nothing held, or already tracked
-            side = ep.get("side") or "LONG"
-            entry = float(ep.get("entryPrice", 0) or 0)
-            leverage = int(ep.get("leverage", 1) or 1)
+            qty = float(qty_decimal)
+            entry = float(entry_decimal)
 
-            # Adopt the exchange's own resting SL/TP so the engine can monitor
-            # and manage the position instead of leaving it unmanaged.
-            stop_loss = None
-            take_profit = None
+            position_for_check = {"symbol": symbol, "side": side,
+                                  "quantity": str(qty_decimal),
+                                  "entryPrice": str(entry_decimal)}
+            mark = self._positive_finite(ep.get("markPrice"))
+            if mark is None:
+                try:
+                    mark_data = await self.binance.get_mark_price(symbol)
+                    mark = self._positive_finite(
+                        mark_data.get("markPrice") if isinstance(mark_data, dict) else None)
+                except Exception:
+                    mark = None
+            if mark is not None:
+                position_for_check["markPrice"] = str(mark)
+
             try:
-                for algo in await self.binance.get_open_algo_orders(symbol):
-                    trig = float(algo.get("triggerPrice") or 0)
-                    if trig <= 0:
-                        continue
-                    if algo.get("orderType") == "STOP_MARKET":
-                        stop_loss = trig
-                    elif algo.get("orderType") == "TAKE_PROFIT_MARKET":
-                        take_profit = trig
+                algos = await self.binance.get_open_algo_orders(symbol)
             except Exception as e:
-                logger.debug(f"[{symbol}] Reconcile: could not read resting algo orders: {e}")
+                algos = None
+                logger.error(f"[{symbol}] Reconcile: could not read resting algo orders: {e}")
+
+            if algos is not None and not isinstance(algos, list):
+                algos = None
+            stop_loss = self._covering_stop_price(position_for_check, algos or []) \
+                if algos is not None and mark is not None else None
+            take_profit = (self._take_profit_price(algos or [], side, mark)
+                           if algos is not None else None)
+
+            # Already tracked positions still need risk-basis recovery and stop
+            # verification on every reconciliation; a stale DB row is not proof
+            # that the exchange still has protection.
+            tracked = db_open.get(symbol)
+            if tracked is not None:
+                position_mismatch = not self._tracked_position_matches_exchange(
+                    tracked, side, qty, entry
+                )
+                if stop_loss is None:
+                    stop_loss = await self._ensure_reconcile_stop(
+                        symbol, side, qty, mark, algos)
+                # A current exchange stop can repair stop_loss, but it cannot
+                # reconstruct the immutable entry-time risk basis after
+                # trailing. Missing basis stays unresolved and blocks entries.
+                risk = self._positive_finite(tracked.get("initial_risk_distance"))
+                db_stop = self._positive_finite(tracked.get("stop_loss"))
+                if not position_mismatch and stop_loss is not None and db_stop != stop_loss:
+                    await self._persist_reconcile_risk(tracked["id"], stop_loss)
+                if stop_loss is None or risk is None or position_mismatch:
+                    self._unresolved_reconciliation_symbols.add(symbol)
+                    reasons = []
+                    if position_mismatch:
+                        reasons.append("Binance position does not match the database position")
+                    if stop_loss is None:
+                        reasons.append("protective stop is unresolved")
+                    if risk is None:
+                        reasons.append("frozen risk basis is unresolved")
+                    await self._critical_reconcile_alert(
+                        f"{symbol}: {'; '.join(reasons)}; new entries must remain blocked.")
+                else:
+                    self._unresolved_reconciliation_symbols.discard(symbol)
+                continue
+
+            if stop_loss is None:
+                stop_loss = await self._ensure_reconcile_stop(symbol, side, qty, mark, algos)
+            # Its current stop is useful protection, but cannot tell us the
+            # original stop distance used to size or measure realized R.
+            self._unresolved_reconciliation_symbols.add(symbol)
+            unresolved_reason = ("without verified stop protection" if stop_loss is None
+                                 else "without a recoverable entry-time risk basis")
+            await self._critical_reconcile_alert(
+                f"{symbol}: exchange position remains open {unresolved_reason}; "
+                "new entries must remain blocked.")
 
             logger.warning(
                 f"[{symbol}] Reconcile: exchange holds {side} {qty} @ {entry} "
                 f"but no DB position — recording as OPEN "
                 f"(SL={stop_loss}, TP={take_profit})")
-            if stop_loss is None and take_profit is None:
-                logger.error(
-                    f"[{symbol}] Reconcile: untracked position has NO resting SL/TP "
-                    f"on the exchange — it is unprotected")
             try:
                 async with self.session_factory() as session:
                     session.add(Position(
                         symbol=symbol, side=side, entry_price=entry,
                         quantity=qty, leverage=leverage,
                         stop_loss=stop_loss, take_profit=take_profit,
-                        initial_risk_distance=None, status="OPEN",
+                        initial_risk_distance=None,
+                        status="OPEN",
                         mode=self._mode,
                     ))
                     await session.commit()
             except Exception:
                 logger.exception(f"[{symbol}] Reconcile: failed to record position")
+                self._unresolved_reconciliation_symbols.add(symbol)
+                await self._critical_reconcile_alert(
+                    f"{symbol}: exchange exposure could not be persisted locally; "
+                    "new entries must remain blocked.")
+
+    @staticmethod
+    def _positive_finite(value):
+        try:
+            number = float(value)
+            return number if math.isfinite(number) and number > 0 else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    @classmethod
+    def _tracked_position_matches_exchange(cls, tracked, side, quantity, entry_price):
+        """Require DB and Binance direction, size, and average entry to agree."""
+        tracked_side = str(tracked.get("side", "")).upper()
+        tracked_quantity = cls._positive_finite(tracked.get("quantity"))
+        tracked_entry = cls._positive_finite(tracked.get("entry_price"))
+        return (
+            tracked_side == side
+            and tracked_quantity is not None
+            and math.isclose(tracked_quantity, quantity, rel_tol=1e-9, abs_tol=1e-12)
+            and tracked_entry is not None
+            and math.isclose(tracked_entry, entry_price, rel_tol=1e-9, abs_tol=1e-8)
+        )
+
+    @classmethod
+    def _covering_stop_price(cls, position: dict, algos: list[dict]):
+        """Return a verified protective stop trigger, or None."""
+        side = position.get("side")
+        qty = cls._positive_finite(position.get("quantity"))
+        mark = cls._positive_finite(position.get("markPrice"))
+        if side not in ("LONG", "SHORT") or qty is None or mark is None:
+            return None
+        expected_side = "SELL" if side == "LONG" else "BUY"
+        for algo in algos:
+            if not isinstance(algo, dict) or str(algo.get("orderType", "")).upper() != "STOP_MARKET":
+                continue
+            if str(algo.get("side", "")).upper() != expected_side:
+                continue
+            if str(algo.get("positionSide", "")).upper() not in ("BOTH", side):
+                continue
+            if str(algo.get("workingType", "")).upper() != "MARK_PRICE":
+                continue
+            trigger = cls._positive_finite(algo.get("triggerPrice"))
+            if trigger is None or (trigger >= mark if side == "LONG" else trigger <= mark):
+                continue
+            close_all = str(algo.get("closePosition")).lower() == "true"
+            reduce_only = str(algo.get("reduceOnly")).lower() == "true"
+            if not close_all and not reduce_only:
+                continue
+            if not close_all:
+                stop_qty = cls._positive_finite(algo.get("quantity"))
+                if stop_qty is None or stop_qty < qty:
+                    continue
+            return trigger
+        return None
+
+    @classmethod
+    def _take_profit_price(cls, algos: list[dict], side: str, mark):
+        mark = cls._positive_finite(mark)
+        if mark is None:
+            return None
+        for algo in algos:
+            if (isinstance(algo, dict) and
+                    str(algo.get("orderType", "")).upper() == "TAKE_PROFIT_MARKET" and
+                    str(algo.get("side", "")).upper() == ("SELL" if side == "LONG" else "BUY")):
+                value = cls._positive_finite(algo.get("triggerPrice"))
+                if (value is not None and
+                        (value > mark if side == "LONG" else value < mark)):
+                    return value
+        return None
+
+    async def _ensure_reconcile_stop(self, symbol, side, qty, mark, algos):
+        """Place and verify an emergency stop without closing uncertain exposure."""
+        if mark is None or algos is None:
+            return None
+        emergency = mark * (0.99 if side == "LONG" else 1.01)
+        try:
+            await self.binance.modify_position_stop(symbol, side, emergency, qty)
+            refreshed = await self.binance.get_open_algo_orders(symbol)
+            if not isinstance(refreshed, list):
+                return None
+            position = {"side": side, "quantity": qty, "markPrice": mark}
+            return self._covering_stop_price(position, refreshed)
+        except Exception:
+            logger.exception("[%s] Reconcile: emergency stop placement/verification failed", symbol)
+            return None
+
+    async def _persist_reconcile_risk(self, position_id, stop_loss):
+        try:
+            async with self.session_factory() as session:
+                await session.execute(update(Position).where(Position.id == position_id).values(
+                    stop_loss=stop_loss))
+                await session.commit()
+        except Exception:
+            logger.exception("Could not persist reconciled stop/risk basis for position %s", position_id)
+            self._unresolved_reconciliation_symbols.add("*")
+
+    async def _critical_reconcile_alert(self, message):
+        logger.critical(message)
+        if self.alerts:
+            try:
+                await self.alerts.error(message)
+            except Exception:
+                logger.exception("Could not send reconciliation critical alert")
 
     async def _loop(self):
         """Main loop — runs every 30 seconds."""
@@ -293,7 +520,7 @@ class PositionManager:
         """PHASE4_STEP2: pnl_update every pass (open positions + today's PnL)."""
         try:
             positions = await self._get_open_positions()
-            stats = await self.daily_reset.get_daily_stats()
+            stats = await self.daily_reset.get_daily_stats(mode=self._mode)
             await ws_manager.broadcast({"type": "pnl_update", "data": {
                 "open_count": len(positions),
                 "total_pnl_r": stats["total_pnl_r"],

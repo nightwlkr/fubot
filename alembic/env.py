@@ -28,6 +28,7 @@ from backend.models import (  # noqa: F401 — registers all models
     Order,
     EquityLog,
     DailySummary,
+    DailyRiskState,
 )
 from backend.database import Base  # noqa: F401 — SQLAlchemy declarative base
 

@@ -85,7 +85,7 @@ Default section order:
 
 - **backend/** — FastAPI trading bot backend (models, routers, schemas, services, indicators, core engine) — see `backend/AGENTS.md`
 - **frontend/** — React + Vite + TypeScript trading dashboard — see `frontend/AGENTS.md`
-- **alembic/** — SQLAlchemy async migrations, 6 revisions (head `006_position_strategy_type`) — see `alembic/AGENTS.md`
+- **alembic/** — SQLAlchemy async migrations, 10 revisions (head `011_daily_risk_state`) — see `alembic/AGENTS.md`
 - **nginx/** — Production reverse-proxy and SSL config — see `nginx/AGENTS.md`
 - **FUBOT_STEPS/** — 42-step build guide (PHASE1–PHASE6); each step is a markdown file — see `FUBOT_STEPS/AGENTS.md`
 - **tests/** — pytest suite for backend units — see `tests/AGENTS.md`
@@ -101,6 +101,8 @@ Default section order:
 **Strategy:** Crypto Banter 6-pillars (50 SMA filter, FVG entries, structural stops, 3:1+ R:R, -3R daily loss limit)
 
 ## Current Status
+
+- LOCAL RISK / RECONCILIATION FIXES 2026-10-23 (not deployed): daily and weekly breakers isolate LIVE and PAPER trade history; `daily_risk_state` stores daily breaker latches and reset cutoffs per date/mode, while weekly reset cutoffs use `weekly_reset_from_<mode>` (legacy key fallback is live-only). Daily manual reset clears the in-memory latch after its database transaction commits. Dashboard daily/weekly figures follow the active mode and weekly stats share the guard's Monday UTC boundary. Exchange reconciliation ignores PAPER rows when reconciling Binance, verifies live position side/quantity/entry and full-size protective stops, preserves frozen entry-risk basis, and blocks new live entries while exposure data is unresolved. The backtest harness supports OBFVG using the production detector on closed candle prefixes (`--obfvg`, off by default in research runs); the disjoint 60-day comparison improved the recent window by 1.279R but worsened the preceding window by 3.431R, so live strategy settings stay unchanged. Full backend suite: 694 passed, 235 existing warnings; Alembic 011 history and offline SQL generation passed; test DB remained unchanged at 50 trades / 39 positions. The changes are not deployed; production settings, orders, and positions were not changed.
 
 - DEPLOYED 2026-10-23 (`12739e8`): failed-entry cleanup now rejects zero and negative stop trigger prices instead of treating them as protective. Regression tests were added; focused protection suite passed 18/18 and full backend suite passed 665/665 (228 existing warnings). After restart, the authenticated dashboard initially showed the live scanner stopped; following the user's existing authorization, it was started from the dashboard. At 04:52 UTC it showed LIVE/RUNNING at scan 3, the service was active with health 200 and `NRestarts=0`, and SQL showed 56 persisted signals since startup, all SKIPPED: 24 below-STRONG trend, 16 counter-trend long in strong bear regime, 8 bearish trend, 4 below minimum live R:R, and 4 with breached stops. There are no trades today and zero DB OPEN positions. Binance Futures UI independently showed zero positions and zero open orders, matching the DB exposure; the 18 DB orders marked NEW are stale historical rows, not active exchange orders. Binance showed account equity $194.42 and unrealized PnL $0.00. No risk or strategy settings changed.
 

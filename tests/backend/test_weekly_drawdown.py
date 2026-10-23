@@ -18,8 +18,9 @@ class _Result:
 
 
 class _Session:
-    def __init__(self, reset_row):
+    def __init__(self, reset_row, trade_rows=None):
         self.reset_row = reset_row
+        self.trade_rows = trade_rows or []
         self.calls = 0
         self.statements = []
 
@@ -34,7 +35,16 @@ class _Session:
         self.statements.append(statement)
         if self.calls == 1:
             return _Result(value=self.reset_row)
-        return _Result(rows=[])
+        return _Result(rows=self.trade_rows)
+
+
+def test_week_start_uses_monday_utc_boundary():
+    from datetime import date, datetime, timezone
+    from backend.core.daily_reset import week_start_utc
+
+    assert week_start_utc(date(2026, 10, 23)) == datetime(
+        2026, 10, 19, tzinfo=timezone.utc
+    )
 
 
 @pytest.mark.asyncio
@@ -52,13 +62,68 @@ async def test_weekly_guard_restores_full_reset_timestamp_after_restart():
 
     assert await guard.check_weekly_drawdown() is True
 
-    assert guard._reset_from == reset_at
+    assert guard._reset_from_by_mode["live"] == reset_at
     assert session.calls == 2
     trade_query_params = session.statements[1].compile().params
     assert reset_at in trade_query_params.values()
 
     assert await guard.check_weekly_drawdown() is True
     assert session.calls == 3  # the reset setting is restored only once
+
+
+@pytest.mark.asyncio
+async def test_unknown_r_trade_counts_as_full_weekly_loss():
+    from backend.core.weekly_drawdown import WeeklyDrawdownGuard
+
+    stopped = []
+    alerted = []
+
+    class Bot:
+        async def stop(self):
+            stopped.append(True)
+
+    class Alerts:
+        async def critical(self, message):
+            alerted.append(message)
+
+    session = _Session(None, trade_rows=[(None,)])
+    guard = WeeklyDrawdownGuard(
+        session_factory=lambda: session,
+        settings={"weekly_drawdown_limit_r": 1.0},
+        bot_engine=Bot(),
+        alert_service=Alerts(),
+    )
+
+    assert await guard.check_weekly_drawdown(mode="live") is False
+    assert stopped == [True]
+    assert alerted and "1.0R" in alerted[0]
+    assert "pnl_r IS NOT NULL" not in str(session.statements[1].compile())
+
+
+@pytest.mark.asyncio
+async def test_weekly_status_counts_unknown_r_as_loss():
+    from backend.core.weekly_drawdown import WeeklyDrawdownGuard
+
+    class TradeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute(self, statement):
+            return _Result(rows=[(SimpleNamespace(pnl_r=None),)])
+
+    guard = WeeklyDrawdownGuard(
+        session_factory=lambda: TradeSession(),
+        settings={"weekly_drawdown_limit_r": 5.0},
+    )
+
+    stats = await guard.get_weekly_stats(mode="live")
+
+    assert stats["weekly_trades"] == 1
+    assert stats["weekly_losses"] == 1
+    assert stats["weekly_pnl_r"] == -1.0
 
 
 class _RouteResult:
@@ -98,11 +163,11 @@ class _RouteSession:
 async def test_weekly_reset_endpoint_updates_existing_setting(monkeypatch):
     from backend.routers import bot
 
-    setting = SimpleNamespace(key="weekly_reset_from", value="old")
+    setting = SimpleNamespace(key="weekly_reset_from_paper", value="old")
     db = _RouteSession(setting=setting)
     guard = SimpleNamespace(reset_calls=[])
-    guard.manual_reset = lambda full_reset: guard.reset_calls.append(full_reset)
-    monkeypatch.setattr(bot, "_bot_engine", SimpleNamespace(weekly_guard=guard))
+    guard.manual_reset = lambda full_reset, mode: guard.reset_calls.append((full_reset, mode))
+    monkeypatch.setattr(bot, "_bot_engine", SimpleNamespace(weekly_guard=guard, mode="paper"))
     monkeypatch.setattr(bot, "get_current_user_from_cookie", _authenticated_user)
 
     result = await bot.reset_weekly_drawdown_guard(_request(), db)
@@ -112,7 +177,8 @@ async def test_weekly_reset_endpoint_updates_existing_setting(monkeypatch):
     assert second_result["ok"] is True
     assert setting.value != "old"
     assert db.commits == 2
-    assert guard.reset_calls == [True, True]
+    assert setting.key == "weekly_reset_from_paper"
+    assert guard.reset_calls == [(True, "paper"), (True, "paper")]
 
 
 @pytest.mark.asyncio
@@ -120,11 +186,11 @@ async def test_weekly_reset_endpoint_does_not_reset_guard_if_persistence_fails(m
     from fastapi import HTTPException
     from backend.routers import bot
 
-    db = _RouteSession(setting=SimpleNamespace(key="weekly_reset_from", value="old"),
+    db = _RouteSession(setting=SimpleNamespace(key="weekly_reset_from_paper", value="old"),
                        fail_commit=True)
     guard = SimpleNamespace(reset_calls=[])
-    guard.manual_reset = lambda full_reset: guard.reset_calls.append(full_reset)
-    monkeypatch.setattr(bot, "_bot_engine", SimpleNamespace(weekly_guard=guard))
+    guard.manual_reset = lambda full_reset, mode: guard.reset_calls.append((full_reset, mode))
+    monkeypatch.setattr(bot, "_bot_engine", SimpleNamespace(weekly_guard=guard, mode="paper"))
     monkeypatch.setattr(bot, "get_current_user_from_cookie", _authenticated_user)
 
     with pytest.raises(HTTPException) as exc:

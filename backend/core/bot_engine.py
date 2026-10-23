@@ -221,11 +221,17 @@ class BotEngine:
 
     async def _scan_and_evaluate(self):
         """For each enabled symbol: scan, evaluate, execute."""
+        position_manager = getattr(self, "position_manager", None)
+        if (self._mode == "live" and position_manager is not None
+                and getattr(position_manager, "reconciliation_blocked", False)):
+            logger.critical(
+                "Live scan blocked because Binance exposure reconciliation is unresolved")
+            return
         symbols = await self._get_enabled_symbols()
 
         # Overtrading guard — daily trade cap (checked once per pass)
         max_daily = int(self.settings.get("max_daily_trades", 12))
-        daily_stats = await self.daily_reset.get_daily_stats()
+        daily_stats = await self.daily_reset.get_daily_stats(mode=self._mode)
         if max_daily > 0 and daily_stats["total_trades"] >= max_daily:
             logger.info(f"Daily trade cap reached ({daily_stats['total_trades']}/{max_daily})")
             return
@@ -295,7 +301,9 @@ class BotEngine:
                     continue
 
                 # Check daily loss limit
-                if not await self.daily_reset.check_and_enforce_limit(daily_guard_positions):
+                if not await self.daily_reset.check_and_enforce_limit(
+                    daily_guard_positions, mode=self._mode
+                ):
                     logger.info(f"Daily limit reached, skipping {symbol}")
                     break
 
@@ -310,7 +318,7 @@ class BotEngine:
                         continue
 
                 # Check weekly drawdown limit
-                if not await self.weekly_guard.check_weekly_drawdown():
+                if not await self.weekly_guard.check_weekly_drawdown(mode=self._mode):
                     logger.info(f"Weekly drawdown limit hit, skipping {symbol}")
                     continue
 
@@ -539,7 +547,7 @@ class BotEngine:
 
     async def get_status(self) -> dict:
         """Current bot status for dashboard."""
-        daily_stats = await self.daily_reset.get_daily_stats()
+        daily_stats = await self.daily_reset.get_daily_stats(mode=self._mode)
 
         return {
             "status": "running" if self._running else "stopped",

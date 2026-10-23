@@ -5,13 +5,15 @@ both the engine's scan loop and request handlers concurrently).
 """
 import logging
 import math
-from datetime import datetime, date, timezone
+from datetime import datetime, date, time, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from sqlalchemy import select
 
 from backend.models.daily_summary import DailySummary
+from backend.models.daily_risk_state import DailyRiskState
+from backend.models.trade import Trade
 from backend.core import risk_units
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,13 @@ def today_utc() -> date:
     breaker is enforcing today's real, over-limit row.
     """
     return datetime.now(timezone.utc).date()
+
+
+def week_start_utc(day: Optional[date] = None) -> datetime:
+    """Return the UTC Monday boundary for a date, matching weekly enforcement."""
+    day = day or today_utc()
+    monday = day - timedelta(days=day.weekday())
+    return datetime.combine(monday, time.min, tzinfo=timezone.utc)
 
 
 def limit_r_from(settings: Optional[dict]) -> float:
@@ -158,6 +167,7 @@ class DailyResetService:
         # blocked trading until a service restart.
         self._limit_hit_today = False
         self._limit_hit_date: Optional[date] = None
+        self._limit_hit_mode: Optional[str] = None
 
     def get_limit_r(self) -> float:
         """Get the daily loss limit in R (positive value).
@@ -188,53 +198,77 @@ class DailyResetService:
             "limit_hit": False,
         }
 
-    async def get_daily_stats(self) -> dict:
-        """Returns today's trading stats."""
+    async def get_daily_stats(self, mode: Optional[str] = None) -> dict:
+        """Return today's mode-specific realized stats and persisted latch.
+
+        ``DailySummary`` remains an all-mode display aggregate. It is not a
+        safe risk input because paper fills can offset or add to live results.
+        """
         today = today_utc()
+        mode = mode or self.settings.get("bot_mode", "live")
+        if mode not in ("live", "paper"):
+            raise ValueError(f"unsupported daily risk mode: {mode!r}")
 
         if self.session_factory is None:
             return self._zero_stats(today)
 
+        start = datetime.combine(today, time.min, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
         async with self.session_factory() as session:
-            result = await session.execute(
-                select(DailySummary).where(DailySummary.date == today)
+            latch_result = await session.execute(
+                select(DailyRiskState).where(
+                    DailyRiskState.date == today,
+                    DailyRiskState.mode == mode,
+                )
             )
-            summary = result.scalar_one_or_none()
+            risk_state = latch_result.scalar_one_or_none()
+            risk_start = start
+            reset_at = getattr(risk_state, "reset_at", None)
+            if reset_at is not None:
+                # A manual reset starts a new daily risk/trade-count window
+                # without rewriting historical Trade rows.
+                risk_start = max(start, reset_at)
+            trades_result = await session.execute(
+                select(Trade)
+                .where(Trade.mode == mode)
+                .where(Trade.closed_at >= risk_start)
+                .where(Trade.closed_at < end)
+            )
+            trades = [row[0] for row in trades_result.fetchall()]
 
         limit_r = self.get_limit_r()
+        pnls_r = [risk_units.daily_r_contribution(trade.pnl_r) for trade in trades]
+        total_pnl_r = sum(pnls_r)
+        used_r = used_r_from(SimpleNamespace(total_pnl_r=total_pnl_r))
+        return {
+            "date": today.isoformat(),
+            "total_trades": len(trades),
+            "wins": sum(pnl > 0 for pnl in pnls_r),
+            "losses": sum(pnl < 0 for pnl in pnls_r),
+            "total_pnl_r": total_pnl_r,
+            "total_pnl_usdt": sum(float(trade.pnl_usdt or 0) for trade in trades),
+            "used_r": used_r,
+            "limit_r": limit_r,
+            "remaining_r": max(0.0, limit_r - used_r),
+            "limit_hit": bool(risk_state and risk_state.limit_hit),
+        }
 
-        if summary:
-            # Only LOSSES count toward the daily loss limit — a winning day
-            # must never trip the -3R stop. The rule lives in `used_r_from`.
-            used_r = used_r_from(summary)
-            return {
-                "date": today.isoformat(),
-                "total_trades": summary.total_trades,
-                "wins": summary.wins,
-                "losses": summary.losses,
-                "total_pnl_r": float(summary.total_pnl_r),
-                "total_pnl_usdt": float(summary.total_pnl_usdt),
-                "used_r": used_r,
-                "limit_r": limit_r,
-                "remaining_r": max(0.0, limit_r - used_r),
-                "limit_hit": summary.daily_loss_limit_hit,
-            }
-
-        return self._zero_stats(today)
-
-    async def check_and_enforce_limit(self, open_positions: Optional[dict] = None) -> bool:
+    async def check_and_enforce_limit(
+        self, open_positions: Optional[dict] = None, mode: Optional[str] = None
+    ) -> bool:
         """Called before every new trade. Returns True if trading is allowed.
 
         Includes unrealized PnL from open positions so the daily limit accounts
         for losses already accumulated in trades that haven't closed yet.
         """
         # Self-clear the latch at the UTC day boundary (date-based).
-        self.check_and_reset()
+        mode = mode or self.settings.get("bot_mode", "live")
+        self.check_and_reset(mode)
 
-        if self._limit_hit_today:
+        if self._limit_hit_today and self._limit_hit_mode == mode:
             return False
 
-        stats = await self.get_daily_stats()
+        stats = await self.get_daily_stats(mode=mode)
         limit = stats["limit_r"]
         used = stats["used_r"]
 
@@ -244,6 +278,7 @@ class DailyResetService:
         if stats.get("limit_hit"):
             self._limit_hit_today = True
             self._limit_hit_date = today_utc()
+            self._limit_hit_mode = mode
             return False
 
         # Combine realized and unrealized PnL before applying the shared NET
@@ -258,7 +293,7 @@ class DailyResetService:
             used = used_r_from(SimpleNamespace(total_pnl_r=combined_pnl_r))
 
         if used >= limit:
-            await self._latch_daily_limit(used, limit)
+            await self._latch_daily_limit(used, limit, mode)
             return False
 
         # Warning at 80% of limit (epsilon: 3.0 * 0.8 == 2.4000000000000004)
@@ -297,7 +332,7 @@ class DailyResetService:
             total_unrealized_pnl_r += unrealized_pnl / (quantity * risk_distance)
         return total_unrealized_pnl_r
 
-    async def _latch_daily_limit(self, used_r: float, limit_r: float):
+    async def _latch_daily_limit(self, used_r: float, limit_r: float, mode: str = "live"):
         """Latch the entry breaker for today without terminating the scan loop.
 
         Keeping the loop alive lets ``check_and_reset`` observe the next UTC
@@ -307,9 +342,22 @@ class DailyResetService:
         self._limit_hit_today = True
         today = today_utc()
         self._limit_hit_date = today
+        self._limit_hit_mode = mode
 
         if self.session_factory is not None:
             async with self.session_factory() as session:
+                result = await session.execute(
+                    select(DailyRiskState).where(
+                        DailyRiskState.date == today,
+                        DailyRiskState.mode == mode,
+                    )
+                )
+                risk_state = result.scalar_one_or_none()
+                if risk_state is None:
+                    risk_state = DailyRiskState(date=today, mode=mode, limit_hit=True)
+                    session.add(risk_state)
+                else:
+                    risk_state.limit_hit = True
                 result = await session.execute(
                     select(DailySummary).where(DailySummary.date == today)
                 )
@@ -377,7 +425,7 @@ class DailyResetService:
 
             await session.commit()
 
-    def check_and_reset(self):
+    def check_and_reset(self, mode: Optional[str] = None):
         """Clear the daily-loss latch at the UTC day boundary.
 
         Date-based (not a time window): the latch is cleared whenever the
@@ -385,10 +433,19 @@ class DailyResetService:
         check_and_enforce_limit on every trade check, so it self-clears even
         though no dedicated scheduler invokes it.
         """
-        if not self._limit_hit_today:
+        mode = mode or self.settings.get("bot_mode", "live")
+        if not self._limit_hit_today or self._limit_hit_mode != mode:
             return
         today = today_utc()
         if self._limit_hit_date is None or today > self._limit_hit_date:
             logger.info("New UTC day — resetting daily loss limit flag.")
             self._limit_hit_today = False
             self._limit_hit_date = None
+            self._limit_hit_mode = None
+
+    def clear_latch(self, mode: str) -> None:
+        """Clear this mode's in-memory latch after a persisted manual reset."""
+        if self._limit_hit_mode == mode:
+            self._limit_hit_today = False
+            self._limit_hit_date = None
+            self._limit_hit_mode = None

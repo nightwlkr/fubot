@@ -113,24 +113,21 @@ class TestUsedRFrom:
         used = used_r_from(self._summary(junk))
         assert used > 3.0, f"a non-finite pnl must exceed any real limit, got {used}"
 
-    def test_a_non_finite_pnl_actually_halts_the_breaker(self):
-        """`used > 3.0` is only meaningful if the breaker's own comparison treats
-        it as over-limit. Closes the gap between the helper's contract and the
-        caller that enforces it: `check_and_enforce_limit` must refuse to trade."""
+    def test_unknown_trade_r_is_charged_as_a_full_loss(self):
+        """A nullable Trade.pnl_r must consume the fail-closed -1R allowance."""
         import asyncio
         from types import SimpleNamespace
         from backend.core.daily_reset import DailyResetService
 
-        row = SimpleNamespace(total_trades=3, wins=1, losses=2, total_pnl_r=float("nan"),
-                               total_pnl_usdt=float("nan"), daily_loss_limit_hit=False)
+        class _Result:
+            def fetchall(self):
+                return [(SimpleNamespace(pnl_r=None, pnl_usdt=-1.0),)]
+            def scalar_one_or_none(self):
+                return None
 
         class _Session:
             async def execute(self, *a, **k):
-                from types import SimpleNamespace
-                return SimpleNamespace(scalar_one_or_none=lambda: row)
-
-            async def commit(self):
-                return None
+                return _Result()
 
             async def __aenter__(self):
                 return self
@@ -140,10 +137,9 @@ class TestUsedRFrom:
 
         svc = DailyResetService(session_factory=lambda: _Session(),
                                 settings={})
-        # get_daily_stats renders `float(summary.total_pnl_r)` for display, which
-        # is NaN but does not raise, so the breaker path is reached.
-        assert asyncio.run(svc.check_and_enforce_limit()) is False, \
-            "an unreadable daily total must STOP trading, not allow it"
+        stats = asyncio.run(svc.get_daily_stats(mode="live"))
+        assert stats["used_r"] == 1.0
+        assert stats["total_pnl_r"] == -1.0
 
     def test_unrealized_loss_alert_reports_combined_usage_and_fires_once(self):
         """The halt threshold includes open losses, so its alert must report
@@ -165,7 +161,7 @@ class TestUsedRFrom:
             alerts = Alerts()
             svc = DailyResetService(settings={"daily_loss_limit_r": -3.0},
                                     bot_engine=Bot(), alert_service=alerts)
-            async def stats():
+            async def stats(mode=None):
                 return {"used_r": 0.0, "limit_r": 3.0}
             svc.get_daily_stats = stats
             positions = {"BTCUSDT": {"unrealizedPnl": -3.0,
@@ -274,25 +270,28 @@ class TestServiceDelegatesToHelpers:
         assert "datetime" not in called, \
             "get_daily_stats must not resolve the day inline — use today_utc()"
 
-    def test_a_winning_day_reports_zero_through_the_real_summary_path(self):
-        """Closes the gap the tautology left: exercise `get_daily_stats` with an
-        actual summary row so `used_r_from` is reached for real. A winning day
-        must report 0.0 — the property that stops a winning day tripping the
-        breaker."""
+    def test_a_winning_day_reports_zero_from_mode_scoped_trades(self):
+        """Exercise get_daily_stats with Trade rows so used_r_from is reached."""
         import asyncio
         from types import SimpleNamespace
         from backend.core.daily_reset import DailyResetService, used_r_from
 
-        class _FakeSession:
-            """Exposes exactly the attributes `get_daily_stats` reads off the
-            `DailySummary` row it selects — no more, so adding a read to the
-            method without extending this fake fails the test."""
+        class _FakeResult:
+            def __init__(self, rows=None):
+                self.rows = rows or []
+            def fetchall(self):
+                return self.rows
+            def scalar_one_or_none(self):
+                return None
 
-            def __init__(self, summary):
-                self._summary = summary
+        class _FakeSession:
+            def __init__(self, rows):
+                self.rows = rows
+                self.calls = 0
 
             async def execute(self, *a, **k):
-                return SimpleNamespace(scalar_one_or_none=lambda: self._summary)
+                self.calls += 1
+                return _FakeResult(rows=self.rows) if self.calls == 2 else _FakeResult()
 
             async def __aenter__(self):
                 return self
@@ -300,14 +299,11 @@ class TestServiceDelegatesToHelpers:
             async def __aexit__(self, *exc):
                 return False
 
-        def _row(total_pnl_r):
-            return SimpleNamespace(date=None, total_trades=4, wins=2, losses=2,
-                                   total_pnl_r=total_pnl_r, total_pnl_usdt=1.0,
-                                   daily_loss_limit_hit=False)
-
         async def scenario(total_pnl_r):
+            rows = [(SimpleNamespace(pnl_r=pnl_r, pnl_usdt=0.25),)
+                    for pnl_r in (total_pnl_r, 0.0, 0.0, 0.0)]
             svc = DailyResetService(
-                session_factory=lambda: _FakeSession(_row(total_pnl_r)),
+                session_factory=lambda: _FakeSession(rows),
                 settings={})
             return await svc.get_daily_stats()
 
@@ -315,9 +311,10 @@ class TestServiceDelegatesToHelpers:
             stats = asyncio.run(scenario(total))
             assert stats["used_r"] == pytest.approx(used_r_from(
                 SimpleNamespace(total_pnl_r=total))), f"total={total!r}"
-            # The rest of the row is passed through untouched.
+            # Mode-scoped trade counts/outcomes are derived from Trade rows.
             assert stats["total_trades"] == 4
-            assert stats["wins"] == 2 and stats["losses"] == 2
+            assert stats["wins"] == (1 if total > 0 else 0)
+            assert stats["losses"] == (1 if total < 0 else 0)
             assert stats["remaining_r"] == pytest.approx(
                 stats["limit_r"] - stats["used_r"])
 
@@ -339,12 +336,15 @@ class TestServiceDelegatesToHelpers:
         from types import SimpleNamespace
         from backend.core.daily_reset import DailyResetService
 
-        class _FakeSession:
-            def __init__(self, summary):
-                self._summary = summary
+        class _FakeResult:
+            def fetchall(self):
+                return [(SimpleNamespace(pnl_r=None, pnl_usdt=0.0),)]
+            def scalar_one_or_none(self):
+                return None
 
+        class _FakeSession:
             async def execute(self, *a, **k):
-                return SimpleNamespace(scalar_one_or_none=lambda: self._summary)
+                return _FakeResult()
 
             async def __aenter__(self):
                 return self
@@ -352,17 +352,14 @@ class TestServiceDelegatesToHelpers:
             async def __aexit__(self, *exc):
                 return False
 
-        row = SimpleNamespace(date=None, total_trades=0, wins=0, losses=0,
-                              total_pnl_r=None, total_pnl_usdt=0.0,
-                              daily_loss_limit_hit=False)
-
         async def scenario():
             svc = DailyResetService(
-                session_factory=lambda: _FakeSession(row), settings={})
+                session_factory=lambda: _FakeSession(), settings={})
             return await svc.get_daily_stats()
 
-        with pytest.raises(TypeError):
-            asyncio.run(scenario())
+        stats = asyncio.run(scenario())
+        assert stats["total_pnl_r"] == -1.0
+        assert stats["used_r"] == 1.0
 
     def test_the_module_resolves_the_day_in_exactly_one_place(self):
         """Every breaker decision reads the same trading day. Each call site
@@ -537,17 +534,19 @@ class TestDashboardAgreesWithBreaker:
             # `remaining_r` are real comparisons — a null factory reports
             # used_r 0.0 and would disagree for a reason that has nothing to do
             # with the clamp.
-            row = SimpleNamespace(
-                total_pnl_r=body["pnl_r"],
-                total_pnl_usdt=body["pnl_usdt"],
-                total_trades=body["trades_count"],
-                wins=body["wins"],
-                losses=body["losses"],
-                daily_loss_limit_hit=False)
+            trade = SimpleNamespace(
+                pnl_r=body["pnl_r"],
+                pnl_usdt=body["pnl_usdt"])
 
             class _Session:
+                def __init__(self):
+                    self.calls = 0
+
                 async def execute(self, *a, **k):
-                    return SimpleNamespace(scalar_one_or_none=lambda: row)
+                    self.calls += 1
+                    if self.calls == 1:
+                        return SimpleNamespace(scalar_one_or_none=lambda: None)
+                    return SimpleNamespace(fetchall=lambda: [(trade,)])
 
                 async def __aenter__(self):
                     return self

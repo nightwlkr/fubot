@@ -803,9 +803,9 @@ class TestOvertradingGuard:
         """Stub daily_reset whose stats report a controllable trade count."""
         def __init__(self, total_trades):
             self._n = total_trades
-        async def get_daily_stats(self):
+        async def get_daily_stats(self, mode=None):
             return {"total_trades": self._n, "used_r": 0.0, "limit_r": 3.0}
-        async def check_and_enforce_limit(self, open_positions=None):
+        async def check_and_enforce_limit(self, open_positions=None, mode=None):
             return True
 
     async def _make_engine(self, daily, session_factory=None):
@@ -859,9 +859,9 @@ class TestOvertradingGuard:
 
     async def test_latched_daily_limit_does_not_emit_a_duplicate_alert(self):
         class DailyStopped:
-            async def get_daily_stats(self):
+            async def get_daily_stats(self, mode=None):
                 return {"total_trades": 0, "used_r": 0.0, "limit_r": 3.0}
-            async def check_and_enforce_limit(self, open_positions=None):
+            async def check_and_enforce_limit(self, open_positions=None, mode=None):
                 return False
 
         engine = await self._make_engine(DailyStopped())
@@ -1022,11 +1022,11 @@ class TestCloseAllPositions:
     open with no TP/SL management (dangerous in live mode)."""
 
     class _DailyWithStats:
-        async def get_daily_stats(self):
+        async def get_daily_stats(self, mode=None):
             return {"total_trades": 0, "used_r": 0.0, "limit_r": 3.0}
         async def update_daily_summary(self, *a, **k):
             return None
-        async def check_and_enforce_limit(self, open_positions=None):
+        async def check_and_enforce_limit(self, open_positions=None, mode=None):
             return True
 
     async def test_close_all_closes_open_positions(self):
@@ -1323,8 +1323,14 @@ class TestLiveModeSafety:
                              "entryPrice": 100.0, "markPrice": 99.0,
                              "unrealizedPnl": 5.0, "leverage": 5}]
                 async def get_open_algo_orders(self, symbol):
-                    return [{"algoId": 1, "orderType": "STOP_MARKET", "triggerPrice": "105.0"},
-                            {"algoId": 2, "orderType": "TAKE_PROFIT_MARKET", "triggerPrice": "90.0"}]
+                    return [
+                        {"algoId": 1, "orderType": "STOP_MARKET", "side": "BUY",
+                         "positionSide": "BOTH", "workingType": "MARK_PRICE",
+                         "triggerPrice": "105.0", "reduceOnly": "true", "quantity": "5.0"},
+                        {"algoId": 2, "orderType": "TAKE_PROFIT_MARKET", "side": "BUY",
+                         "positionSide": "BOTH", "workingType": "MARK_PRICE",
+                         "triggerPrice": "90.0", "reduceOnly": "true", "quantity": "5.0"},
+                    ]
             async def _noop(*a, **k):
                 return None
             alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
@@ -1768,8 +1774,8 @@ class TestScanRateLimitGuard:
         engine.signals = type("S", (), {"scan_symbol": lambda self, s: _empty_async()})()
         engine.strategy = type("T", (), {"evaluate_signal": lambda self, sig, paper_mode=False: _empty_async()})()
         engine.daily_reset = type("D", (), {
-            "get_daily_stats": lambda self: _stats_async(),
-            "check_and_enforce_limit": lambda self: _true_async(),
+            "get_daily_stats": lambda self, mode=None: _stats_async(),
+            "check_and_enforce_limit": lambda self, open_positions=None, mode=None: _true_async(),
         })()
         engine.alerts = type("A", (), {})()
         engine.session_factory = None

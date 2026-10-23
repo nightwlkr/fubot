@@ -1,6 +1,7 @@
 """Dashboard router — overview and today stats."""
 import logging
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -12,7 +13,9 @@ from backend.core.daily_reset import (
     limit_setting_row_value,
     today_utc,
     used_r_from,
+    week_start_utc,
 )
+from backend.core import risk_units
 from backend.models.setting import Setting
 from backend.database import get_db
 from backend.models.daily_summary import DailySummary
@@ -123,6 +126,7 @@ async def dashboard_overview(
     today = today_utc()
     daily_result = await db.execute(select(DailySummary).where(DailySummary.date == today))
     daily = daily_result.scalar_one_or_none()
+    risk_stats = engine_status.get("daily_stats") or {}
 
     # Total trades, best/worst
     trade_result = await db.execute(select(Trade))
@@ -139,16 +143,22 @@ async def dashboard_overview(
     settings_result = await db.execute(select(Setting).where(Setting.key == "max_daily_trades"))
     max_daily_row = settings_result.scalar_one_or_none()
     max_daily_trades = int(max_daily_row.value) if max_daily_row and max_daily_row.value is not None else 12
-    trades_today_count = daily.total_trades if daily else 0
+    trades_today_count = int(risk_stats.get(
+        "total_trades", daily.total_trades if daily else 0))
     remaining_daily_trades = max(0, max_daily_trades - trades_today_count)
 
     # Weekly drawdown status — respect DB-persisted reset point if present
-    day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    active_mode = engine_status.get("mode", "live")
     reset_row = await db.execute(
-        select(Setting).where(Setting.key == "weekly_reset_from")
+        select(Setting).where(Setting.key == f"weekly_reset_from_{active_mode}")
     )
     reset_row_val = reset_row.scalar_one_or_none()
-    week_start = day_start
+    if reset_row_val is None and active_mode == "live":
+        reset_row = await db.execute(
+            select(Setting).where(Setting.key == "weekly_reset_from")
+        )
+        reset_row_val = reset_row.scalar_one_or_none()
+    week_start = week_start_utc(today)
     if reset_row_val and reset_row_val.value:
         try:
             rs = datetime.fromisoformat(reset_row_val.value)
@@ -160,16 +170,16 @@ async def dashboard_overview(
     weekly_result = await db.execute(
         select(Trade.pnl_r)
         .where(Trade.closed_at >= week_start)
-        .where(Trade.pnl_r < 0)
+        .where(Trade.mode == active_mode)
     )
-    weekly_losses = weekly_result.fetchall()
-    total_weekly_loss = sum(abs(float(r[0])) for r in weekly_losses if r[0] is not None)
+    weekly_rows = weekly_result.fetchall()
+    weekly_total_r = sum(risk_units.daily_r_contribution(r[0]) for r in weekly_rows)
 
     settings_result2 = await db.execute(select(Setting).where(Setting.key == "weekly_drawdown_limit_r"))
     weekly_row = settings_result2.scalar_one_or_none()
     weekly_limit = float(weekly_row.value) if weekly_row and weekly_row.value is not None else 5.0
 
-    weekly_used_r = total_weekly_loss
+    weekly_used_r = used_r_from(SimpleNamespace(total_pnl_r=weekly_total_r))
     weekly_remaining_r = max(0.0, weekly_limit - weekly_used_r)
     weekly_paused = weekly_used_r >= weekly_limit
 
@@ -184,15 +194,18 @@ async def dashboard_overview(
             last_scan=engine_status.get("last_scan"),
         ),
         today_stats=TodayStats(
-            realized_pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
+            realized_pnl_usdt=float(risk_stats.get(
+                "total_pnl_usdt", daily.total_pnl_usdt if daily else 0.0)),
             unrealized_pnl_usdt=0.0,
             win_rate=win_rate,
-            trades_today=daily.total_trades if daily else 0,
-            pnl_r=float(daily.total_pnl_r) if daily else 0.0,
-            pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
-            wins=daily.wins if daily else 0,
-            losses=daily.losses if daily else 0,
-            trades_count=daily.total_trades if daily else 0,
+            trades_today=trades_today_count,
+            pnl_r=float(risk_stats.get(
+                "total_pnl_r", daily.total_pnl_r if daily else 0.0)),
+            pnl_usdt=float(risk_stats.get(
+                "total_pnl_usdt", daily.total_pnl_usdt if daily else 0.0)),
+            wins=int(risk_stats.get("wins", daily.wins if daily else 0)),
+            losses=int(risk_stats.get("losses", daily.losses if daily else 0)),
+            trades_count=trades_today_count,
             daily_trades_limit_status=DailyTradesLimitStatus(
                 used_trades=trades_today_count,
                 limit_trades=max_daily_trades,
@@ -224,6 +237,11 @@ async def today_stats(
     db: AsyncSession = Depends(get_db),
 ):
     user = await get_current_user_from_cookie(request, db)
+    from backend.main import app
+    engine = getattr(app.state, "bot_engine", None)
+    engine_status = await engine.get_status() if engine is not None else {}
+    risk_stats = engine_status.get("daily_stats") or {}
+    active_mode = engine_status.get("mode", "live")
     # UTC, not local — see daily_reset.today_utc() for why this diverges.
     today = today_utc()
 
@@ -247,22 +265,27 @@ async def today_stats(
 
     # Only losses count toward the limit (a winning day must not trip -3R)
     # used_r_from(None) is 0.0, so the "no row yet" case needs no guard.
-    used_r = used_r_from(daily)
+    used_r = float(risk_stats.get("used_r", used_r_from(daily)))
 
     # Max daily trades cap
     settings_result3 = await db.execute(select(Setting).where(Setting.key == "max_daily_trades"))
     max_daily_row = settings_result3.scalar_one_or_none()
     max_daily_trades = int(max_daily_row.value) if max_daily_row and max_daily_row.value is not None else 12
-    trades_today_count = daily.total_trades if daily else 0
+    trades_today_count = int(risk_stats.get(
+        "total_trades", daily.total_trades if daily else 0))
     remaining_daily_trades = max(0, max_daily_trades - trades_today_count)
 
     # Weekly drawdown status — respect DB-persisted reset point if present
-    day_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
     reset_row = await db.execute(
-        select(Setting).where(Setting.key == "weekly_reset_from")
+        select(Setting).where(Setting.key == f"weekly_reset_from_{active_mode}")
     )
     reset_row_val = reset_row.scalar_one_or_none()
-    week_start = day_start
+    if reset_row_val is None and active_mode == "live":
+        reset_row = await db.execute(
+            select(Setting).where(Setting.key == "weekly_reset_from")
+        )
+        reset_row_val = reset_row.scalar_one_or_none()
+    week_start = week_start_utc(today)
     if reset_row_val and reset_row_val.value:
         try:
             rs = datetime.fromisoformat(reset_row_val.value)
@@ -274,16 +297,16 @@ async def today_stats(
     weekly_result = await db.execute(
         select(Trade.pnl_r)
         .where(Trade.closed_at >= week_start)
-        .where(Trade.pnl_r < 0)
+        .where(Trade.mode == active_mode)
     )
-    weekly_losses = weekly_result.fetchall()
-    total_weekly_loss = sum(abs(float(r[0])) for r in weekly_losses if r[0] is not None)
+    weekly_rows = weekly_result.fetchall()
+    weekly_total_r = sum(risk_units.daily_r_contribution(r[0]) for r in weekly_rows)
 
     settings_result2 = await db.execute(select(Setting).where(Setting.key == "weekly_drawdown_limit_r"))
     weekly_row = settings_result2.scalar_one_or_none()
     weekly_limit = float(weekly_row.value) if weekly_row and weekly_row.value is not None else 5.0
 
-    weekly_used_r = total_weekly_loss
+    weekly_used_r = used_r_from(SimpleNamespace(total_pnl_r=weekly_total_r))
     weekly_remaining_r = max(0.0, weekly_limit - weekly_used_r)
     weekly_paused = weekly_used_r >= weekly_limit
 
@@ -311,15 +334,18 @@ async def today_stats(
         logger.warning(f"Failed to fetch balance for today stats: {e}")
 
     return TodayStats(
-        realized_pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
+        realized_pnl_usdt=float(risk_stats.get(
+            "total_pnl_usdt", daily.total_pnl_usdt if daily else 0.0)),
         unrealized_pnl_usdt=0.0,
         win_rate=0.0,
-        trades_today=daily.total_trades if daily else 0,
-        pnl_r=float(daily.total_pnl_r) if daily else 0.0,
-        pnl_usdt=float(daily.total_pnl_usdt) if daily else 0.0,
-        wins=daily.wins if daily else 0,
-        losses=daily.losses if daily else 0,
-        trades_count=daily.total_trades if daily else 0,
+        trades_today=trades_today_count,
+        pnl_r=float(risk_stats.get(
+            "total_pnl_r", daily.total_pnl_r if daily else 0.0)),
+        pnl_usdt=float(risk_stats.get(
+            "total_pnl_usdt", daily.total_pnl_usdt if daily else 0.0)),
+        wins=int(risk_stats.get("wins", daily.wins if daily else 0)),
+        losses=int(risk_stats.get("losses", daily.losses if daily else 0)),
+        trades_count=trades_today_count,
         available_balance_usdt=available_balance_usdt,
         daily_limit_status=DailyLimitStatus(
             used_r=used_r,

@@ -8,7 +8,7 @@ SQLAlchemy 2.0 async migrations for all FUBOT database tables. All schema change
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/alembic/`
-Status: applied — `alembic current` = `006_position_strategy_type` on the VPS (deployed 2026-10-15); 6 revisions exist
+Status: local head `011_daily_risk_state`; production was last verified at `010_nullable_trade_pnl_r` before this migration and has not received 011; 10 revisions exist
 
 ## Local Contracts
 
@@ -20,7 +20,7 @@ Status: applied — `alembic current` = `006_position_strategy_type` on the VPS 
 ## Work Guidance
 
 ### Current State
-- Chain: `001_initial` (10 tables) → `002_seed_data` (symbols + settings) → `003_initial_risk` (positions.initial_risk_distance — frozen entry-to-SL for R-math) → `005_order_position_id` (orders.position_id + order_type width 20) → `006_position_strategy_type` (positions.strategy_type, server_default 'UNKNOWN') — head, applied on the VPS
+- Chain: `001_initial` → `002_seed_data` → `003_initial_risk` → `004_account_testnet` → `005_order_position_id` → `006_position_strategy_type` → `008_add_more_symbols` → `009_add_mode` → `010_nullable_trade_pnl_r` → `011_daily_risk_state` (mode-scoped daily breaker latch and manual-reset cutoff) — local head
 - `002_seed_data` inserts into the JSON `settings.value` via raw `sa.text()` — values MUST be `json.dumps()`-ed because asyncpg's JSON codec takes pre-serialized text, not Python objects
 - Fresh environment provisioning:
 ```bash
@@ -54,12 +54,14 @@ alembic history
 - `signals` — generated trading signals
 - `settings` — bot configuration key-value store
 - `daily_summary` — end-of-day equity snapshots (singular table name)
+- `daily_risk_state` — UTC daily breaker latch/reset baseline, unique by date and trading mode
 - `equity_log` — intraday equity curve points
 
 ## Verification
 
-- `PYTHONPATH=. alembic history` — shows the full chain ending at `006_position_strategy_type (head)` (installed alembic 1.13.1 has no `--enumerate` flag)
-- `PYTHONPATH=. alembic current` — `006_position_strategy_type` on the VPS
+- `PYTHONPATH=. alembic history` — shows the full chain ending at `011_daily_risk_state (head)` (installed alembic 1.13.1 has no `--enumerate` flag)
+- `PYTHONPATH=. alembic upgrade head --sql` — renders the migration SQL offline; apply only after tests and deployment review
+- `PYTHONPATH=. alembic current` — checks the connected database; production must be checked again after applying 011
 - All 10 tables + seed rows verified present in PostgreSQL
 
 ## Child DOX Index
