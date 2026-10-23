@@ -12,6 +12,7 @@ backtest result reflects what the live scanner would have done.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -66,7 +67,8 @@ DEFAULT_SIGNAL_MAX_AGE_MIN = 60
 
 def fill_at_midpoint(series: list[dict], signal_idx: int,
                      zone_lo: float, zone_hi: float,
-                     max_age_ms: int) -> Optional[tuple[int, float]]:
+                     max_age_ms: int, *, direction: Optional[str] = None,
+                     penetration_bps: float = 0.0) -> Optional[tuple[int, float]]:
     """First bar at/after `signal_idx` whose range touches the zone midpoint.
 
     Returns `(bar_index, fill_price)` or None. The fill price is the MIDPOINT,
@@ -79,7 +81,21 @@ def fill_at_midpoint(series: list[dict], signal_idx: int,
     `evaluate_signal` only learns the signal once its bar has closed, and
     `signal_max_age_minutes` counts from there. Measuring from `open_time`
     instead grants up to a full extra bar of life that live never had.
+
+    `penetration_bps=0` preserves the touch-fill baseline. A positive value
+    requires a directional trade-through, reducing optimistic fills caused by
+    queue position that OHLC candles cannot reveal.
     """
+    try:
+        penetration_bps = float(penetration_bps)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(penetration_bps) or penetration_bps < 0:
+        return None
+    direction = str(direction or "").upper()
+    if penetration_bps > 0 and direction not in ("LONG", "SHORT"):
+        return None
+
     midpoint = (zone_lo + zone_hi) / 2.0
     if not 0 <= signal_idx < len(series):
         return None
@@ -91,7 +107,16 @@ def fill_at_midpoint(series: list[dict], signal_idx: int,
         c = series[i]
         if c["open_time"] > deadline:
             return None
-        if c["low"] <= midpoint <= c["high"]:
+        if penetration_bps == 0:
+            reached = c["low"] <= midpoint <= c["high"]
+        elif direction == "LONG":
+            # A buy limit that is merely touched may still be behind the queue.
+            # Require price to trade through the midpoint by the configured
+            # sensitivity; keep the fill price at the limit, not the better low.
+            reached = c["low"] <= midpoint * (1.0 - penetration_bps / 10_000.0)
+        else:
+            reached = c["high"] >= midpoint * (1.0 + penetration_bps / 10_000.0)
+        if reached:
             return i, midpoint
     return None
 
@@ -255,6 +280,8 @@ class Backtester:
         self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
         self.signal_max_age_ms = int(
             self.settings.get("signal_max_age_minutes", DEFAULT_SIGNAL_MAX_AGE_MIN)) * 60_000
+        self.entry_fill_penetration_bps = float(
+            self.settings.get("backtest_entry_penetration_bps", 0.0))
         # Strategy toggles, matching the live setting names so the same settings
         # dict drives both (see `_detect_candidates` for why these matter).
         self.fvg_enabled = bool(self.settings.get("strategy_fvg_enabled", True))
@@ -423,9 +450,9 @@ class Backtester:
         return True
 
     def _resolve_exit(self, trade: BacktestTrade, series: list[dict]) -> None:
-        """Walk the trade's OWN interval forward from the bar after the fill,
-        closing on whichever of SL/TP the range reaches first — with the live
-        BE and profit-lock trailing rules applied as the trade moves in profit.
+        """Walk the trade's OWN interval from the fill bar onward, closing on
+        whichever of SL/TP the range reaches first — with the live BE and
+        profit-lock trailing rules applied as the trade moves in profit.
 
         The exit MUST run on the same interval as the entry. Evaluating a 5m
         entry against 1h bars had two defects: an SL hit ten minutes after a
@@ -441,6 +468,11 @@ class Backtester:
         at approximately 0R — so the static model's exit distribution is not the
         live one, and every expectancy number it produced described a strategy
         nobody runs.
+
+        Stops fill at the worse of the stop price and the bar open when a candle
+        gaps through them. The fill candle is checked for a stop, but its target
+        and trailing extrema are ignored because OHLC data cannot establish
+        whether those prices occurred before or after the entry fill.
 
         Both rules are mirrored exactly, including their one-way guard (a stop
         only ever moves toward profit, never back):
@@ -474,22 +506,34 @@ class Backtester:
 
         stop = t.stop
 
-        for j in range(t.entry_idx + 1, len(series)):
+        for j in range(t.entry_idx, len(series)):
             c = series[j]
             hi, lo = c["high"], c["low"]
+            try:
+                bar_open = float(c.get("open", stop))
+                if not math.isfinite(bar_open):
+                    bar_open = stop
+            except (TypeError, ValueError):
+                bar_open = stop
 
             # 1. Test the CURRENT stop against this bar before tightening it.
             if t.direction == "LONG":
                 if lo <= stop:
-                    self._close(t, j, stop, "BE_STOP" if stop != t.stop else "SL_HIT")
+                    fill = min(stop, bar_open)
+                    self._close(t, j, fill, "BE_STOP" if stop != t.stop else "SL_HIT")
                     return
+                if j == t.entry_idx:
+                    continue
                 if hi >= t.take_profit:
                     self._close(t, j, t.take_profit, "TP_HIT")
                     return
             else:
                 if hi >= stop:
-                    self._close(t, j, stop, "BE_STOP" if stop != t.stop else "SL_HIT")
+                    fill = max(stop, bar_open)
+                    self._close(t, j, fill, "BE_STOP" if stop != t.stop else "SL_HIT")
                     return
+                if j == t.entry_idx:
+                    continue
                 if lo <= t.take_profit:
                     self._close(t, j, t.take_profit, "TP_HIT")
                     return
@@ -576,7 +620,10 @@ class Backtester:
                 tf_candles = {"1h": k1h, "5m": k5m, "15m": k15m}[tf]
                 sig_idx = signal_idx
                 filled = fill_at_midpoint(
-                    tf_candles, sig_idx, zone_lo, zone_hi, self.signal_max_age_ms)
+                    tf_candles, sig_idx, zone_lo, zone_hi, self.signal_max_age_ms,
+                    direction=direction,
+                    penetration_bps=self.entry_fill_penetration_bps,
+                )
                 if filled is None:
                     result.skipped["no_fill"] = result.skipped.get("no_fill", 0) + 1
                     continue

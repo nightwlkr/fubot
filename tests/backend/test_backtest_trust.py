@@ -481,14 +481,16 @@ class TestHarnessAlignment:
         real_fill = btmod.fill_at_midpoint
         seen = {}
 
-        def recording_fill(series, signal_idx, lo, hi, max_age_ms):
+        def recording_fill(series, signal_idx, lo, hi, max_age_ms, **kwargs):
             seen.setdefault("series", []).append(series)
-            return real_fill(series, signal_idx, lo, hi, max_age_ms)
+            seen.setdefault("kwargs", []).append(kwargs)
+            return real_fill(series, signal_idx, lo, hi, max_age_ms, **kwargs)
 
         btmod.fill_at_midpoint = recording_fill
         try:
             base = {"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
-                    "trade_neutral_markets": True, "volume_filter_enabled": False}
+                    "trade_neutral_markets": True, "volume_filter_enabled": False,
+                    "backtest_entry_penetration_bps": 1.0}
             runs = {
                 "FVG": Backtester(settings={**base, "strategy_3candle_enabled": False,
                                             "strategy_choch_enabled": False}),
@@ -502,6 +504,8 @@ class TestHarnessAlignment:
                 seen.clear()
                 r = bt.run("X", k1h, k5m, k15m)
                 assert seen["series"], f"{name}: no fill was even attempted"
+                assert all(k["penetration_bps"] == 1.0 for k in seen["kwargs"])
+                assert all(k["direction"] in ("LONG", "SHORT") for k in seen["kwargs"])
                 assert r.trades, f"{name}: fixture produced no trades"
                 wrong = [s for s in seen["series"] if s is not expected[name]]
                 assert not wrong, (
@@ -567,6 +571,129 @@ class TestFillModel:
         idx, price = fill_at_midpoint(k5m, 1, 99.0, 101.0, max_age_ms=60 * MS_5M)
         assert idx == 2
         assert price == pytest.approx(100.0)
+
+    def test_trade_through_fill_model_requires_directional_penetration(self):
+        """A mere wick touch is not treated as a filled resting limit when
+        the conservative penetration sensitivity is enabled."""
+        from backend.backtest import fill_at_midpoint
+        end = 1_700_000_000_000
+        bars = synth(end - 60 * MS_5M, MS_5M, 4, close=100.0)
+        for c in bars:
+            c["low"], c["high"] = 100.02, 100.5
+        bars[1]["low"], bars[1]["high"] = 99.995, 100.5
+        bars[2]["low"], bars[2]["high"] = 99.989, 100.5
+
+        assert fill_at_midpoint(
+            bars, 0, 99.0, 101.0, 60 * MS_5M,
+            direction="LONG", penetration_bps=1.0,
+        ) == (2, pytest.approx(100.0))
+
+    def test_trade_through_sensitivity_fails_closed_without_direction(self):
+        from backend.backtest import fill_at_midpoint
+        end = 1_700_000_000_000
+        bars = synth(end - 60 * MS_5M, MS_5M, 4, close=100.0)
+        assert fill_at_midpoint(
+            bars, 0, 99.0, 101.0, 60 * MS_5M, penetration_bps=1.0,
+        ) is None
+
+    def test_short_trade_through_requires_price_above_the_limit(self):
+        from backend.backtest import fill_at_midpoint
+        end = 1_700_000_000_000
+        bars = synth(end - 60 * MS_5M, MS_5M, 4, close=100.0)
+        for c in bars:
+            c["low"], c["high"] = 99.5, 99.98
+        bars[1]["low"], bars[1]["high"] = 99.5, 100.005
+        bars[2]["low"], bars[2]["high"] = 99.5, 100.011
+
+        assert fill_at_midpoint(
+            bars, 0, 99.0, 101.0, 60 * MS_5M,
+            direction="SHORT", penetration_bps=1.0,
+        ) == (2, pytest.approx(100.0))
+
+
+class TestGapStops:
+    def test_stop_is_checked_on_the_fill_candle_but_target_is_not_credited(self):
+        """When OHLC cannot order entry and exit touches, count the adverse
+        stop but don't grant a same-candle target that may precede the fill."""
+        from backend.backtest import BacktestTrade, Backtester
+        trade = BacktestTrade(
+            symbol="X", strategy="3CANDLE", direction="LONG",
+            entry=100.0, stop=97.0, take_profit=110.0, entry_idx=1,
+        )
+        trade._risk_dist = 3.0
+        bars = [
+            {"open": 100.0, "high": 101.0, "low": 99.0},
+            {"open": 100.5, "high": 111.0, "low": 96.0},
+            {"open": 100.0, "high": 105.0, "low": 99.0},
+        ]
+
+        Backtester()._resolve_exit(trade, bars)
+
+        assert trade.exit_idx == 1
+        assert trade.exit_price == 97.0
+
+    def test_target_touch_only_on_fill_candle_is_not_credited(self):
+        from backend.backtest import BacktestTrade, Backtester
+        trade = BacktestTrade(
+            symbol="X", strategy="3CANDLE", direction="LONG",
+            entry=100.0, stop=97.0, take_profit=110.0, entry_idx=1,
+        )
+        trade._risk_dist = 3.0
+        bars = [
+            {"open": 100.0, "high": 101.0, "low": 99.0},
+            {"open": 101.0, "high": 111.0, "low": 99.0},
+        ]
+
+        Backtester()._resolve_exit(trade, bars)
+
+        assert trade.exit_idx is None
+
+    def test_adverse_open_gap_on_fill_candle_is_charged_at_open(self):
+        from backend.backtest import BacktestTrade, Backtester
+        trade = BacktestTrade(
+            symbol="X", strategy="3CANDLE", direction="LONG",
+            entry=100.0, stop=97.0, take_profit=110.0, entry_idx=1,
+        )
+        trade._risk_dist = 3.0
+        bars = [
+            {"open": 100.0, "high": 101.0, "low": 99.0},
+            {"open": 95.0, "high": 100.5, "low": 94.0},
+        ]
+
+        Backtester()._resolve_exit(trade, bars)
+
+        assert trade.exit_idx == 1
+        assert trade.exit_price == 95.0
+        assert trade.pnl_r == pytest.approx(-5.0 / 3.0)
+
+    @pytest.mark.parametrize(
+        "direction,stop,open_price,low,high,expected",
+        [
+            ("LONG", 97.0, 95.0, 94.0, 110.0, 95.0),
+            ("SHORT", 103.0, 105.0, 90.0, 106.0, 105.0),
+        ],
+    )
+    def test_stop_gap_fills_at_worse_bar_open_before_target(self, direction, stop,
+                                                            open_price, low, high,
+                                                            expected):
+        from backend.backtest import BacktestTrade, Backtester
+        trade = BacktestTrade(
+            symbol="X", strategy="3CANDLE", direction=direction,
+            entry=100.0, stop=stop,
+            take_profit=110.0 if direction == "LONG" else 90.0,
+            entry_idx=0,
+        )
+        trade._risk_dist = abs(100.0 - stop)
+        bars = [
+            {"open": 100.0, "high": 101.0, "low": 99.0},
+            {"open": open_price, "high": high, "low": low},
+        ]
+
+        Backtester()._resolve_exit(trade, bars)
+
+        assert trade.exit_idx == 1
+        assert trade.exit_price == expected
+        assert trade.exit_reason == "SL_HIT"
 
     def test_no_fill_when_price_never_reaches_the_zone(self):
         from backend.backtest import fill_at_midpoint

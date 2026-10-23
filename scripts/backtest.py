@@ -29,6 +29,11 @@ async def main() -> None:
     ap.add_argument("--symbols", default=None, help="comma-separated list (overrides --symbol)")
     ap.add_argument("--days", type=int, default=30, help="days of 1h history")
     ap.add_argument("--rr-min", type=float, default=3.0)
+    ap.add_argument(
+        "--entry-penetration-bps", type=float, default=0.0,
+        help="require price to trade this many bps through the midpoint limit "
+             "before counting a fill (0 preserves touch-fill baseline)",
+    )
     ap.add_argument("--risk-percent", type=float, default=1.0)
     ap.add_argument("--min-risk-pct", type=float, default=None, dest="min_risk_pct",
                     help="floor on |entry-stop| as a fraction of entry (e.g. 0.005 = 0.5%%). "
@@ -41,6 +46,12 @@ async def main() -> None:
     ap.add_argument("--no-neutral", dest="neutral", action="store_false",
                     help="reject NEUTRAL-bias markets (non-production)")
     ap.add_argument("--strength", default="MODERATE", choices=["WEAK", "MODERATE", "STRONG"])
+    ap.add_argument("--fvg", action=argparse.BooleanOptionalAction, default=None,
+                    help="enable/disable the FVG strategy (default: harness setting)")
+    ap.add_argument("--three-candle", action=argparse.BooleanOptionalAction, default=None,
+                    help="enable/disable the 3CANDLE strategy (default: harness setting)")
+    ap.add_argument("--choch", action=argparse.BooleanOptionalAction, default=None,
+                    help="enable/disable the CHoCH strategy (default: harness setting)")
     ap.add_argument("--no-volume", dest="volume", action="store_false", default=None,
                     help="disable the volume-confirmation filter")
     ap.add_argument("--volume", dest="volume", action="store_true",
@@ -53,6 +64,7 @@ async def main() -> None:
                if args.symbols else [args.symbol])
     settings = {
         "rr_min": args.rr_min,
+        "backtest_entry_penetration_bps": args.entry_penetration_bps,
         "risk_percent": args.risk_percent,
         "backtest_balance": args.balance,
         # Default to PRODUCTION (routers/settings.py): trade_neutral_markets=True,
@@ -61,11 +73,18 @@ async def main() -> None:
         "trade_neutral_markets": True if args.neutral is None else args.neutral,
         "trade_min_trend_strength": args.strength,
         "volume_filter_enabled": False if args.volume is None else args.volume,
+        **({"strategy_fvg_enabled": args.fvg} if args.fvg is not None else {}),
+        **({"strategy_3candle_enabled": args.three_candle}
+           if args.three_candle is not None else {}),
+        **({"strategy_choch_enabled": args.choch} if args.choch is not None else {}),
         **({"min_risk_pct": args.min_risk_pct} if args.min_risk_pct is not None else {}),
     }
 
     print(f"Backtest: {', '.join(symbols)} | {args.days}d | "
-          f"rr_min={args.rr_min} neutral={args.neutral} strength={args.strength}\n")
+          f"rr_min={args.rr_min} neutral={args.neutral} strength={args.strength} "
+          f"entry_penetration={args.entry_penetration_bps:g}bps "
+          f"fvg={args.fvg} 3candle={args.three_candle} choch={args.choch}; "
+          "stop gaps fill at the adverse bar open\n")
 
     header = (f"{'symbol':<10} {'sig':>4} {'closed':>6} {'win%':>6} "
               f"{'totalR':>8} {'netR':>8} {'expR':>7} {'expNetR':>8} "
