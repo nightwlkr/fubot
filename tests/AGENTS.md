@@ -64,7 +64,7 @@ Status: full backend suite passed 696 tests with configured local PostgreSQL acc
 
 - Focused: `PYTHONPATH=. pytest tests/backend/test_weekly_drawdown.py -q` — 3 passed.
 - Focused breaker/backtest batch: daily unrealized-loss alert + duplicate-alert regressions, backtest trust, weekly reset, and cost-model tests — 59 passed.
-- Latest full-suite: `PYTHONPATH=. pytest tests/backend/ -q` — 696 passed, 0 failed, 235 existing deprecation warnings (2026-10-24, with configured local PostgreSQL access). DB row counts remained 50 trades / 39 positions, with no `%TST%` rows.
+- Latest full-suite: `PYTHONPATH=. pytest tests/backend/ -q` — 698 passed, 0 failed, 235 existing deprecation warnings (2026-10-25, with configured local PostgreSQL access). DB row counts remained 50 trades / 39 positions, with no `%TST%` rows.
 - A failing test blocks completion of the change that broke it
 - Test counts in this doc, in `backend/AGENTS.md` and in the root `AGENTS.md` are updated by the change that moves them. The latest post-suite idempotence check found 50 trades / 39 positions and no `%TST%` rows; the baseline is the database state before this run.
 
