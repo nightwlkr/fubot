@@ -1052,78 +1052,36 @@ class PositionManager:
             side = row.side
             position_mode = row.mode
 
-            # Calculate realized P&L
-            # LIVE: try to fetch actual realized PnL from Binance (includes fees)
-            # PAPER: synthetic PnL (no fees)
+            # Calculate a provisional result. For LIVE positions the authoritative
+            # income query must happen only after exchange close/flatness is
+            # confirmed: Binance can expose entry commissions before it posts the
+            # stop/target's realized-PnL event.
             pnl_usdt = None
-            synthetic_pnl = None
-            if position_mode == "live" and self.binance is not None:
-                try:
-                    # Scope income to THIS position's lifetime — the 7-day
-                    # default window would also sum an earlier position's PnL
-                    # on the same symbol.
-                    start_ms = BinanceService.position_income_start_ms(row.opened_at)
-                    income = await self.binance.get_position_income(
-                        row.symbol, start_time=start_ms)
-                    # Only trust the exchange PnL if income events were found.
-                    # A manual close queries immediately — Binance may not have
-                    # recorded the income yet, returning totalPnl=0 with 0 events.
-                    # Previously that 0 was treated as valid, recording $0 profit
-                    # on profitable manual closes.
-                    if income.get("events", 0) > 0:
-                        pnl_usdt = income.get("totalPnl", 0)
-                        # Cross-check: if exchange PnL is 0 but the synthetic
-                        # calculation shows a material move, the income API
-                        # likely returned stale/zero results from a different
-                        # position on the same symbol. Fall back to synthetic.
-                        if side == "LONG":
-                            synthetic_pnl = (exit_price - entry) * qty
-                        else:
-                            synthetic_pnl = (entry - exit_price) * qty
-                        if abs(synthetic_pnl) > 0.01 and abs(pnl_usdt) < abs(synthetic_pnl) * 0.1:
-                            logger.warning(
-                                "[%s] Exchange PnL %.4f USDT is suspiciously low "
-                                "vs synthetic %.4f — using synthetic (income timing race)",
-                                row.symbol, pnl_usdt, synthetic_pnl
-                            )
-                            pnl_usdt = None  # fall through to synthetic below
-                        else:
-                            logger.info(
-                                "[%s] Using exchange PnL: %.4f USDT (fees included)",
-                                row.symbol, pnl_usdt
-                            )
-                    else:
-                        logger.debug(
-                            "[%s] No income events yet — using synthetic PnL", row.symbol)
-                except Exception as exc:
-                    logger.debug("get_position_income failed, using synthetic PnL: %s", exc)
-            
-            # Fallback: synthetic PnL (paper mode, or live fetch failed)
-            if pnl_usdt is None:
+            # PAPER uses modeled fills; LIVE is corrected from Binance after
+            # exchange hygiene below. Keep a provisional value for crash recovery.
+            if position_mode == "paper":
                 if side == "LONG":
                     pnl_usdt = (exit_price - entry) * qty
                 else:
                     pnl_usdt = (entry - exit_price) * qty
 
-                # Estimate fees for synthetic PnL (paper mode OR live fallback)
+                # Estimate fees for synthetic paper PnL.
                 # Uses the cost_model constants which are correctly calibrated
                 # to Binance USDS-M Futures VIP0 + 10% BNB discount.
-                if position_mode in ("paper", "live"):
-                    notional_entry = entry * qty
-                    notional_exit = exit_price * qty
-                    fee_rate = TAKER_FEE  # account-calibrated 0.045%; see cost_model.py
-                    fees = (notional_entry + notional_exit) * fee_rate
-                    pnl_usdt -= fees
-                    if position_mode == "paper":
-                        logger.debug(
-                            "[%s] Paper PnL after fees: %.4f (raw: %.4f, fees: %.4f)",
-                            row.symbol, pnl_usdt, pnl_usdt + fees, fees
-                        )
-                    else:
-                        logger.debug(
-                            "[%s] Live synthetic PnL after estimated fees: %.4f (raw: %.4f, fees: %.4f)",
-                            row.symbol, pnl_usdt, pnl_usdt + fees, fees
-                        )
+                notional_entry = entry * qty
+                notional_exit = exit_price * qty
+                fee_rate = TAKER_FEE  # account-calibrated 0.045%; see cost_model.py
+                fees = (notional_entry + notional_exit) * fee_rate
+                pnl_usdt -= fees
+                logger.debug(
+                    "[%s] Paper PnL after fees: %.4f (raw: %.4f, fees: %.4f)",
+                    row.symbol, pnl_usdt, pnl_usdt + fees, fees
+                )
+            else:
+                raw_pnl = ((exit_price - entry) if side == "LONG" else
+                           (entry - exit_price)) * qty
+                estimated_fees = (entry * qty + exit_price * qty) * TAKER_FEE
+                pnl_usdt = raw_pnl - estimated_fees
 
             # Calculate P&L in R units — against the FROZEN initial risk
             # (entry-to-original-SL), NOT the live stop_loss. BE-trailing moves
@@ -1169,8 +1127,8 @@ class PositionManager:
             session.add(trade)
 
             # ATOMIC CLOSE CLAIM. The in-memory `row.status != "OPEN"` check
-            # above is only a fast path: between it and this write we await two
-            # HTTP/DB round-trips (get_position_income, session.get(Signal)), so
+            # above is only a fast path: between it and this write we await a
+            # DB round-trip (session.get(Signal)), so
             # the WS tick path and the 30s REST / 5-min reconcile paths can both
             # observe OPEN and both proceed. That produced duplicate Trade rows
             # and DOUBLED the daily R total, which can trip the -3R hard stop on
@@ -1194,6 +1152,9 @@ class PositionManager:
             await session.commit()
             side = row.side
             qty = float(row.quantity)
+            opened_at = row.opened_at
+            position_id = row.id
+            initial_risk_distance = row.initial_risk_distance
 
         # LIVE-mode exchange hygiene. In live mode the exchange holds resting
         # reduce-only SL/TP orders for this position. When it closes we must:
@@ -1231,6 +1192,51 @@ class PositionManager:
                     "cancelled — restoring an emergency stop so the position is "
                     "not left naked", symbol)
                 await self._restore_emergency_stop(symbol, side, qty)
+
+        # Binance income can lag the positionRisk/order update by several
+        # seconds. Require at least one REALIZED_PNL event (entry commission
+        # alone is not evidence that this close has been booked), retry briefly,
+        # then replace the provisional Trade values before updating daily risk.
+        if position_mode == "live" and self.binance is not None:
+            income_fn = getattr(self.binance, "get_position_income", None)
+            if callable(income_fn):
+                start_ms = BinanceService.position_income_start_ms(opened_at)
+                income = None
+                for attempt in range(6):
+                    try:
+                        candidate = await income_fn(symbol, start_time=start_ms)
+                        if candidate.get("realizedEvents", 0) > 0:
+                            income = candidate
+                            break
+                    except Exception as exc:
+                        logger.warning("[%s] Post-close Binance PnL lookup %d/6 failed: %s",
+                                       symbol, attempt + 1, exc)
+                    if attempt < 5:
+                        await asyncio.sleep(0.5)
+                if income is not None:
+                    pnl_usdt = float(income["totalPnl"])
+                    pnl_r = risk_units.pnl_r_from(pnl_usdt, qty, distance)
+                    async with self.session_factory() as session:
+                        await session.execute(
+                            update(Trade)
+                            .where(Trade.position_id == position_id, Trade.mode == "live")
+                            .values(pnl_usdt=pnl_usdt, pnl_r=pnl_r)
+                        )
+                        await session.commit()
+                    logger.info("[%s] Reconciled close from Binance realized income: %.4f USDT (%s events)",
+                                symbol, pnl_usdt, income.get("realizedEvents"))
+                else:
+                    logger.error("[%s] Binance has not published realized PnL after close; "
+                                 "provisional modeled PnL %.4f USDT is recorded and R is "
+                                 "marked unknown to charge the breaker 1R", symbol, pnl_usdt)
+                    pnl_r = None
+                    async with self.session_factory() as session:
+                        await session.execute(
+                            update(Trade)
+                            .where(Trade.position_id == position_id, Trade.mode == "live")
+                            .values(pnl_r=None)
+                        )
+                        await session.commit()
 
         # Update daily summary + alert outside the session
         await self.daily_reset.update_daily_summary(pnl_r, pnl_usdt)

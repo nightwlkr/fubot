@@ -16,6 +16,7 @@ implementation could still satisfy a naive behavioural test.
 No network access (httpx.MockTransport).
 """
 from datetime import datetime, timezone
+import inspect
 
 import httpx
 import pytest
@@ -63,6 +64,22 @@ class TestIncomeIncludesFeesAndFunding:
         assert out["funding"] == pytest.approx(-0.1)
         assert out["totalPnl"] == pytest.approx(-5.4), \
             "totalPnl must be NET of costs, not gross"
+        assert out["realizedEvents"] == 1
+
+    async def test_entry_commissions_do_not_count_as_a_realized_close(self):
+        def handler(request):
+            return httpx.Response(200, json=[
+                {"incomeType": "COMMISSION", "income": "-0.1", "asset": "USDT"},
+            ])
+
+        svc = _signed_service(handler)
+        try:
+            out = await svc.get_position_income("BTCUSDT")
+        finally:
+            await svc.close()
+
+        assert out["events"] == 1
+        assert out["realizedEvents"] == 0
 
     async def test_request_does_not_ask_binance_to_filter_the_types(self):
         """A behavioural test above can be satisfied by summing a payload the
@@ -152,6 +169,16 @@ class TestIncomeIncludesFeesAndFunding:
         expected = int(expected_start.timestamp() * 1000)
 
         assert BinanceService.position_income_start_ms(opened_at) == expected
+
+    def test_live_close_waits_for_realized_income_after_exchange_cleanup(self):
+        from backend.core.position_manager import PositionManager
+
+        source = inspect.getsource(PositionManager._close_position)
+        assert source.index("_ensure_flat(") < source.index("income_fn(symbol")
+        assert 'candidate.get("realizedEvents", 0) > 0' in source, (
+            "an entry commission is an income event, but not proof that the "
+            "exchange has booked the closing fill")
+        assert "update(Trade)" in source, "corrected exchange PnL must replace provisional DB PnL"
 
 
 # ---------------------------------------------------------------------------

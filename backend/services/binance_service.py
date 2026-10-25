@@ -1033,6 +1033,7 @@ class BinanceService:
         # commissions can be charged in BNB. Never add raw BNB to USDT: convert
         # those fees at the close of the minute containing each income event.
         realized_pnl = 0.0
+        realized_events = 0
         fees = 0.0
         funding = 0.0
         commissions_by_asset: dict[str, list[tuple[int, float]]] = {}
@@ -1045,6 +1046,7 @@ class BinanceService:
 
             if itype == "REALIZED_PNL":
                 realized_pnl += income
+                realized_events += 1
             elif itype == "COMMISSION":
                 asset = str(item.get("asset") or "").upper()
                 if not asset:
@@ -1097,6 +1099,7 @@ class BinanceService:
             "fees": fees,
             "funding": funding,
             "events": len(data),
+            "realizedEvents": realized_events,
         }
 
     async def close(self):
