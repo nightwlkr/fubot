@@ -22,7 +22,8 @@ export interface Trade {
   exit_price: number
   quantity: number
   pnl_usdt: number
-  pnl_r: number
+  /** Null when the trade's initial risk could not be established. */
+  pnl_r: number | null
   exit_reason: string
   strategy_type: string
   closed_at: string

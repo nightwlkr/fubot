@@ -15,7 +15,9 @@ export interface Trade {
   entry_price: number
   exit_price: number
   quantity: number
-  pnl_r: number
+  // The backend preserves null when a trade's initial risk could not be
+  // established. Render that as unknown rather than treating it as zero.
+  pnl_r: number | null
   pnl_usdt: number
   exit_reason: string
   strategy_type: string
@@ -363,8 +365,8 @@ export default function TradeLog() {
                   <TableCell className="text-right font-mono text-xs">
                     ${(trade.quantity * trade.entry_price).toFixed(2)}
                   </TableCell>
-                  <TableCell className={clsx('text-right font-mono font-bold', trade.pnl_r > 0 ? 'text-success' : trade.pnl_r < 0 ? 'text-danger' : 'text-muted')}>
-                    {trade.pnl_r > 0 ? '+' : ''}{trade.pnl_r.toFixed(2)}
+                  <TableCell className={clsx('text-right font-mono font-bold', trade.pnl_r === null ? 'text-muted' : trade.pnl_r > 0 ? 'text-success' : trade.pnl_r < 0 ? 'text-danger' : 'text-muted')}>
+                    {trade.pnl_r === null ? '—' : `${trade.pnl_r > 0 ? '+' : ''}${trade.pnl_r.toFixed(2)}`}
                   </TableCell>
                   <TableCell className={clsx('text-right font-mono text-xs', trade.pnl_usdt > 0 ? 'text-success' : trade.pnl_usdt < 0 ? 'text-danger' : 'text-muted')}>
                     {trade.pnl_usdt > 0 ? '+' : ''}{trade.pnl_usdt.toFixed(2)}
