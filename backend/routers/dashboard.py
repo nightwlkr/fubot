@@ -136,8 +136,11 @@ async def dashboard_overview(
     # and a NULL row is neither a win nor a loss -- it is unmeasured.
     wins = sum(1 for t in trades if t.pnl_r is not None and t.pnl_r > 0)
     win_rate = (wins / total * 100) if total > 0 else 0.0
-    best_trade = max((t.pnl_r for t in trades), default=0.0)
-    worst_trade = min((t.pnl_r for t in trades), default=0.0)
+    # Historical trades can have unknown R (NULL). Keep them out of the
+    # extrema; comparing None with Decimal raises and fails the whole overview.
+    known_trade_rs = [float(t.pnl_r) for t in trades if t.pnl_r is not None]
+    best_trade = max(known_trade_rs, default=0.0)
+    worst_trade = min(known_trade_rs, default=0.0)
 
     # Max daily trades cap
     settings_result = await db.execute(select(Setting).where(Setting.key == "max_daily_trades"))
