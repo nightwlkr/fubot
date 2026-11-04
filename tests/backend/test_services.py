@@ -304,8 +304,9 @@ class TestStrategyServiceEvaluateSignal:
         assert decision.decision == "EXECUTE" and decision.paper is False
         kinds = [c[0] for c in binance.calls]
         assert kinds == ["LIMIT", "STOP_MARKET", "TAKE_PROFIT_MARKET"], kinds
-        # the limit sits at the planned midpoint (100.5), not the live price
-        assert binance.calls[0][2] == 100.5
+        # the limit sits at the zone edge (100.0) for maker-friendly placement,
+        # not the midpoint (100.5) or the live price
+        assert binance.calls[0][2] == 100.0
         # live orders are recorded in-memory and marked non-simulated
         assert all(o["simulate"] is False for o in order_svc.pending.values())
 

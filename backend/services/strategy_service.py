@@ -373,8 +373,15 @@ class StrategyService:
             position_id = None
             order_stage = "entry_limit"
             try:
+                # Use zone edge for limit order (maker-friendly): placing at the
+                # edge rests on the book instead of crossing the spread, improving
+                # post-only (GTX) fill rate and capturing maker fees.
+                if side == "BUY":
+                    limit_price = float(signal.entry_zone_min)
+                else:
+                    limit_price = float(signal.entry_zone_max)
                 fill = await self._enter_with_limit(
-                    symbol, side, float(entry), float(size), signal_id=signal.db_id)
+                    symbol, side, limit_price, float(size), signal_id=signal.db_id)
                 if fill is None:
                     # The order may have filled without us confirming it (status
                     # read failure) — never leave that unprotected.
