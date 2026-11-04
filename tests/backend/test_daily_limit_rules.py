@@ -139,7 +139,7 @@ class TestUsedRFrom:
                                 settings={})
         stats = asyncio.run(svc.get_daily_stats(mode="live"))
         assert stats["used_r"] == 1.0
-        assert stats["total_pnl_r"] == -1.0
+        assert stats["total_pnl_r"] == 0.0
 
     def test_unrealized_loss_alert_reports_combined_usage_and_fires_once(self):
         """The halt threshold includes open losses, so its alert must report
@@ -358,7 +358,7 @@ class TestServiceDelegatesToHelpers:
             return await svc.get_daily_stats()
 
         stats = asyncio.run(scenario())
-        assert stats["total_pnl_r"] == -1.0
+        assert stats["total_pnl_r"] == 0.0
         assert stats["used_r"] == 1.0
 
     def test_the_module_resolves_the_day_in_exactly_one_place(self):

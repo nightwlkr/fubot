@@ -140,7 +140,7 @@ class WeeklyDrawdownGuard:
             )
             trades = result.fetchall()
 
-        pnls = [risk_units.daily_r_contribution(r[0]) for r in trades]
+        pnls = [risk_units.limit_r_contribution(r[0]) for r in trades]
         total_pnl = sum(pnls)
         total_loss = sum(abs(pnl) for pnl in pnls if pnl < 0)
 
@@ -271,6 +271,7 @@ class WeeklyDrawdownGuard:
             pnls = [risk_units.daily_r_contribution(t.pnl_r) for t in trades_list]
             wins = len([p for p in pnls if p > 0])
             losses = len([p for p in pnls if p < 0])
+            totals = risk_units.r_totals(t.pnl_r for t in trades_list)
 
             return {
                 "weekly_pnl_r": sum(pnls),
@@ -279,4 +280,5 @@ class WeeklyDrawdownGuard:
                 "weekly_losses": losses,
                 "weekly_win_rate": wins / len(pnls) * 100 if pnls else 0,
                 "limit_hit": mode in self._weekly_mode_latches,
+                "unknown_r_count": totals.unknown_count,
             }

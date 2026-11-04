@@ -267,11 +267,11 @@ class Backtester:
         # and the 2026-10-15 audit measured 81% of live exits at ~0R — a
         # distribution static exits cannot produce. Pass None values to disable.
         self.trailing = {
-            "be_trail_trigger_r": self.settings.get("be_trail_trigger_r", 0.5),
+            "be_trail_trigger_r": self.settings.get("be_trail_trigger_r", 0.75),
             "profit_lock_trigger_r": self.settings.get("profit_lock_trigger_r", 1.0),
             "profit_lock_trail_r": self.settings.get("profit_lock_trail_r", 0.5),
         }
-        self.rr_min = float(self.settings.get("rr_min", 3.0))
+        self.rr_min = float(self.settings.get("rr_min", 4.0))
         self.risk_percent = float(self.settings.get("risk_percent", 1.0))
         self.balance = float(self.settings.get("backtest_balance", 10000.0))
         self.trade_neutral = bool(self.settings.get("trade_neutral_markets", True))

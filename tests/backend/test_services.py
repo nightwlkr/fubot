@@ -1563,9 +1563,9 @@ class TestLiveModeSafety:
             await pm._check_be_trailing(pos, current_price=96.0)
             assert replaced == [], f"trailed before +0.5R: {replaced}"
 
-            # +0.51R (price 94.9) -> trail to BE
-            await pm._check_be_trailing(pos, current_price=94.9)
-            assert replaced == [100.0], f"did not trail at +0.5R: {replaced}"
+            # +0.76R (price 92.4) -> trail to BE (new default 0.75R)
+            await pm._check_be_trailing(pos, current_price=92.4)
+            assert replaced == [100.0], f"did not trail at +0.75R: {replaced}"
 
             async with Session() as s:
                 row = await s.get(Position, pos_id)

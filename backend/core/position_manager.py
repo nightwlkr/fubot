@@ -379,15 +379,33 @@ class PositionManager:
                 f"(SL={stop_loss}, TP={take_profit})")
             try:
                 async with self.session_factory() as session:
-                    session.add(Position(
-                        symbol=symbol, side=side, entry_price=entry,
-                        quantity=qty, leverage=leverage,
-                        stop_loss=stop_loss, take_profit=take_profit,
-                        initial_risk_distance=None,
-                        status="OPEN",
-                        mode=self._mode,
-                    ))
-                    await session.commit()
+                    # Re-check OPEN-by-symbol INSIDE the transaction to prevent
+                    # a duplicate OPEN row for a symbol that already has one.
+                    from sqlalchemy import select
+                    existing = None
+                    try:
+                        result = await session.execute(
+                            select(Position).where(
+                                Position.symbol == symbol, Position.status == "OPEN")
+                        )
+                        if hasattr(result, "scalars"):
+                            existing = result.scalars().first()
+                    except Exception:
+                        existing = None
+                    if existing is not None:
+                        logger.info(
+                            f"[{symbol}] Reconcile: OPEN row already exists "
+                            f"(id={existing.id}) — skipping duplicate adopt")
+                    else:
+                        session.add(Position(
+                            symbol=symbol, side=side, entry_price=entry,
+                            quantity=qty, leverage=leverage,
+                            stop_loss=stop_loss, take_profit=take_profit,
+                            initial_risk_distance=None,
+                            status="OPEN",
+                            mode=self._mode,
+                        ))
+                        await session.commit()
             except Exception:
                 logger.exception(f"[{symbol}] Reconcile: failed to record position")
                 self._unresolved_reconciliation_symbols.add(symbol)
@@ -680,6 +698,18 @@ class PositionManager:
             if mark_price <= 0:
                 mark_price = current_price
 
+            # Check if TP or SL was hit FIRST — use MARK PRICE to match Binance's trigger.
+            # (Must happen before BE/profit trailing: a fast tick can cross both the
+            # BE trigger and the TP in the same pass; trailing first would move the
+            # stop to entry and suppress the TP close.)
+            tp_hit, sl_hit = self._check_tp_sl_hit(position, mark_price)
+            if tp_hit:
+                await self._close_position(position, "TP_HIT", current_price)
+                continue
+            elif sl_hit:
+                await self._close_position(position, "SL_HIT", current_price)
+                continue
+
             # Check BE trailing (REST-only; needs klines)
             await self._check_be_trailing(position, current_price)
 
@@ -689,15 +719,11 @@ class PositionManager:
             # Check second-stage profit lock (tighter trail at deeper profit)
             await self._check_profit_trailing_2(position, current_price)
 
+            # Check runner-trail (NEW: trails 0.75R behind price once +1.0R in profit)
+            await self._check_runner_trailing(position, current_price)
+
             # Check stale trades (close profitable trades that aren't reaching TP)
             await self._check_stale_trade(position)
-
-            # Check if TP or SL was hit — use MARK PRICE to match Binance's trigger
-            tp_hit, sl_hit = self._check_tp_sl_hit(position, mark_price)
-            if tp_hit:
-                await self._close_position(position, "TP_HIT", current_price)
-            elif sl_hit:
-                await self._close_position(position, "SL_HIT", current_price)
 
     async def _check_be_trailing(self, position: dict, current_price: float):
         """Move the stop to break-even once the trade is `be_trail_trigger_r` R
@@ -718,7 +744,7 @@ class PositionManager:
         risk = position.get("initial_risk_distance")
         if risk is None or float(risk) <= 0:
             return  # cannot size the trigger without the frozen risk
-        trigger_r = float(self.settings.get("be_trail_trigger_r", 0.5))
+        trigger_r = float(self.settings.get("be_trail_trigger_r", 0.75))
         trigger = float(risk) * trigger_r
         side = position["side"]
 
@@ -821,6 +847,58 @@ class PositionManager:
             f"trailing stop to {new_stop:.6f} (locks +{locked_r:.2f}R)")
         await self._trail_stop_to_be(position["id"], new_stop)
 
+    async def _check_runner_trailing(self, position: dict, current_price: float):
+        """Runner-trail: once the trade is `runner_trail_trigger_r` R in profit
+        (default +1.0R), trail the stop `runner_trail_distance_r` R behind the
+        current price (default 0.75R). This locks in at least
+        (trigger - distance) R on a reversal instead of giving it all back.
+
+        One-way: stop only moves in the profitable direction. Only arms after
+        the BE trail has moved the stop to entry (so it never loosens the stop
+        below entry). Requires measurable risk (initial_risk_distance).
+        """
+        risk = position.get("initial_risk_distance")
+        if risk is None or float(risk) <= 0:
+            return
+        trigger_r = float(self.settings.get("runner_trail_trigger_r", 1.0))
+        distance_r = float(self.settings.get("runner_trail_distance_r", 0.75))
+        if trigger_r <= 0 or distance_r <= 0:
+            return
+        trigger = float(risk) * trigger_r
+        trail = float(risk) * distance_r
+        side = position["side"]
+        entry = float(position["entry_price"])
+
+        # BE must have already moved the stop to entry before runner-trail arms
+        if side == "LONG":
+            if position["stop_loss"] is None or float(position["stop_loss"]) < entry:
+                return  # BE not yet applied
+            profit = current_price - entry
+            if profit < trigger:
+                return
+            new_stop = current_price - trail
+            if new_stop <= entry:
+                return  # don't trail below entry
+            if position["stop_loss"] is not None and float(position["stop_loss"]) >= new_stop:
+                return  # one-way: only move up
+        else:  # SHORT
+            if position["stop_loss"] is None or float(position["stop_loss"]) > entry:
+                return  # BE not yet applied
+            profit = entry - current_price
+            if profit < trigger:
+                return
+            new_stop = current_price + trail
+            if new_stop >= entry:
+                return  # don't trail above entry
+            if position["stop_loss"] is not None and float(position["stop_loss"]) <= new_stop:
+                return  # one-way: only move down
+
+        locked_r = (new_stop - entry) / float(risk) if side == "LONG" else (entry - new_stop) / float(risk)
+        logger.info(
+            f"[{position['symbol']}] {side} runner-trail: +{profit/float(risk):.2f}R, "
+            f"trailing stop to {new_stop:.6f} (locks +{locked_r:.2f}R)")
+        await self._trail_stop_to_be(position["id"], new_stop)
+
     async def _check_stale_trade(self, position: dict):
         """Close stale profitable trades that aren't reaching TP.
 
@@ -828,7 +906,7 @@ class PositionManager:
         position slot. If the trade is in profit but hasn't hit TP after
         `stale_trade_hours`, close it and bank whatever profit exists.
         """
-        stale_hours = float(self.settings.get("stale_trade_hours", 24.0))
+        stale_hours = float(self.settings.get("stale_trade_hours", 0.0))
         if stale_hours <= 0:
             return  # disabled
 
@@ -1201,17 +1279,20 @@ class PositionManager:
             income_fn = getattr(self.binance, "get_position_income", None)
             if callable(income_fn):
                 start_ms = BinanceService.position_income_start_ms(opened_at)
+                from datetime import timedelta
+                closed_at = datetime.now(timezone.utc)
+                end_ms = int((closed_at + timedelta(seconds=5)).timestamp() * 1000)
                 income = None
-                for attempt in range(6):
+                for attempt in range(3):
                     try:
-                        candidate = await income_fn(symbol, start_time=start_ms)
-                        if candidate.get("realizedEvents", 0) > 0:
+                        candidate = await income_fn(symbol, start_time=start_ms, end_time=end_ms)
+                        if isinstance(candidate, dict):
                             income = candidate
                             break
                     except Exception as exc:
-                        logger.warning("[%s] Post-close Binance PnL lookup %d/6 failed: %s",
+                        logger.warning("[%s] Post-close Binance PnL lookup %d/3 failed: %s",
                                        symbol, attempt + 1, exc)
-                    if attempt < 5:
+                    if attempt < 2:
                         await asyncio.sleep(0.5)
                 if income is not None:
                     pnl_usdt = float(income["totalPnl"])

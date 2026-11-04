@@ -16,6 +16,7 @@ import pytest
 from backend.core.risk_units import (
     UNKNOWN_R_COST,
     daily_r_contribution,
+    limit_r_contribution,
     pnl_r_from,
     risk_distance,
 )
@@ -108,17 +109,14 @@ class TestDailyRContribution:
     def test_breakeven_contributes_zero(self):
         assert daily_r_contribution(0.0) == pytest.approx(0.0)
 
-    def test_unknown_r_charges_a_full_loss(self):
-        """Fail closed: an unmeasurable trade must not pass the limit free.
-
-        Mutation: return 0.0 for None -> an unknown-R day reads as 'nothing
-        consumed' and the breaker never fires.
-        """
-        assert daily_r_contribution(None) == pytest.approx(-UNKNOWN_R_COST)
+    def test_unknown_r_contributes_nothing(self):
+        """Measured ledger: unknown R contributes 0.0 (no fabricated loss)."""
+        assert daily_r_contribution(None) == pytest.approx(0.0)
 
     @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf"), "x"])
-    def test_non_finite_r_charges_a_full_loss(self, bad):
-        assert daily_r_contribution(bad) == pytest.approx(-UNKNOWN_R_COST)
+    def test_non_finite_r_contributes_nothing(self, bad):
+        assert daily_r_contribution(bad) == pytest.approx(0.0)
+
 
 
 class TestBreakerEndToEnd:
@@ -132,5 +130,5 @@ class TestBreakerEndToEnd:
     def test_unknown_r_days_still_trip_the_breaker(self):
         """Three unmeasurable losses must exceed the -3R limit on their own."""
         limit = 3.0
-        total = sum(daily_r_contribution(pnl_r_from(-1.06, 1.0, None)) for _ in range(3))
+        total = sum(limit_r_contribution(pnl_r_from(-1.06, 1.0, None)) for _ in range(3))
         assert max(0.0, -total) >= limit

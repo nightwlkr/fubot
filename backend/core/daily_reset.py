@@ -196,6 +196,7 @@ class DailyResetService:
             "limit_r": limit_r,
             "remaining_r": limit_r,
             "limit_hit": False,
+            "unknown_r_count": 0,
         }
 
     async def get_daily_stats(self, mode: Optional[str] = None) -> dict:
@@ -237,20 +238,23 @@ class DailyResetService:
             trades = [row[0] for row in trades_result.fetchall()]
 
         limit_r = self.get_limit_r()
-        pnls_r = [risk_units.daily_r_contribution(trade.pnl_r) for trade in trades]
-        total_pnl_r = sum(pnls_r)
-        used_r = used_r_from(SimpleNamespace(total_pnl_r=total_pnl_r))
+        totals = risk_units.r_totals(trade.pnl_r for trade in trades)
+        total_pnl_r = totals.measured_total
+        limit_total_pnl_r = totals.limit_total
+        used_r = used_r_from(SimpleNamespace(total_pnl_r=limit_total_pnl_r))
         return {
             "date": today.isoformat(),
             "total_trades": len(trades),
-            "wins": sum(pnl > 0 for pnl in pnls_r),
-            "losses": sum(pnl < 0 for pnl in pnls_r),
+            "wins": totals.wins,
+            "losses": totals.losses,
             "total_pnl_r": total_pnl_r,
+            "limit_total_pnl_r": limit_total_pnl_r,
             "total_pnl_usdt": sum(float(trade.pnl_usdt or 0) for trade in trades),
             "used_r": used_r,
             "limit_r": limit_r,
             "remaining_r": max(0.0, limit_r - used_r),
             "limit_hit": bool(risk_state and risk_state.limit_hit),
+            "unknown_r_count": totals.unknown_count,
         }
 
     async def check_and_enforce_limit(
@@ -288,7 +292,7 @@ class DailyResetService:
             unrealized_pnl_r = self._unrealized_pnl_in_r(open_positions)
             # If an alternate stats provider omits the net total, retain its
             # known realized loss but never invent a realized-profit offset.
-            realized_pnl_r = float(stats.get("total_pnl_r", -used))
+            realized_pnl_r = float(stats.get("limit_total_pnl_r", -used))
             combined_pnl_r = realized_pnl_r + unrealized_pnl_r
             used = used_r_from(SimpleNamespace(total_pnl_r=combined_pnl_r))
 

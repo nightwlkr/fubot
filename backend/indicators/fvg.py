@@ -95,7 +95,7 @@ def check_fvg_filled(fvg: FVG, current_price: float, high: float, low: float) ->
     return high >= fvg.zone_min
 
 
-def evaluate_fvg_entry(fvg: FVG, atr: float, rr_min: float = 3.0, current_price: float = 0.0) -> dict:
+def evaluate_fvg_entry(fvg: FVG, atr: float, rr_min: float = 4.0, current_price: float = 0.0) -> dict:
     """
     Given an FVG and ATR, calculate entry, SL, TP, and R:R.
     Returns dict with entry_price, stop_loss, take_profit, rr_ratio, is_valid.

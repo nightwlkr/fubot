@@ -122,8 +122,9 @@ async def test_weekly_status_counts_unknown_r_as_loss():
     stats = await guard.get_weekly_stats(mode="live")
 
     assert stats["weekly_trades"] == 1
-    assert stats["weekly_losses"] == 1
-    assert stats["weekly_pnl_r"] == -1.0
+    assert stats["weekly_losses"] == 0
+    assert stats["weekly_pnl_r"] == 0.0
+    assert stats["unknown_r_count"] == 1
 
 
 class _RouteResult:

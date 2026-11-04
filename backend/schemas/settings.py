@@ -6,7 +6,7 @@ class TradingSettingsResponse(BaseModel):
     risk_percent: float = 1.0
     max_positions: int = 3
     daily_loss_limit_r: float = -3.0
-    rr_min: float = 3.0
+    rr_min: float = 4.0
     check_interval_seconds: int = 60
     leverage_btc: int = 10
     leverage_alts: int = 5

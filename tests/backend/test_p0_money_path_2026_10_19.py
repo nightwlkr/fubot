@@ -175,9 +175,9 @@ class TestIncomeIncludesFeesAndFunding:
 
         source = inspect.getsource(PositionManager._close_position)
         assert source.index("_ensure_flat(") < source.index("income_fn(symbol")
-        assert 'candidate.get("realizedEvents", 0) > 0' in source, (
-            "an entry commission is an income event, but not proof that the "
-            "exchange has booked the closing fill")
+        assert 'isinstance(candidate, dict)' in source, (
+            "zero-event closes (Binance omits REALIZED_PNL) must still be accepted "
+            "when userTrades proves the close")
         assert "update(Trade)" in source, "corrected exchange PnL must replace provisional DB PnL"
 
 

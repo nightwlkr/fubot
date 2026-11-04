@@ -421,7 +421,7 @@ class TestHarnessAlignment:
         k1h, k5m, k15m = _mtf_series()
         bt = Backtester()
         candidate = ("3CANDLE", "LONG",
-                     {"stop_loss": 97.0, "take_profit": 109.0, "rr_ratio": 3.0},
+                     {"stop_loss": 97.0, "take_profit": 112.0, "rr_ratio": 4.0},
                      k5m, "5m", (99.0, 101.0), 0)
         def candidate_at_scan(*args):
             return ([(*candidate[:6], args[-2])], object(), object())
@@ -454,7 +454,7 @@ class TestHarnessAlignment:
         ranging = SimpleNamespace(regime="RANGING", adx=12.0)
         strong_bear = SimpleNamespace(regime="STRONG_BEAR", adx=30.0,
                                       rsi_zone="NEUTRAL", rsi=50.0)
-        args = ("LONG", 3.0, 100.0, 99.0, bias, [], {})
+        args = ("LONG", 4.0, 100.0, 99.0, bias, [], {})
 
         enabled = Backtester(settings={"regime_filter_enabled": True,
                                        "trade_neutral_markets": True,

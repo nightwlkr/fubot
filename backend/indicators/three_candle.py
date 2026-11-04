@@ -117,7 +117,7 @@ def detect_three_candles(candles: list[dict], symbol: str = "", interval: str = 
     return patterns
 
 
-def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float = 3.0) -> dict:
+def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float = 4.0) -> dict:
     """Calculate entry, SL, TP, R:R for a 3-Candle pattern.
 
     The structural stop is the sweep wick (c2.low for bullish, c2.high for

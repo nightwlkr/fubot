@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     RISK_PERCENT: float = Field(default=1.0, ge=0.1, le=10.0)
     MAX_POSITIONS: int = Field(default=3, ge=1, le=10)
     DAILY_LOSS_LIMIT_R: float = Field(default=-3.0)
-    RR_MIN: float = Field(default=3.0, ge=2.0, le=5.0)
+    RR_MIN: float = Field(default=4.0, ge=2.0, le=5.0)
     CHECK_INTERVAL_SECONDS: int = Field(default=60, ge=10, le=300)
     LEVERAGE_BTC: int = Field(default=10, ge=1, le=125)
     LEVERAGE_ALTS: int = Field(default=5, ge=1, le=125)

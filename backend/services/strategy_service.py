@@ -245,7 +245,7 @@ class StrategyService:
         entry = (signal.entry_zone_min + signal.entry_zone_max) / 2
 
         # 5. Risk validation + sizing
-        min_rr = Decimal(str(self.settings.get("rr_min", 3.0)))
+        min_rr = Decimal(str(self.settings.get("rr_min", 4.0)))
         if not self.risk_svc.validate_rr_ratio(
             entry, signal.stop_loss, signal.take_profit, min_rr,
             direction=signal.direction,
@@ -1081,7 +1081,7 @@ class StrategyService:
                     position_id=row.id,
                     symbol=row.symbol,
                     side=row.side,
-                    mode=self._mode,
+                    mode=row.mode,
                     entry_price=row.entry_price,
                     exit_price=row.entry_price,  # approximate — market close, no exact price captured
                     quantity=row.quantity,

@@ -17,24 +17,83 @@ and -1.97R on three rows, and one AVAXUSDT row read -18.26R. Because the daily
 breaker sums ``pnl_r``, an unusable R reading does not merely mislabel one
 trade -- it moves the -3R limit that is the last line of defence.
 
-The contract is deliberately **fail closed**: an R that cannot be computed is
-returned as ``None``, and ``used_r_from_trade`` prices that at a FULL -1R
-against the day's limit. Unreadable must never mean free -- the same principle
-as ``daily_reset.used_r_from`` returning ``inf`` for a non-finite total.
+THE CONTRACT -- two totals, never one
+-------------------------------------
+An R that cannot be established is **unknown**, and unknown is not a number.
+It used to be turned into a number on the READ path: every call to
+``daily_r_contribution(None)`` logged "charging a full 1.0R loss" and returned
+``-1.0``. That single decision was wrong twice over:
+
+* it **fabricated a loss**. A trade whose 1R could not be measured was booked
+  into ``daily_summary.total_pnl_r`` as -1.0R -- an outcome that was never
+  observed. Binance omits a zero-value REALIZED_PNL income row when a position
+  closes at exactly its entry price, so the "loss" was frequently a flat close.
+* it **re-logged on every read**. The same unmeasurable row re-logged on every
+  scan, every dashboard poll, every performance refresh: 35,582 of 37,879
+  journal lines in 24h were that one message.
+
+So the accounting is split in two, explicitly:
+
+* **measured total** -- the honest ledger. An unknown R contributes ``0.0``.
+  Nothing is invented: no measured win, no measured loss, no measured flat.
+* **limit total** -- what the breaker budgets against. An unknown R costs a
+  full ``-UNKNOWN_R_COST`` (1R), exactly as before, so the safety is not
+  weakened -- only moved out of the ledger.
+
+``UNKNOWN_R_COST`` is one R because one R is the largest loss a single trade
+can legitimately book, so this is the worst *plausible* case rather than an
+arbitrary penalty. The breaker is still fail closed: ``daily_reset.used_r_from``
+returns ``inf`` for a non-finite total, and an unmeasurable trade still
+consumes a full 1R of the day's budget.
+
+The per-read log is gone from this module. The unknown is announced ONCE, at
+detection time, where the close is booked (``PositionManager``) -- a read path
+that logs is a read path that can flood the journal.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
+from typing import Iterable, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
-#: Charged against the daily limit when a trade's R cannot be established.
-#: One R is the largest loss a single trade can legitimately book, so this is
-#: the worst *plausible* case rather than an arbitrary penalty.
+#: Charged against the daily/weekly limit when a trade's R cannot be
+#: established. One R is the largest loss a single trade can legitimately
+#: book, so this is the worst *plausible* case rather than an arbitrary
+#: penalty. It is a LIMIT charge, never a ledger entry.
 UNKNOWN_R_COST = 1.0
+
+
+class RTotals(NamedTuple):
+    """The two totals every R consumer needs, plus the census behind them.
+
+    ``measured_total``
+        The honest ledger: what the books actually recorded. An unmeasurable
+        trade contributes NOTHING here -- it is neither a loss we measured nor
+        a flat we measured.
+
+    ``limit_total``
+        What the breaker budgets against: the measured total plus a full
+        ``-UNKNOWN_R_COST`` for every unknown trade. Numerically identical to
+        charging -1R per unknown inline, but separable, so a display can show
+        the measured total while the breaker charges the limit total.
+
+    ``unknown_count``
+        How many trades were unmeasurable, so a reader can see "2 of 8 trades
+        had unmeasurable R" instead of a silent lie.
+
+    ``wins`` / ``losses``
+        Tally of the trades whose R WAS measurable, plus every unknown trade
+        counted as a loss -- an unmeasurable trade is never a win.
+    """
+
+    measured_total: float
+    limit_total: float
+    unknown_count: int
+    wins: int
+    losses: int
 
 
 def risk_distance(entry_price=None, stop_loss=None, frozen=None) -> Optional[float]:
@@ -101,29 +160,86 @@ def pnl_r_from(pnl_usdt, quantity, distance) -> Optional[float]:
     return value if math.isfinite(value) else None
 
 
+def is_unknown_r(pnl_r) -> bool:
+    """True when this trade's R could not be established.
+
+    Unknown covers every shape that carries no number: ``None``, a
+    non-numeric value, and a non-finite one (``nan``/``inf``). A non-finite R
+    is unmeasurable, not "infinite profit" -- it must never reach the ledger
+    as a number.
+    """
+    if pnl_r is None:
+        return True
+    try:
+        value = float(pnl_r)
+    except (TypeError, ValueError):
+        return True
+    return not math.isfinite(value)
+
+
 def daily_r_contribution(pnl_r) -> float:
-    """Signed R this trade contributes to ``daily_summary.total_pnl_r``.
+    """Signed R this trade contributes to the **measured** total.
 
     Sign matters. The breaker is NET -- ``daily_reset.used_r_from`` computes
     ``max(0, -total)`` -- so wins must offset losses, and this returns the
     signed value. Returning ``abs()`` here would charge a winning +3R trade as
     3R of loss and halt the day on a good one.
 
-    An unknown or non-finite R contributes ``-UNKNOWN_R_COST`` (a full loss) so
-    the breaker tightens rather than loosens when the books stop making sense.
+    An unknown or non-finite R contributes ``0.0``: the measured ledger stays
+    honest and nothing is invented. The fail-closed charge lives in
+    ``r_totals``'s ``limit_total`` (and, per trade, in
+    ``limit_r_contribution``), so the breaker still pays a full 1R for an
+    unmeasurable trade.
+
+    This function is on the READ path and is therefore SILENT: it used to log
+    an error on every call, which re-announced the same unmeasurable row on
+    every scan and flooded the journal. The unknown is announced once, where
+    the close is booked.
     """
-    if pnl_r is None:
-        logger.error("trade R is unknown — charging a full %.1fR loss",
-                     UNKNOWN_R_COST)
+    if is_unknown_r(pnl_r):
+        return 0.0
+    return float(pnl_r)
+
+
+def limit_r_contribution(pnl_r) -> float:
+    """Signed R this trade contributes to the **limit** total.
+
+    Identical to ``daily_r_contribution`` for every measurable R. For an
+    unknown R it is ``-UNKNOWN_R_COST``: the conservative budget charge that
+    keeps the daily/weekly breakers behaving exactly as they did before the
+    ledger was split out.
+    """
+    if is_unknown_r(pnl_r):
         return -UNKNOWN_R_COST
-    try:
+    return float(pnl_r)
+
+
+def r_totals(pnl_rs: Iterable) -> RTotals:
+    """Aggregate an iterable of per-trade R values into the two totals.
+
+    * ``measured_total`` -- sum of the measurable R values (unknown -> 0.0).
+    * ``limit_total``    -- the same sum plus ``-UNKNOWN_R_COST`` per unknown,
+      i.e. exactly what the breaker charged before the split.
+    * ``unknown_count``  -- how many trades were unmeasurable.
+    * ``wins``/``losses``-- measurable wins, and measurable losses PLUS every
+      unknown trade (an unmeasurable trade is never counted as a win).
+    """
+    measured_total = 0.0
+    limit_total = 0.0
+    unknown_count = 0
+    wins = 0
+    losses = 0
+    for pnl_r in pnl_rs:
+        if is_unknown_r(pnl_r):
+            unknown_count += 1
+            limit_total -= UNKNOWN_R_COST
+            losses += 1
+            continue
         value = float(pnl_r)
-    except (TypeError, ValueError):
-        logger.error("trade R=%r is not numeric — charging a full %.1fR loss",
-                     pnl_r, UNKNOWN_R_COST)
-        return -UNKNOWN_R_COST
-    if not math.isfinite(value):
-        logger.error("trade R=%r is not finite — charging a full %.1fR loss",
-                     pnl_r, UNKNOWN_R_COST)
-        return -UNKNOWN_R_COST
-    return value
+        measured_total += value
+        limit_total += value
+        if value > 0:
+            wins += 1
+        elif value < 0:
+            losses += 1
+    return RTotals(measured_total, limit_total, unknown_count, wins, losses)

@@ -19,13 +19,15 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import select
-from backend.indicators.atr import calculate_atr
+from backend.indicators.atr import calculate_atr, calculate_atr_series
 from backend.indicators.trend import analyze_trend_bias
 from backend.indicators.fvg import detect_fvg, evaluate_fvg_entry
 from backend.indicators.order_block import detect_order_blocks, fvg_within_order_block
 from backend.indicators.three_candle import detect_three_candles, evaluate_three_candle_entry
 from backend.indicators.choch import detect_choch
 from backend.indicators.volume_profile import get_volume_confirmed_filter
+from backend.indicators.orb import detect_orb
+from backend.indicators.vwap import detect_vwap_reversion
 from backend.models.signal import Signal as SignalModel
 
 logger = logging.getLogger(__name__)
@@ -144,7 +146,7 @@ class SignalService:
         if self.binance is None:
             return []
 
-        rr_min = float(self.settings.get("rr_min", 3.0))
+        rr_min = float(self.settings.get("rr_min", 4.0))
 
         # Expire stale PENDING signals for this symbol FIRST. Without this, a
         # PENDING signal whose price never returned to its zone is never
@@ -194,7 +196,16 @@ class SignalService:
             logger.info("[%s] Skipping: extreme negative funding rate %.6f", symbol, funding_rate)
             return []
 
-        # 3. Detect patterns
+        # 3. Detect patterns — only on the RECENT window to filter out stale
+        # patterns. The backtester looks at the last few bars; live used to
+        # scan all 200 bars and keep the OLDEST candidate, trading patterns
+        # that were days old (low probability). This setting controls the
+        # lookback (default 20 bars ≈ 1h40m on 5m).
+        signal_lookback = int(self.settings.get("signal_lookback_bars", 20))
+        k1h_detect = k1h[-signal_lookback:] if signal_lookback > 0 else k1h
+        k5m_detect = k5m[-signal_lookback:] if signal_lookback > 0 else k5m
+        k15m_detect = k15m[-signal_lookback:] if signal_lookback > 0 else k15m
+
         candidates: list[tuple[str, str, float, float, float, float, float]] = []
         # Strategy toggles (Settings UI). DECISION.md D1 (2026-10-16): FVG is
         # disabled in production — its stop geometry (zone_min - atr_1h with a
@@ -206,21 +217,21 @@ class SignalService:
             # FVG runs on 1h: a true 3-candle gap (c2.low > c1.high) essentially
             # never forms on liquid 5m crypto (ranges always overlap) — 0
             # detections there. On 1h, gaps do occur.
-            for f in detect_fvg(k1h, symbol):
+            for f in detect_fvg(k1h_detect, symbol):
                 e = evaluate_fvg_entry(f, atr_1h, rr_min)
                 if e["is_valid"]:
                     direction = "LONG" if f.direction == "BULLISH" else "SHORT"
                     candidates.append(("FVG", direction, f.zone_min, f.zone_max,
                                        e["stop_loss"], e["take_profit"], e["rr_ratio"]))
         if bool(self.settings.get("strategy_3candle_enabled", True)):
-            for p in detect_three_candles(k5m, symbol):
+            for p in detect_three_candles(k5m_detect, symbol):
                 e = evaluate_three_candle_entry(p, atr_1h, rr_min)
                 if e["is_valid"]:
                     direction = "LONG" if p.direction == "BULLISH" else "SHORT"
                     candidates.append(("3CANDLE", direction, p.entry_zone_min, p.entry_zone_max,
                                        e["stop_loss"], e["take_profit"], e["rr_ratio"]))
         if bool(self.settings.get("strategy_choch_enabled", True)):
-            for ch in detect_choch(k15m, symbol, "15m", atr_1h, rr_min):
+            for ch in detect_choch(k15m_detect, symbol, "15m", atr_1h, rr_min):
                 if ch.is_valid:
                     direction = "LONG" if ch.direction == "BULLISH" else "SHORT"
                     candidates.append(("CHOC", direction,
@@ -229,10 +240,31 @@ class SignalService:
         if bool(self.settings.get("strategy_obfvg_enabled", False)):
             max_age = int(self.settings.get("strategy_obfvg_max_age_bars", 2))
             for fdir, zmin, zmax, sl, tp, rr in detect_obfvg_candidates(
-                k5m, k1h, atr_1h, rr_min, max_age_bars=max_age
+                k5m_detect, k1h_detect, atr_1h, rr_min, max_age_bars=max_age
             ):
                 candidates.append(("OBFVG", "LONG" if fdir == "BULLISH" else "SHORT",
                                    zmin, zmax, sl, tp, rr))
+
+        # ORB + VWAP (new pillar, default disabled — positive gross edge but
+        # net negative until fee reduction is implemented)
+        if bool(self.settings.get("strategy_orb_enabled", False)):
+            atr_series = calculate_atr_series(k5m_detect, 14)
+            # ORB
+            for sig in detect_orb(k5m_detect, atr_series, rr_min=rr_min):
+                if sig.formed_at_idx != len(k5m_detect) - 1:
+                    continue
+                direction = sig.direction
+                candidates.append(("ORB", direction, sig.entry_price, sig.entry_price,
+                                   sig.stop_loss, sig.take_profit, sig.rr_ratio))
+            # VWAP
+            for sig in detect_vwap_reversion(k5m_detect, atr_series, rr_min=rr_min):
+                if sig.formed_at_idx != len(k5m_detect) - 1:
+                    continue
+                if not getattr(sig, "is_valid", True):
+                    continue
+                direction = sig.direction
+                candidates.append(("VWAP", direction, sig.entry_price, sig.entry_price,
+                                   sig.stop_loss, sig.take_profit, sig.rr_ratio))
 
         if not candidates:
             return []

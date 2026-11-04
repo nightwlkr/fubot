@@ -36,7 +36,7 @@ def detect_choch(
     symbol: str = "",
     interval: str = "5m",
     atr: float = 0.0,
-    rr_min: float = 3.0,
+    rr_min: float = 4.0,
     left_bars: int = 5,
     right_bars: int = 5,
 ) -> list[CHoCH]:
