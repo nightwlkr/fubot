@@ -744,7 +744,7 @@ class PositionManager:
         risk = position.get("initial_risk_distance")
         if risk is None or float(risk) <= 0:
             return  # cannot size the trigger without the frozen risk
-        trigger_r = float(self.settings.get("be_trail_trigger_r", 0.75))
+        trigger_r = float(self.settings.get("be_trail_trigger_r", 0.5))
         trigger = float(risk) * trigger_r
         side = position["side"]
 

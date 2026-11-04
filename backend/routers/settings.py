@@ -149,7 +149,7 @@ async def get_trading_settings(
         regime_filter_enabled=bool(settings.get("regime_filter_enabled", True)),
         max_position_notional_pct=float(settings.get("max_position_notional_pct", 50.0)),
         max_aggregate_risk_pct=float(settings.get("max_aggregate_risk_pct", 3.0)),
-        be_trail_trigger_r=float(settings.get("be_trail_trigger_r", 0.75)),
+        be_trail_trigger_r=float(settings.get("be_trail_trigger_r", 0.5)),
         profit_lock_trigger_r=float(settings.get("profit_lock_trigger_r", 1.0)),
         profit_lock_trail_r=float(settings.get("profit_lock_trail_r", 0.5)),
         stale_trade_hours=float(settings.get("stale_trade_hours", 0.0)),

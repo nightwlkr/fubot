@@ -129,7 +129,7 @@ class TestDisabling:
 
     def test_defaults_match_production_settings(self):
         bt = Backtester()
-        assert bt.trailing["be_trail_trigger_r"] == 0.75
+        assert bt.trailing["be_trail_trigger_r"] == 0.5
         assert bt.trailing["profit_lock_trigger_r"] == 1.0
         assert bt.trailing["profit_lock_trail_r"] == 0.5
 

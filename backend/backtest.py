@@ -267,7 +267,7 @@ class Backtester:
         # and the 2026-10-15 audit measured 81% of live exits at ~0R — a
         # distribution static exits cannot produce. Pass None values to disable.
         self.trailing = {
-            "be_trail_trigger_r": self.settings.get("be_trail_trigger_r", 0.75),
+            "be_trail_trigger_r": self.settings.get("be_trail_trigger_r", 0.5),
             "profit_lock_trigger_r": self.settings.get("profit_lock_trigger_r", 1.0),
             "profit_lock_trail_r": self.settings.get("profit_lock_trail_r", 0.5),
         }
