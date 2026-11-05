@@ -303,7 +303,8 @@ async def main() -> None:
 
     bt = Backtester(settings=dict(SETTINGS))
     rows = []
-    async with BinanceService() as binance if hasattr(BinanceService, "__aenter__") else _NullCtx() as binance:
+    binance = BinanceService()
+    try:
         for sym in symbols:
             try:
                 res = await run_symbol(binance, sym, args.interval,
@@ -319,6 +320,8 @@ async def main() -> None:
                       f"expNetR {r['exp_net_r']:+.3f}", flush=True)
             else:
                 print(f"{sym}: 0 closed trades", flush=True)
+    finally:
+        await binance.close()
 
     print_table(rows, args.interval, ctx_tf, args.days)
 
@@ -329,15 +332,6 @@ async def main() -> None:
              "days": args.days, "settings": SETTINGS, "rows": rows},
             indent=2, default=str))
         print(f"\nWrote {args.json_out}")
-
-
-class _NullCtx:
-    """Fallback if BinanceService lacks async-context-manager support."""
-    async def __aenter__(self):
-        return BinanceService()
-
-    async def __aexit__(self, *exc):
-        return False
 
 
 if __name__ == "__main__":

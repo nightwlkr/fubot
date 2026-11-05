@@ -162,6 +162,26 @@ def fill_at_edge(series: list[dict], signal_idx: int,
         direction=direction, penetration_bps=penetration_bps)
 
 
+def efficiency_ratio(closes: list[float], period: int = 20) -> Optional[float]:
+    """Kaufman Efficiency Ratio over the last `period` closes of `closes`.
+
+    ER = |close_t - close_{t-period}| / sum(|close_i - close_{i-1}|): 1.0 is a
+    clean directional move, ~0 is chop. Computed on the SAME closed 1h closes
+    the regime analysis reads at detection time — the caller must pass only
+    bars closed by the scan, so this adds no lookahead. Returns None with
+    insufficient history or a zero path (a perfectly flat series has no
+    measurable direction either way).
+    """
+    if len(closes) < period + 1:
+        return None
+    window = closes[-(period + 1):]
+    change = abs(window[-1] - window[0])
+    path = sum(abs(window[i] - window[i - 1]) for i in range(1, len(window)))
+    if path <= 0:
+        return None
+    return change / path
+
+
 def rr_at_fill(sl: float, tp: float, direction: str,
                fill: float, rr_min: float) -> float:
     """R:R actually achieved at `fill`, mirroring the live re-check.
@@ -217,6 +237,14 @@ class BacktestTrade:
     # cheaper maker entry fee is charged only where the fill model says the
     # entry actually rested.
     cost_model: Optional[CostModel] = None
+    # Regime context frozen at DETECTION time (the cached 1h analysis the
+    # filters read), so expectancy can be sliced by the market state the
+    # signal fired in. `er` is the Kaufman Efficiency Ratio over the same
+    # closed 1h closes; None when history is insufficient or the path is flat.
+    regime: str = ""
+    adx: float = 0.0
+    er: Optional[float] = None
+    bias_score: int = 0
 
     @property
     def open(self) -> bool:
@@ -297,7 +325,40 @@ class BacktestResult:
             "trust": "net_r is the number to trust; total_r is gross of costs",
             "trades_per_day": round(self.trades_per_day, 1),
             "skipped": self.skipped,
+            "regime_breakdown": self.regime_breakdown(),
         }
+
+    def regime_breakdown(self) -> dict:
+        """Per-regime stats over CLOSED trades, keyed by `BacktestTrade.regime`.
+
+        Buckets mirror `summary()`'s shape (trades / wins / win_rate / total_r
+        / net_r / expectancy_net_r) so a per-regime expectancy comparison is a
+        direct read. Trades with no tag land in "UNKNOWN" rather than being
+        dropped. Buckets with few trades are still reported — the caller marks
+        n < 20 inconclusive per the analysis evidence standard.
+        """
+        buckets: dict[str, dict] = {}
+        for t in self.closed:
+            key = t.regime or "UNKNOWN"
+            b = buckets.setdefault(key, {"trades": 0, "wins": 0,
+                                         "total_r": 0.0, "net_r": 0.0})
+            b["trades"] += 1
+            b["wins"] += 1 if t.pnl_r > 0 else 0
+            b["total_r"] += t.pnl_r
+            b["net_r"] += t.net_r
+        out = {}
+        for key in sorted(buckets):
+            b = buckets[key]
+            n = b["trades"]
+            out[key] = {
+                "trades": n,
+                "wins": b["wins"],
+                "win_rate": round(b["wins"] / n * 100.0, 1),
+                "total_r": round(b["total_r"], 2),
+                "net_r": round(b["net_r"], 2),
+                "expectancy_net_r": round(b["net_r"] / n, 3),
+            }
+        return out
 
 
 class Backtester:
@@ -541,7 +602,9 @@ class Backtester:
                 and not get_volume_confirmed_filter(direction, vol_candles).passes_filter):
             skip["volume"] = skip.get("volume", 0) + 1
             return False
-        if rr < self.rr_min:
+        # epsilon: indicator rr_ratio == rr_min modulo float rounding
+        # (see three_candle.py is_valid) — a bare < rejects on rounding noise.
+        if rr < self.rr_min - 1e-9:
             skip["rr"] = skip.get("rr", 0) + 1
             return False
         # min-risk guard (mirrors strategy_service)
@@ -701,6 +764,7 @@ class Backtester:
                 continue
             if at_ms < busy_until_ms:
                 continue
+            k1h_idx = indices["1h"]
             for candidate in cands:
                 strategy, direction, e, vol_src, tf, zone = candidate[:6]
                 signal_idx = (candidate[6] if len(candidate) > 6 else
@@ -757,7 +821,17 @@ class Backtester:
                     symbol=symbol, strategy=strategy, direction=direction,
                     entry=fill, stop=sl, take_profit=tp, entry_idx=fill_idx,
                     timeframe=tf,
-                    signal_open_time=tf_candles[sig_idx]["open_time"])
+                    signal_open_time=tf_candles[sig_idx]["open_time"],
+                    # Regime fields are read off the SAME cached 1h analysis
+                    # the filters used at detection — never recomputed at the
+                    # fill bar, which would tag the trade with a regime it did
+                    # not fire in. getattr guards test doubles returning
+                    # bare objects() as the regime.
+                    regime=str(getattr(regime, "regime", "") or ""),
+                    adx=float(getattr(regime, "adx", 0.0) or 0.0),
+                    er=efficiency_ratio(
+                        [c["close"] for c in k1h[:k1h_idx + 1]]),
+                    bias_score=int(getattr(regime, "bias_score", 0) or 0))
                 if maker_edge:
                     # Post-only entry: maker fee on the entry side, taker on
                     # the exit (stops/targets remain marketable algo orders).

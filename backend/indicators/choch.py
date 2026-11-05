@@ -92,7 +92,8 @@ def detect_choch(
                 stop_loss=stop,
                 take_profit=tp,
                 rr_ratio=rr if rr > 0 else None,
-                is_valid=rr >= rr_min if rr > 0 else False,
+                # epsilon: rr == rr_min modulo float rounding (see three_candle.py)
+                is_valid=(rr >= rr_min - 1e-9) if rr > 0 else False,
             ))
 
     # Bearish CHoCH: recent high breaks below older low
@@ -124,7 +125,8 @@ def detect_choch(
                 stop_loss=stop,
                 take_profit=tp,
                 rr_ratio=rr if rr > 0 else None,
-                is_valid=rr >= rr_min if rr > 0 else False,
+                # epsilon: rr == rr_min modulo float rounding (see three_candle.py)
+                is_valid=(rr >= rr_min - 1e-9) if rr > 0 else False,
             ))
 
     return patterns

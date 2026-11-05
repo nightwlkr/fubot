@@ -164,5 +164,9 @@ def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float 
         "stop_loss": sl,
         "take_profit": tp,
         "rr_ratio": rr,
-        "is_valid": risk > 0 and rr >= rr_min,
+        # tp is built as entry ± risk*rr_min, so rr == rr_min modulo float
+        # rounding; a bare >= silently discards valid setups on rounding noise
+        # (measured 0.57% of candidates at rr_min=3.0 — see
+        # analysis/exit-param-sweep-2026-11-05.md).
+        "is_valid": risk > 0 and rr >= rr_min - 1e-9,
     }

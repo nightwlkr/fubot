@@ -123,5 +123,6 @@ def evaluate_fvg_entry(fvg: FVG, atr: float, rr_min: float = 4.0, current_price:
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "rr_ratio": rr_ratio,
-        "is_valid": rr_ratio >= rr_min,
+        # epsilon: rr_ratio == rr_min modulo float rounding (see three_candle.py)
+        "is_valid": rr_ratio >= rr_min - 1e-9,
     }

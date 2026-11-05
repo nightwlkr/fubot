@@ -1110,3 +1110,98 @@ class TestRunBacktestWiring:
         with pytest.raises(RuntimeError):
             asyncio.run(run_backtest("BTCUSDT", days=5, binance=short))
         assert short.closed is False
+
+
+# ------------------------------------------- 8. regime tagging / per-regime expectancy
+
+class TestRegimeTagging:
+    """Trades must carry the market-regime context they fired in, and
+    `BacktestResult.regime_breakdown()` must bucket expectancy by it.
+
+    The harness already computed `(atr, bias, regime)` per closed 1h bar for
+    the filter chain but dropped it at fill time, so no per-regime expectancy
+    could ever be measured. These tests pin the tag and the bucketing."""
+
+    def _run_with_regime(self, regime):
+        """Drive `run` with one forced candidate and a canned regime object."""
+        import backend.backtest as btmod
+        from backend.backtest import Backtester
+        from types import SimpleNamespace
+        k1h, k5m, k15m = _mtf_series()
+        bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
+                                  "trade_neutral_markets": True})
+        candidate = ("3CANDLE", "LONG",
+                     {"stop_loss": 97.0, "take_profit": 112.0, "rr_ratio": 4.0},
+                     k5m, "5m", (99.0, 101.0), 0)
+        bt._detect_candidates_at = lambda *args: ([candidate], object(), regime)
+        bt._passes_filters = lambda *args, **kwargs: True
+        real_fill = btmod.fill_at_midpoint
+        btmod.fill_at_midpoint = lambda series, signal_idx, *a, **kw: \
+            (signal_idx + 1, 100.0)
+        def close_at_tp(trade, series):
+            trade.exit_idx = min(trade.entry_idx + 1, len(series) - 1)
+            trade.exit_price = trade.take_profit
+            trade.exit_reason = "TP_HIT"
+            trade.finalise()
+        bt._resolve_exit = close_at_tp
+        try:
+            return bt.run("X", k1h, k5m, k15m)
+        finally:
+            btmod.fill_at_midpoint = real_fill
+
+    def test_a_trade_carries_the_regime_it_fired_in(self):
+        from types import SimpleNamespace
+        regime = SimpleNamespace(regime="STRONG_BEAR", adx=31.5, bias_score=-42)
+        res = self._run_with_regime(regime)
+        assert res.trades, "fixture produced no trades"
+        t = res.trades[0]
+        assert t.regime == "STRONG_BEAR"
+        assert t.adx == pytest.approx(31.5)
+        assert t.bias_score == -42
+        # ER is measured on the closed 1h closes at detection: bounded [0, 1]
+        # and present once enough 1h history exists (run gates at idx >= 59).
+        assert t.er is not None
+        assert 0.0 <= t.er <= 1.0
+
+    def test_a_bare_object_regime_tags_empty_not_crash(self):
+        """Test doubles return `object()` as the regime; the tag must degrade
+        to empty/zero rather than raise — `run` must stay drivable."""
+        res = self._run_with_regime(object())
+        assert res.trades
+        assert res.trades[0].regime == ""
+        assert res.trades[0].adx == 0.0
+        assert res.regime_breakdown()["UNKNOWN"]["trades"] == len(res.trades)
+
+    def test_regime_breakdown_buckets_expectancy_by_tag(self):
+        from backend.backtest import BacktestResult, BacktestTrade
+
+        def trade(regime, pnl, net):
+            t = BacktestTrade(symbol="X", strategy="S", direction="LONG",
+                              entry=100.0, stop=99.0, take_profit=103.0,
+                              entry_idx=0, regime=regime)
+            t.exit_idx, t.exit_price, t.exit_reason = 5, 100.0 + pnl, "X"
+            t.pnl_r = pnl
+            t.net_r = net
+            return t
+
+        res = BacktestResult(symbol="X", candles=100)
+        res.trades = [
+            trade("STRONG_BULL", 3.0, 2.0), trade("STRONG_BULL", -1.0, -1.5),
+            trade("RANGING", -1.0, -1.5), trade("RANGING", -1.0, -1.5),
+            trade("", -1.0, -1.5),   # untagged -> UNKNOWN
+        ]
+        bd = res.regime_breakdown()
+        assert set(bd) == {"RANGING", "STRONG_BULL", "UNKNOWN"}
+        bull = bd["STRONG_BULL"]
+        assert bull["trades"] == 2 and bull["wins"] == 1
+        assert bull["win_rate"] == 50.0
+        assert bull["net_r"] == pytest.approx(0.5)
+        assert bull["expectancy_net_r"] == pytest.approx(0.25)
+        assert bd["RANGING"]["expectancy_net_r"] == pytest.approx(-1.5)
+        assert bd["UNKNOWN"]["trades"] == 1
+        # open trades are excluded from every bucket
+        res.trades.append(BacktestTrade(symbol="X", strategy="S",
+                                        direction="LONG", entry=1.0,
+                                        stop=0.5, take_profit=2.0,
+                                        entry_idx=0, regime="STRONG_BULL"))
+        assert res.regime_breakdown()["STRONG_BULL"]["trades"] == 2

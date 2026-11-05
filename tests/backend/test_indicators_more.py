@@ -239,6 +239,22 @@ class TestThreeCandle:
         assert res["stop_loss"] == pytest.approx(90.0)
         assert res["entry_price"] - res["stop_loss"] == pytest.approx(15.0)
 
+    def test_rr_tautology_never_invalidates_on_float_noise(self):
+        """Regression (exit-param-sweep 2026-11-05): tp is built as
+        entry ± risk*rr_min, so rr == rr_min modulo float rounding — a bare
+        `rr >= rr_min` discarded ~0.57% of valid setups at rr_min=3.0.
+        Sweep rr_min densely; every positive-risk result must stay valid."""
+        p = detect_three_candles(self.sweep_candles(), "BTCUSDT", "5m")[0]
+        invalid = []
+        for i in range(400):
+            rr_min = 2.0 + i * 0.005
+            for atr in (0.05, 0.5, 5.0):
+                res = evaluate_three_candle_entry(p, atr=atr, rr_min=rr_min)
+                risk = abs(res["entry_price"] - res["stop_loss"])
+                if risk > 0 and not res["is_valid"]:
+                    invalid.append((rr_min, atr, res["rr_ratio"]))
+        assert invalid == [], f"valid setups discarded by float noise: {invalid[:5]}"
+
 
 class TestVolumeProfile:
     def test_close_near_high_is_buy_volume(self):
