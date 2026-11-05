@@ -82,6 +82,14 @@ class PositionManager:
     def mode(self) -> str:
         return self._mode
 
+    def _float_setting(self, key: str, default: float) -> float:
+        """float() a hot-reloaded setting, treating an explicit JSON null as
+        unset. `PUT /settings/trading` accepts nulls (`exclude_unset=True`
+        stores them), and a bare float(None) here would raise every 30s pass
+        and abort position monitoring for ALL open positions."""
+        v = self.settings.get(key, default)
+        return default if v is None else float(v)
+
     async def start(self):
         """Start the position manager loop."""
         if self._running:
@@ -744,7 +752,7 @@ class PositionManager:
         risk = position.get("initial_risk_distance")
         if risk is None or float(risk) <= 0:
             return  # cannot size the trigger without the frozen risk
-        trigger_r = float(self.settings.get("be_trail_trigger_r", 0.5))
+        trigger_r = self._float_setting("be_trail_trigger_r", 0.5)
         trigger = float(risk) * trigger_r
         side = position["side"]
 
@@ -777,8 +785,8 @@ class PositionManager:
         risk = position.get("initial_risk_distance")
         if risk is None or float(risk) <= 0:
             return
-        trigger_r = float(self.settings.get("profit_lock_trigger_r", 1.0))
-        trail_r = float(self.settings.get("profit_lock_trail_r", 0.5))
+        trigger_r = self._float_setting("profit_lock_trigger_r", 1.0)
+        trail_r = self._float_setting("profit_lock_trail_r", 0.5)
         trigger = float(risk) * trigger_r
         trail = float(risk) * trail_r
         side = position["side"]
@@ -818,8 +826,8 @@ class PositionManager:
         risk = position.get("initial_risk_distance")
         if risk is None or float(risk) <= 0:
             return
-        trigger_r = float(self.settings.get("profit_lock_trigger_r2", 1.0))
-        trail_r = float(self.settings.get("profit_lock_trail_r2", 0.25))
+        trigger_r = self._float_setting("profit_lock_trigger_r2", 1.0)
+        trail_r = self._float_setting("profit_lock_trail_r2", 0.25)
         trigger = float(risk) * trigger_r
         trail = float(risk) * trail_r
         side = position["side"]
@@ -860,8 +868,8 @@ class PositionManager:
         risk = position.get("initial_risk_distance")
         if risk is None or float(risk) <= 0:
             return
-        trigger_r = float(self.settings.get("runner_trail_trigger_r", 1.0))
-        distance_r = float(self.settings.get("runner_trail_distance_r", 0.75))
+        trigger_r = self._float_setting("runner_trail_trigger_r", 1.0)
+        distance_r = self._float_setting("runner_trail_distance_r", 0.75)
         if trigger_r <= 0 or distance_r <= 0:
             return
         trigger = float(risk) * trigger_r
@@ -906,7 +914,7 @@ class PositionManager:
         position slot. If the trade is in profit but hasn't hit TP after
         `stale_trade_hours`, close it and bank whatever profit exists.
         """
-        stale_hours = float(self.settings.get("stale_trade_hours", 0.0))
+        stale_hours = self._float_setting("stale_trade_hours", 0.0)
         if stale_hours <= 0:
             return  # disabled
 

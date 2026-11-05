@@ -1605,6 +1605,28 @@ class TestLiveModeSafety:
         await pm._check_be_trailing(pos, current_price=111.0)   # +1.1R
         assert calls == [(1, 100.0)], f"did not trail at the configured trigger: {calls}"
 
+    async def test_null_trail_settings_fall_back_to_defaults(self):
+        """PUT /settings/trading stores explicit JSON nulls; a bare float(None)
+        in the 30s monitoring pass would raise and abort checks for ALL open
+        positions. _float_setting must treat null as unset."""
+        from backend.core.position_manager import PositionManager
+        async def _noop(*a, **k):
+            return None
+        alerts = SimpleNamespace(signal=_noop, be_trailing=_noop, tp_hit=_noop, sl_hit=_noop)
+        daily = SimpleNamespace(update_daily_summary=_noop, get_daily_stats=_noop)
+        pm = PositionManager(binance=None, order_service=None, daily_reset=daily,
+                             alert_service=alerts,
+                             settings={"be_trail_trigger_r": None,
+                                       "profit_lock_trigger_r": None,
+                                       "stale_trade_hours": None},
+                             session_factory=None)
+        assert pm._float_setting("be_trail_trigger_r", 0.5) == 0.5
+        assert pm._float_setting("profit_lock_trigger_r", 1.0) == 1.0
+        assert pm._float_setting("stale_trade_hours", 0.0) == 0.0
+        # and a real value still wins over the default
+        pm.settings["be_trail_trigger_r"] = 0.75
+        assert pm._float_setting("be_trail_trigger_r", 0.5) == 0.75
+
     async def test_fill_update_recomputes_frozen_risk_distance(self):
         """The frozen risk distance must follow the REAL entry — pnl_r is
         measured against it at close (XRP read +1.26R off the planned midpoint
