@@ -5,6 +5,14 @@
 **Analysis Period**: 2026-10-20 to 2026-11-04 (35 live trades)
 **Purpose**: Identify root causes of persistent trading losses
 
+> **CORRECTION NOTICE (2026-11-05, later same day).** The fee-drag and gross-PnL figures in this document are **superseded** by `analysis/session-symbol-research-2026-11-05.md` §0 and must not be quoted as-is:
+>
+> - **Fee drag is 15.8862R (0.4539R/trade), not 26.61R (0.758R/trade).** This document computed it as `entry × 0.0011 / abs(entry - positions.stop_loss)`. `stop_loss` is **mutable** — BE-trailing moves it to and past entry — so for the 12 trailed winners it measured a *profit* distance, not the risk. The authoritative 1R is the frozen `positions.initial_risk_distance` (`backend/core/risk_units.py:113-121`, `backend/core/cost_model.py:82-93`). Trade 2 was reported as a "0.01% stop with 7.53R fee drag"; its real basis is 0.606% and its real fee drag 0.182R. Only trade 8 (BNBUSDT LONG, 0.0128% basis) is genuinely degenerate.
+> - **Gross PnL is -1.8921R (-0.054R/trade), not +11.62R.** The gross figure here was derived circularly as `net + fee`, so it could not confirm its own thesis. The exchange-anchored gross (stored `pnl_usdt` + modelled taker fee) is ≈ 0 — **the strategy had no measurable gross edge in this sample**; fees are the difference between flat and -14.91R.
+> - **"49% of trades had stops tighter than 0.5%" is 31.4% (11/35)** on the frozen risk basis.
+> - Two appendix rows do not match the database: **trade 2 is +2.3441R** (not -0.04R) and **trade 20 is -1.0380R / EXTERNAL_CLOSE** (not +0.18R / SL_HIT).
+> - Unchanged and still correct: 35 trades, 12W/23L, -14.91R net, -0.426R/trade, 34 SL_HIT / 1 EXTERNAL_CLOSE / 0 TP_HIT, the per-symbol table, the per-day table and the per-week table.
+
 ---
 
 ## Executive Summary

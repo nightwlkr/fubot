@@ -4,11 +4,13 @@ from datetime import datetime
 
 # Minimum stop distance as a multiple of ATR(14). The structural sweep wick is
 # often only a few pips from entry on 5m candles — too tight for price noise
-# (observed 0.07%-0.3% stops getting hit instantly). Production analysis (2026-11-05)
-# showed 49% of trades had stops <0.5%, causing 1.44R average fee drag. Increased
-# to 2.5× ATR to ensure minimum stop distance of 0.5-0.75% on 5m timeframe,
-# dramatically reducing fee drag while staying on the correct structural side.
-atr_stop_mult = 2.5
+# (observed 0.07%-0.3% stops getting hit instantly). Research shows 1.5× ATR
+# provides adequate buffer against stop hunts while keeping stops on the
+# correct structural side. NOTE: a 45d A/B backtest (2026-11-05,
+# analysis/backtest-45d-2026-11-05.md) showed widening this to 2.5× cut trade
+# count 36% but WORSENED net expectancy (-0.045 → -0.089 expNetR) — wider
+# stops shrink every R multiple faster than they cut fee drag. Kept at 1.5.
+atr_stop_mult = 1.5
 
 
 @dataclass

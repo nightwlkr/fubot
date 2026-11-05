@@ -227,16 +227,17 @@ class TestThreeCandle:
         assert res["take_profit"] == pytest.approx(105 + 6 * 3)
 
     def test_tight_stop_widened_to_atr_floor(self):
-        """Regression: a structural stop closer than 2.5×ATR is pushed out to
-        entry - 2.5×atr so 5m noise can't hit it instantly (was causing -1R).
-        Raised 1.5→2.5 after production analysis (2026-11-05) showed 49% of
-        trades had stops <0.5%, incurring ~1.44R average fee drag."""
+        """Regression: a structural stop closer than 1.5×ATR is pushed out to
+        entry - 1.5×atr so 5m noise can't hit it instantly (was causing -1R).
+        Research shows 1.5×ATR provides adequate buffer against stop hunts.
+        A 2.5× variant was tested and rejected (2026-11-05 45d backtest:
+        wider stops shrank every R multiple and worsened net expectancy)."""
         p = detect_three_candles(self.sweep_candles(), "BTCUSDT", "5m")[0]
         # structural risk is entry(105) - sweep low(99) = 6; give ATR=10 > 6
         res = evaluate_three_candle_entry(p, atr=10.0, rr_min=3.0)
-        # stop must be widened to entry - 2.5*10 = 80.0
-        assert res["stop_loss"] == pytest.approx(80.0)
-        assert res["entry_price"] - res["stop_loss"] == pytest.approx(25.0)
+        # stop must be widened to entry - 1.5*10 = 90.0
+        assert res["stop_loss"] == pytest.approx(90.0)
+        assert res["entry_price"] - res["stop_loss"] == pytest.approx(15.0)
 
 
 class TestVolumeProfile:
