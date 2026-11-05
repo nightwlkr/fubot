@@ -271,11 +271,12 @@ class StrategyService:
 
         # Min-risk guard: a degenerate entry-to-stop distance makes any normal
         # adverse move a huge |R| (this caused -2R paper losses when entry
-        # filled ~at the stop). Require the risk to be at least 0.05% of the
-        # entry price (relative, so it scales across symbols) — override with
-        # the min_risk_pct setting.
+        # filled ~at the stop). Require the risk to be at least 0.5% of the
+        # entry price — below that, modeled round-trip costs exceed ~0.2R of
+        # risk per trade (production analysis 2026-11-05: stops <0.5% averaged
+        # 1.44R fee drag). Override with the min_risk_pct setting.
         risk_distance = abs(float(entry) - float(signal.stop_loss))
-        min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
+        min_risk_pct = float(self.settings.get("min_risk_pct", 0.005))
         min_risk_price = float(entry) * min_risk_pct
         if risk_distance <= 0 or risk_distance < min_risk_price:
             signal.status = "SKIPPED"

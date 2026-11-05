@@ -278,7 +278,7 @@ class Backtester:
         self.min_strength = str(self.settings.get("trade_min_trend_strength", "MODERATE")).upper()
         self.volume_filter_enabled = bool(self.settings.get("volume_filter_enabled", False))
         self.regime_filter_enabled = bool(self.settings.get("regime_filter_enabled", True))
-        self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.0005))
+        self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.005))
         self.signal_max_age_ms = int(
             self.settings.get("signal_max_age_minutes", DEFAULT_SIGNAL_MAX_AGE_MIN)) * 60_000
         self.entry_fill_penetration_bps = float(

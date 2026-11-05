@@ -387,6 +387,11 @@ After each task completion:
 
 ---
 
-**Task List Status**: Created
-**Next Action**: Assign agents to Phase 1 tasks
+**Task List Status**: Phase 1 in progress
+- Task 1 DONE (local commit `da597ca`, not yet deployed): `atr_stop_mult` 1.5→2.5 in `backend/indicators/three_candle.py`; regression test updated; 698 tests pass.
+- Task 2 DONE (local, pending commit): `min_risk_pct` default 0.05%→0.5% in `strategy_service.py` + `backtest.py`. Guard already existed; production has no `min_risk_pct` row so the new default applies on next deploy.
+- Task 3 DONE (production, hot-reloaded): `rr_min` 4.0→3.0 via `PUT /api/settings/trading`.
+- Task 4 DONE (production, hot-reloaded): `trade_min_trend_strength` STRONG→MODERATE via `PUT /api/settings/trading`.
+- Housekeeping: prod `atr_stop_mult` setting updated 1.5→2.5 for UI consistency (dead config for live 3CANDLE — module constant rules).
+**Next Action**: Deploy `da597ca`+ to production so Tasks 1-2 take effect; then Phase 2 (Task 9 paginated backtest is the blocker)
 **Review Date**: After Phase 1 completion
