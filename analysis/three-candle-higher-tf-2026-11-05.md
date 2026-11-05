@@ -143,3 +143,28 @@ PYTHONPATH=. python3 scripts/three_candle_tf_backtest.py --interval 15m --days 4
 PYTHONPATH=. python3 scripts/three_candle_tf_backtest.py --interval 1h --days 45 \
     --json-out /tmp/tf_1h.json
 ```
+
+## Follow-up runs (2026-11-05, post-commit)
+
+### 15m disjoint holdout (days 45–90, same 7 symbols)
+
+`--days 45 --end-days-ago 45 --interval 15m`: 201 closed, grossR +9.35,
+netR -9.57, **expNetR -0.048**. The recent-window +0.013 did NOT replicate
+out-of-sample — 15m is rejected. Per-symbol: LINK +0.283, OP +0.125,
+UNI +0.046 positive; APE -0.211, BNB -0.279, BTC -0.334, SOL -0.176
+negative — the same symbol split as 5m, i.e. symbol selection, not
+timeframe, drives the residual.
+
+### 1h deep sample (days 0–90, same 7 symbols)
+
+`--days 90 --end-days-ago 90 --interval 1h` (context 4h, ~80d effective
+after warmup): 58 closed total, grossR -0.40, netR -3.30,
+**expNetR -0.057** pooled; every per-symbol cell <20 trades →
+inconclusive individually, but the pooled sign is negative and fee drag
+fell to only 0.050 R/trade as predicted — the fee-relief hypothesis is
+confirmed mechanically, yet gross expectancy stayed ~zero (-0.007 expR).
+Wider stops dilute fees but do not create gross edge. 1h is not a path
+to profitability for this detector either.
+
+**Verdict update: no timeframe (5m/15m/1h) produces positive net
+expectancy. Timeframe is not the missing variable.**
