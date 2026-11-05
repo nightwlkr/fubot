@@ -26,6 +26,7 @@ from backend.indicators.volume_profile import get_volume_confirmed_filter
 from backend.indicators.regime import analyze_market_regime, should_trade_regime
 from backend.services.signal_service import OB_START_IDX, detect_obfvg_candidates
 from backend.core.cost_model import LIVE as COST_MODEL
+from backend.core.cost_model import CostModel
 from backend.backtest_data import last_closed_before
 from backend.backtest_data import align_window, bars_expected, fetch_klines, window_for_days
 
@@ -67,26 +68,29 @@ def fee_in_r(entry: float, risk_dist: float) -> float:
 DEFAULT_SIGNAL_MAX_AGE_MIN = 60
 
 
-def fill_at_midpoint(series: list[dict], signal_idx: int,
-                     zone_lo: float, zone_hi: float,
-                     max_age_ms: int, *, direction: Optional[str] = None,
-                     penetration_bps: float = 0.0) -> Optional[tuple[int, float]]:
-    """First bar at/after `signal_idx` whose range touches the zone midpoint.
+def _fill_at_limit_price(series: list[dict], signal_idx: int,
+                         limit_price: float, max_age_ms: int, *,
+                         direction: Optional[str],
+                         penetration_bps: float) -> Optional[tuple[int, float]]:
+    """Shared scan behind `fill_at_midpoint` and `fill_at_edge`.
 
-    Returns `(bar_index, fill_price)` or None. The fill price is the MIDPOINT,
-    not the bar's open — that is what a resting LIMIT at the midpoint gets.
-    Scanning starts at `signal_idx + 1`: the signal bar is already closed when
-    the signal exists, so filling on it would be lookahead.
+    Returns `(bar_index, limit_price)` for the first bar at/after
+    `signal_idx` whose range reaches `limit_price`, or None. The fill price
+    is always the LIMIT price — that is what a resting order gets, never the
+    bar's better extreme. Scanning starts at `signal_idx + 1`: the signal bar
+    is already closed when the signal exists, so filling on it would be
+    lookahead.
 
-    `series` is the signal's OWN interval (1h, 5m or 15m) — not necessarily 5m.
-    The expiry deadline is measured from the signal bar's CLOSE, matching live:
-    `evaluate_signal` only learns the signal once its bar has closed, and
-    `signal_max_age_minutes` counts from there. Measuring from `open_time`
-    instead grants up to a full extra bar of life that live never had.
+    `series` is the signal's OWN interval (1h, 5m or 15m) — not necessarily
+    5m. The expiry deadline is measured from the signal bar's CLOSE, matching
+    live: `evaluate_signal` only learns the signal once its bar has closed,
+    and `signal_max_age_minutes` counts from there. Measuring from
+    `open_time` instead grants up to a full extra bar of life that live
+    never had.
 
-    `penetration_bps=0` preserves the touch-fill baseline. A positive value
-    requires a directional trade-through, reducing optimistic fills caused by
-    queue position that OHLC candles cannot reveal.
+    `penetration_bps=0` is a touch fill. A positive value requires a
+    directional trade-through by that many basis points, reducing optimistic
+    fills caused by queue position that OHLC candles cannot reveal.
     """
     try:
         penetration_bps = float(penetration_bps)
@@ -98,7 +102,6 @@ def fill_at_midpoint(series: list[dict], signal_idx: int,
     if penetration_bps > 0 and direction not in ("LONG", "SHORT"):
         return None
 
-    midpoint = (zone_lo + zone_hi) / 2.0
     if not 0 <= signal_idx < len(series):
         return None
     signal_close = series[signal_idx].get("close_time")
@@ -110,17 +113,53 @@ def fill_at_midpoint(series: list[dict], signal_idx: int,
         if c["open_time"] > deadline:
             return None
         if penetration_bps == 0:
-            reached = c["low"] <= midpoint <= c["high"]
+            reached = c["low"] <= limit_price <= c["high"]
         elif direction == "LONG":
             # A buy limit that is merely touched may still be behind the queue.
-            # Require price to trade through the midpoint by the configured
+            # Require price to trade through the limit by the configured
             # sensitivity; keep the fill price at the limit, not the better low.
-            reached = c["low"] <= midpoint * (1.0 - penetration_bps / 10_000.0)
+            reached = c["low"] <= limit_price * (1.0 - penetration_bps / 10_000.0)
         else:
-            reached = c["high"] >= midpoint * (1.0 + penetration_bps / 10_000.0)
+            reached = c["high"] >= limit_price * (1.0 + penetration_bps / 10_000.0)
         if reached:
-            return i, midpoint
+            return i, limit_price
     return None
+
+
+def fill_at_midpoint(series: list[dict], signal_idx: int,
+                     zone_lo: float, zone_hi: float,
+                     max_age_ms: int, *, direction: Optional[str] = None,
+                     penetration_bps: float = 0.0) -> Optional[tuple[int, float]]:
+    """First bar at/after `signal_idx` whose range touches the zone midpoint.
+
+    This is the taker-baseline fill: live places a GTC LIMIT at the zone
+    midpoint, so a touch fills (as a taker when marketable). See
+    `_fill_at_limit_price` for the scan semantics.
+    """
+    return _fill_at_limit_price(
+        series, signal_idx, (zone_lo + zone_hi) / 2.0, max_age_ms,
+        direction=direction, penetration_bps=penetration_bps)
+
+
+def fill_at_edge(series: list[dict], signal_idx: int,
+                 edge_price: float, max_age_ms: int, *,
+                 direction: str,
+                 penetration_bps: float = 0.0) -> Optional[tuple[int, float]]:
+    """Maker-edge fill: a GTX post-only LIMIT resting AT the zone edge.
+
+    `edge_price` is the side-appropriate zone boundary the caller chose
+    (BUY -> zone_min, SELL -> zone_max). The order only fills if a subsequent
+    bar's range trades THROUGH that edge by `penetration_bps` (0 = touch),
+    because a post-only order resting at the far edge is filled by incoming
+    flow rather than by a marketable cross — the exact scenario the live
+    GTX-at-edge experiment measures. Unfilled within the signal's expiry
+    window returns None and the caller counts a `no_maker_fill` skip.
+
+    The fill price is the edge itself, never the bar's better extreme.
+    """
+    return _fill_at_limit_price(
+        series, signal_idx, edge_price, max_age_ms,
+        direction=direction, penetration_bps=penetration_bps)
 
 
 def rr_at_fill(sl: float, tp: float, direction: str,
@@ -173,6 +212,11 @@ class BacktestTrade:
     # so expectancy was GROSS and a strategy that only loses money after the
     # 0.07% round trip read as an edge.
     net_r: float = 0.0
+    # Per-trade cost model. Defaults to None -> LIVE (taker+taker); the
+    # maker-edge entry mode sets CostModel.for_fill_mode("hybrid") so the
+    # cheaper maker entry fee is charged only where the fill model says the
+    # entry actually rested.
+    cost_model: Optional[CostModel] = None
 
     @property
     def open(self) -> bool:
@@ -181,7 +225,8 @@ class BacktestTrade:
     def finalise(self) -> None:
         """Compute net R once the exit is known."""
         risk = getattr(self, "_risk_dist", abs(self.entry - self.stop))
-        self.net_r = self.pnl_r - fee_in_r(self.entry, risk)
+        model = self.cost_model or COST_MODEL
+        self.net_r = self.pnl_r - model.round_trip_in_r(self.entry, risk)
 
 
 @dataclass
@@ -248,7 +293,7 @@ class BacktestResult:
             "expectancy_r": round(self.expectancy_r, 3),
             "net_r": round(self.total_net_r, 2),
             "expectancy_net_r": round(self.expectancy_net_r, 3),
-            "fee_round_trip": FEE_ROUND_TRIP,
+            "fee_round_trip": getattr(self, "cost_model", COST_MODEL).round_trip,
             "trust": "net_r is the number to trust; total_r is gross of costs",
             "trades_per_day": round(self.trades_per_day, 1),
             "skipped": self.skipped,
@@ -289,6 +334,17 @@ class Backtester:
             self.settings.get("signal_max_age_minutes", DEFAULT_SIGNAL_MAX_AGE_MIN)) * 60_000
         self.entry_fill_penetration_bps = float(
             self.settings.get("backtest_entry_penetration_bps", 0.0))
+        # Entry fill model. "midpoint" (default) mirrors live: a GTC LIMIT at
+        # the zone midpoint charged taker+taker. "maker_edge" models the
+        # GTX post-only experiment: a resting order at the zone EDGE that only
+        # fills on a trade-through and is charged hybrid (maker entry, taker
+        # exit) via cost_model. Unknown values fail loudly rather than
+        # silently measuring the wrong fill path.
+        self.entry_mode = str(self.settings.get("backtest_entry_mode", "midpoint")).lower()
+        if self.entry_mode not in ("midpoint", "maker_edge"):
+            raise ValueError(
+                f"unknown backtest_entry_mode {self.entry_mode!r}; "
+                "expected 'midpoint' or 'maker_edge'")
         # Strategy toggles, matching the live setting names so the same settings
         # dict drives both (see `_detect_candidates` for why these matter).
         self.fvg_enabled = bool(self.settings.get("strategy_fvg_enabled", True))
@@ -614,13 +670,16 @@ class Backtester:
             so the still-forming 1h bar is excluded from the detectors AND from
             the bias the filters read (they share one truncated view);
           - a fill lands strictly AFTER the signal bar, on the signal's own
-            interval, at the zone midpoint;
+            interval — at the zone midpoint by default, or at the zone edge
+            under `backtest_entry_mode="maker_edge"`;
           - the exit scan starts strictly after the fill bar, on that same
             interval.
 
         See `_resolve_exit` for what this deliberately does NOT model.
         """
         result = BacktestResult(symbol=symbol, candles=len(k1h))
+        result.cost_model = (CostModel.for_fill_mode("hybrid")
+                             if self.entry_mode == "maker_edge" else COST_MODEL)
         if max_open != 1:
             logger.warning("Backtester supports one open position; max_open=%s ignored", max_open)
         busy_until_ms = -1
@@ -649,29 +708,46 @@ class Backtester:
                 sl = e["stop_loss"]
                 tp = e["take_profit"]
                 zone_lo, zone_hi = zone
+                maker_edge = self.entry_mode == "maker_edge"
                 # Live gates the PRE-fill chain on the zone MIDPOINT, because
                 # that is the price the LIMIT will actually rest at. The
                 # detector's point estimate (`e["entry_price"]`) is a different
                 # number — 3CANDLE's is c1.high while the zone is
                 # c1.low..c1.high — so filtering on it gated on a price the
-                # order would never be at.
-                entry = (zone_lo + zone_hi) / 2.0
+                # order would never be at. In maker_edge mode the order rests
+                # at the zone EDGE instead, so the gate uses that price.
+                if maker_edge:
+                    # BUY rests at the zone's lower edge, SELL at the upper.
+                    gate_price = zone_lo if direction == "LONG" else zone_hi
+                else:
+                    gate_price = (zone_lo + zone_hi) / 2.0
+                entry = gate_price
                 vol_window = vol_src[-15:-5] if len(vol_src) > 15 else vol_src
                 if not self._passes_filters(direction, e["rr_ratio"], entry, sl,
                                             bias, vol_window, result.skipped, regime=regime):
                     continue
                 # Live fill semantics: a LIMIT resting at the zone midpoint on
                 # the signal's OWN interval, not the next 1h open. Filling on the
-                # wrong interval was a 12x time-scale mismatch.
+                # wrong interval was a 12x time-scale mismatch. maker_edge
+                # instead rests a post-only order at the zone edge and counts
+                # expiry as `no_maker_fill`.
                 tf_candles = {"1h": k1h, "5m": k5m, "15m": k15m}[tf]
                 sig_idx = signal_idx
-                filled = fill_at_midpoint(
-                    tf_candles, sig_idx, zone_lo, zone_hi, self.signal_max_age_ms,
-                    direction=direction,
-                    penetration_bps=self.entry_fill_penetration_bps,
-                )
+                if maker_edge:
+                    filled = fill_at_edge(
+                        tf_candles, sig_idx, gate_price, self.signal_max_age_ms,
+                        direction=direction,
+                        penetration_bps=self.entry_fill_penetration_bps,
+                    )
+                else:
+                    filled = fill_at_midpoint(
+                        tf_candles, sig_idx, zone_lo, zone_hi, self.signal_max_age_ms,
+                        direction=direction,
+                        penetration_bps=self.entry_fill_penetration_bps,
+                    )
                 if filled is None:
-                    result.skipped["no_fill"] = result.skipped.get("no_fill", 0) + 1
+                    skip_key = "no_maker_fill" if maker_edge else "no_fill"
+                    result.skipped[skip_key] = result.skipped.get(skip_key, 0) + 1
                     continue
                 fill_idx, fill = filled
                 if rr_at_fill(sl, tp, direction, fill, self.rr_min) < self.rr_min:
@@ -682,6 +758,10 @@ class Backtester:
                     entry=fill, stop=sl, take_profit=tp, entry_idx=fill_idx,
                     timeframe=tf,
                     signal_open_time=tf_candles[sig_idx]["open_time"])
+                if maker_edge:
+                    # Post-only entry: maker fee on the entry side, taker on
+                    # the exit (stops/targets remain marketable algo orders).
+                    trade.cost_model = CostModel.for_fill_mode("hybrid")
                 # pnl_r uses the frozen entry-to-stop distance (mirrors
                 # positions.initial_risk_distance)
                 risk_dist = abs(fill - sl)

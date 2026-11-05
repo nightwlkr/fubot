@@ -611,6 +611,116 @@ class TestFillModel:
         ) == (2, pytest.approx(100.0))
 
 
+class TestMakerEdgeFillModel:
+    """`backtest_entry_mode="maker_edge"` models the GTX post-only experiment:
+    the order rests at the zone EDGE (BUY -> zone_min, SELL -> zone_max),
+    fills only on a trade-through, expires into `no_maker_fill`, and is
+    charged the hybrid cost model (maker entry, taker exit)."""
+
+    def test_long_edge_fills_at_zone_min_on_a_touch(self):
+        from backend.backtest import fill_at_edge
+        end = 1_700_000_000_000
+        bars = synth(end - 60 * MS_5M, MS_5M, 12, close=100.0)
+        for c in bars:
+            c["low"], c["high"] = 105.0, 106.0   # parked above the zone
+        bars[3]["low"], bars[3]["high"] = 98.5, 105.0  # dips through 99.0
+        idx, price = fill_at_edge(
+            bars, 1, 99.0, 60 * MS_5M, direction="LONG")
+        assert idx == 3
+        assert price == pytest.approx(99.0), \
+            "a maker fill is the limit price, never the bar's better low"
+
+    def test_long_edge_requires_trade_through_when_penetration_set(self):
+        from backend.backtest import fill_at_edge
+        end = 1_700_000_000_000
+        bars = synth(end - 60 * MS_5M, MS_5M, 12, close=100.0)
+        for c in bars:
+            c["low"], c["high"] = 105.0, 106.0
+        # Bar 3 only TOUCHES 99.0 (low == edge): inside 1bp but no through.
+        bars[3]["low"], bars[3]["high"] = 99.0, 105.0
+        # 1bp below 99.0 is 98.9901; bar 5 trades through it.
+        bars[5]["low"], bars[5]["high"] = 98.98, 105.0
+        assert fill_at_edge(
+            bars, 1, 99.0, 60 * MS_5M,
+            direction="LONG", penetration_bps=1.0,
+        ) == (5, pytest.approx(99.0))
+
+    def test_short_edge_fills_at_zone_max_on_a_touch(self):
+        from backend.backtest import fill_at_edge
+        end = 1_700_000_000_000
+        bars = synth(end - 60 * MS_5M, MS_5M, 12, close=100.0)
+        for c in bars:
+            c["low"], c["high"] = 90.0, 91.0    # parked below the zone
+        bars[4]["low"], bars[4]["high"] = 90.0, 101.5  # rallies through 101.0
+        idx, price = fill_at_edge(
+            bars, 1, 101.0, 60 * MS_5M, direction="SHORT")
+        assert idx == 4
+        assert price == pytest.approx(101.0)
+
+    def test_edge_fill_expires_into_none_within_the_signal_window(self):
+        """A post-only order that is never traded through inside
+        `signal_max_age_minutes` does not fill — the caller counts
+        `no_maker_fill`, it does not fall back to a taker cross."""
+        from backend.backtest import fill_at_edge
+        end = 1_700_000_000_000
+        bars = synth(end - 600 * MS_5M, MS_5M, 600, close=100.0)
+        for c in bars:
+            c["low"], c["high"] = 105.0, 106.0
+        bars[500]["low"], bars[500]["high"] = 98.0, 105.0  # reachable but stale
+        assert fill_at_edge(
+            bars, 1, 99.0, 2 * MS_5M, direction="LONG") is None
+        assert fill_at_edge(
+            bars, 1, 99.0, 600 * MS_5M, direction="LONG",
+        ) == (500, pytest.approx(99.0))
+
+    def test_maker_edge_run_counts_no_maker_fill_and_charges_hybrid(self):
+        """End-to-end through `run`: an unfilled edge order lands in
+        `skipped["no_maker_fill"]` (not `no_fill`), and a filled one carries
+        the hybrid cost model so `net_r` is charged maker-entry/taker-exit."""
+        import backend.backtest as btmod
+        from backend.backtest import Backtester
+        from backend.core.cost_model import CostModel
+        k1h, k5m, k15m = _mtf_series()
+        bt = Backtester(settings={"rr_min": 3.0, "trade_min_trend_strength": "WEAK",
+                                  "trade_neutral_markets": True,
+                                  "backtest_entry_mode": "maker_edge"})
+        candidate = ("3CANDLE", "LONG",
+                     {"stop_loss": 97.0, "take_profit": 112.0, "rr_ratio": 4.0},
+                     k5m, "5m", (99.0, 101.0), 0)
+        bt._detect_candidates_at = lambda *args: ([candidate], object(), object())
+        bt._passes_filters = lambda *args, **kwargs: True
+
+        # Phase 1: the edge is never reached -> no_maker_fill, no trade.
+        monkey = btmod.fill_at_edge
+        btmod.fill_at_edge = lambda *a, **kw: None
+        try:
+            res = bt.run("X", k1h, k5m, k15m)
+            assert res.trades == []
+            assert res.skipped.get("no_maker_fill", 0) >= 1
+            assert "no_fill" not in res.skipped
+        finally:
+            btmod.fill_at_edge = monkey
+
+        # Phase 2: edge fills -> hybrid cost, cheaper than taker round trip.
+        btmod.fill_at_edge = lambda series, signal_idx, edge, max_age, **kw: \
+            (signal_idx + 1, edge)
+        try:
+            res = bt.run("X", k1h, k5m, k15m)
+        finally:
+            btmod.fill_at_edge = monkey
+        assert res.trades, "fixture produced no maker-edge trades"
+        hybrid = CostModel.for_fill_mode("hybrid")
+        assert res.cost_model.round_trip == pytest.approx(hybrid.round_trip)
+        assert all(t.cost_model is not None for t in res.trades)
+        # Sanity: hybrid round trip is cheaper than the taker LIVE model.
+        assert hybrid.round_trip < btmod.COST_MODEL.round_trip
+
+    def test_unknown_entry_mode_fails_loudly(self):
+        from backend.backtest import Backtester
+        with pytest.raises(ValueError, match="backtest_entry_mode"):
+            Backtester(settings={"backtest_entry_mode": "market"})
+
+
 class TestGapStops:
     def test_stop_is_checked_on_the_fill_candle_but_target_is_not_credited(self):
         """When OHLC cannot order entry and exit touches, count the adverse

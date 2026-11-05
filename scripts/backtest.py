@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.backtest import run_backtest  # noqa: E402
 from backend.backtest import FEE_ROUND_TRIP  # noqa: E402
+from backend.core.cost_model import CostModel  # noqa: E402
 
 
 async def main() -> None:
@@ -32,9 +33,16 @@ async def main() -> None:
     ap.add_argument("--rr-min", type=float, default=3.0)
     ap.add_argument(
         "--entry-penetration-bps", type=float, default=0.0,
-        help="require price to trade this many bps through the midpoint limit "
-             "before counting a fill (0 preserves touch-fill baseline)",
+        help="require price to trade this many bps through the resting limit "
+             "before counting a fill (0 preserves touch-fill baseline); applies "
+             "to both --entry-mode midpoint and maker_edge",
     )
+    ap.add_argument("--entry-mode", default="midpoint",
+                    choices=["midpoint", "maker_edge"],
+                    help="midpoint = live GTC limit at zone midpoint (taker+taker "
+                         "fees); maker_edge = GTX post-only at the zone edge, fills "
+                         "only on trade-through, hybrid maker-entry/taker-exit fees, "
+                         "unfilled signals counted as no_maker_fill")
     ap.add_argument("--risk-percent", type=float, default=1.0)
     ap.add_argument("--atr-stop-mult", type=float, default=None, dest="atr_stop_mult",
                     help="override the 3CANDLE ATR stop floor (e.g. 1.5 for the "
@@ -74,6 +82,7 @@ async def main() -> None:
     settings = {
         "rr_min": args.rr_min,
         "backtest_entry_penetration_bps": args.entry_penetration_bps,
+        "backtest_entry_mode": args.entry_mode,
         "risk_percent": args.risk_percent,
         "backtest_balance": args.balance,
         # Default to PRODUCTION (routers/settings.py): trade_neutral_markets=True,
@@ -96,6 +105,7 @@ async def main() -> None:
     print(f"Backtest: {', '.join(symbols)} | {args.days}d | "
           f"rr_min={args.rr_min} neutral={args.neutral} strength={args.strength} "
           f"entry_penetration={args.entry_penetration_bps:g}bps "
+          f"entry_mode={args.entry_mode} "
           f"atr_stop_mult={args.atr_stop_mult} "
           f"fvg={args.fvg} 3candle={args.three_candle} choch={args.choch} "
           f"obfvg={args.obfvg} (max_age={args.obfvg_max_age_bars}); "
@@ -130,7 +140,10 @@ async def main() -> None:
     avg_exp_net = (total_net_r / total_closed) if total_closed else 0.0
     print(f"{'TOTAL':<10} {'':>4} {total_closed:>6} {'':>6} {total_r:>8.2f} "
           f"{total_net_r:>8.2f} {avg_exp:>7.3f} {avg_exp_net:>8.3f}")
-    print(f"\nRound-trip cost charged: {FEE_ROUND_TRIP * 100:.3f}% of notional. "
+    fee_rt = (CostModel.for_fill_mode("hybrid").round_trip
+              if args.entry_mode == "maker_edge" else FEE_ROUND_TRIP)
+    print(f"\nRound-trip cost charged: {fee_rt * 100:.3f}% of notional "
+          f"({'hybrid maker-entry/taker-exit' if args.entry_mode == 'maker_edge' else 'taker/taker'}). "
           "totalR/expR are GROSS — trust netR/expNetR.")
     print("Expectancy > 0 = positive edge. Compare settings to find the best config.")
 
