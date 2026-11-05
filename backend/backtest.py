@@ -18,6 +18,7 @@ from typing import Optional
 
 from backend.indicators.atr import calculate_atr
 from backend.indicators.fvg import detect_fvg, evaluate_fvg_entry
+from backend.indicators import three_candle as three_candle_module
 from backend.indicators.three_candle import detect_three_candles, evaluate_three_candle_entry
 from backend.indicators.choch import detect_choch
 from backend.indicators.trend import analyze_trend_bias
@@ -279,6 +280,11 @@ class Backtester:
         self.volume_filter_enabled = bool(self.settings.get("volume_filter_enabled", False))
         self.regime_filter_enabled = bool(self.settings.get("regime_filter_enabled", True))
         self.min_risk_pct = float(self.settings.get("min_risk_pct", 0.005))
+        # 3CANDLE's ATR stop floor is a module constant in production; the
+        # harness reads `backtest_atr_stop_mult` so a deployed-vs-corrected
+        # A/B (e.g. 1.5 vs 2.5) needs no code edit.
+        self.atr_stop_mult = float(
+            self.settings.get("backtest_atr_stop_mult", three_candle_module.atr_stop_mult))
         self.signal_max_age_ms = int(
             self.settings.get("signal_max_age_minutes", DEFAULT_SIGNAL_MAX_AGE_MIN)) * 60_000
         self.entry_fill_penetration_bps = float(
@@ -376,7 +382,8 @@ class Backtester:
                                   k1h_u, "1h", (f.zone_min, f.zone_max), k1h_idx))
         if self.three_candle_enabled:
             for p in detect_three_candles(k5m_u[-3:], "", "5m"):
-                e = evaluate_three_candle_entry(p, atr, self.rr_min)
+                e = evaluate_three_candle_entry(p, atr, self.rr_min,
+                                                atr_stop_mult=self.atr_stop_mult)
                 if e["is_valid"]:
                     cands.append(("3CANDLE", "LONG" if p.direction == "BULLISH" else "SHORT", e,
                                   k5m_u, "5m", (p.entry_zone_min, p.entry_zone_max), k5m_idx))

@@ -393,5 +393,7 @@ After each task completion:
 - Task 3 DONE (production, hot-reloaded): `rr_min` 4.0→3.0 via `PUT /api/settings/trading`.
 - Task 4 DONE (production, hot-reloaded): `trade_min_trend_strength` STRONG→MODERATE via `PUT /api/settings/trading`.
 - Housekeeping: prod `atr_stop_mult` setting updated 1.5→2.5 for UI consistency (dead config for live 3CANDLE — module constant rules).
-**Next Action**: Deploy `da597ca`+ to production so Tasks 1-2 take effect; then Phase 2 (Task 9 paginated backtest is the blocker)
+- Task 9 DONE (already implemented): `backend/backtest_data.py` provides paginated, interval-aware fetching pinned to one `[start, end)` window; `tests/backend/test_backtest_trust.py` pins pagination (45d → 12,960 5m bars), window alignment, and no-lookahead. Verified 2026-11-05.
+- Task 10/11 IN PROGRESS (2026-11-05): 45-day baseline (deployed: atr_stop_mult=1.5, min_risk_pct=0.0005) vs corrected (atr_stop_mult=2.5, min_risk_pct=0.005) backtests running on the 7 production-traded symbols; results → `analysis/backtest-45d-2026-11-05.md`. Harness gained `backtest_atr_stop_mult` setting + `--atr-stop-mult` flag to A/B the module constant without editing it.
+**Next Action**: Deploy `da597ca`+ to production so Tasks 1-2 take effect; record Task 10/11 results in DECISION.md once the 45d runs finish
 **Review Date**: After Phase 1 completion

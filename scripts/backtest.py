@@ -36,11 +36,15 @@ async def main() -> None:
              "before counting a fill (0 preserves touch-fill baseline)",
     )
     ap.add_argument("--risk-percent", type=float, default=1.0)
+    ap.add_argument("--atr-stop-mult", type=float, default=None, dest="atr_stop_mult",
+                    help="override the 3CANDLE ATR stop floor (e.g. 1.5 for the "
+                         "deployed baseline, 2.5 for the corrected code). "
+                         "Unset uses the module constant.")
     ap.add_argument("--min-risk-pct", type=float, default=None, dest="min_risk_pct",
                     help="floor on |entry-stop| as a fraction of entry (e.g. 0.005 = 0.5%%). "
                          "Costs are a fraction of notional while R divides by stop distance, so "
                          "this is the single highest-leverage risk knob: widening the stop "
-                         "divides the cost in R. Unset uses the code default (0.0005).")
+                         "divides the cost in R. Unset uses the code default (0.005).")
     ap.add_argument("--balance", type=float, default=10000.0)
     ap.add_argument("--neutral", dest="neutral", action="store_true", default=None,
                     help="allow NEUTRAL-bias trades (production default: True)")
@@ -85,11 +89,14 @@ async def main() -> None:
         **({"strategy_obfvg_enabled": args.obfvg} if args.obfvg is not None else {}),
         "strategy_obfvg_max_age_bars": args.obfvg_max_age_bars,
         **({"min_risk_pct": args.min_risk_pct} if args.min_risk_pct is not None else {}),
+        **({"backtest_atr_stop_mult": args.atr_stop_mult}
+           if args.atr_stop_mult is not None else {}),
     }
 
     print(f"Backtest: {', '.join(symbols)} | {args.days}d | "
           f"rr_min={args.rr_min} neutral={args.neutral} strength={args.strength} "
           f"entry_penetration={args.entry_penetration_bps:g}bps "
+          f"atr_stop_mult={args.atr_stop_mult} "
           f"fvg={args.fvg} 3candle={args.three_candle} choch={args.choch} "
           f"obfvg={args.obfvg} (max_age={args.obfvg_max_age_bars}); "
           "stop gaps fill at the adverse bar open\n")

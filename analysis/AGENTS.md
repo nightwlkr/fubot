@@ -40,3 +40,4 @@ Artifacts are checked by the Lead for citation/sample-size compliance. The decis
 - `panel/` — per-cycle panel artifacts and the Lead decision document; owned by this doc.
 - `REVIEW_2026-10-17.md` — full-codebase review (backend + frontend). Read before changing the position lifecycle, the settings API, or the WS/tick path.
 - `production-trade-analysis-2026-11-05.md` — Production trade forensic analysis (35 live trades, Oct 20 - Nov 4, 2026). Identifies fee drag (26.61R) as primary loss driver, inadequate stop sizing (49% of trades <0.5%), and zero TP hits. Contains immediate/medium/long-term recommendations for strategy, backtest, execution, research, and devops agents.
+- `backtest-45d-2026-11-05.md` — 45-day paginated backtest (Tasks 10/11): baseline deployed config vs corrected stop-floor config on the 7 production-traded symbols. Corrected config cut trades 36% but net expectancy worsened (-0.045 → -0.089 expNetR); verdict and caveats inside.

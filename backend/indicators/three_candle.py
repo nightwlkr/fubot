@@ -118,7 +118,8 @@ def detect_three_candles(candles: list[dict], symbol: str = "", interval: str = 
     return patterns
 
 
-def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float = 4.0) -> dict:
+def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float = 4.0,
+                                atr_stop_mult: float | None = None) -> dict:
     """Calculate entry, SL, TP, R:R for a 3-Candle pattern.
 
     The structural stop is the sweep wick (c2.low for bullish, c2.high for
@@ -127,10 +128,16 @@ def evaluate_three_candle_entry(pattern: ThreeCandle, atr: float, rr_min: float 
     stops → immediate -1R losses). Widen the stop to at least `atr_stop_mult`
     × ATR(14) from entry so it sits beyond normal volatility, while staying
     on the correct structural side.
+
+    `atr_stop_mult=None` uses the module constant — the live path relies on
+    that. The backtest harness passes its `backtest_atr_stop_mult` setting so
+    deployed-vs-corrected stop floors can be A/B'd without editing the
+    constant.
     """
+    mult = atr_stop_mult if atr_stop_mult is not None else globals()["atr_stop_mult"]
     entry = pattern.entry_price
     structural_sl = pattern.stop_loss
-    min_stop = max(atr, 0.0) * atr_stop_mult
+    min_stop = max(atr, 0.0) * mult
 
     if pattern.direction == "BULLISH":
         # stop must be BELOW entry; structural stop is c2.low. If it's closer
