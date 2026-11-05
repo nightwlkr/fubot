@@ -12,7 +12,8 @@ class SignalResponse(BaseModel):
     entry_zone_min: float
     entry_zone_max: float
     stop_loss: float
-    take_profit: float
+    # NULL for no-fixed-target strategies (DONCHIAN trails its stop instead).
+    take_profit: float | None
     rr_ratio: float
     volume_confirmed: bool
     status: str

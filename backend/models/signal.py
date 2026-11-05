@@ -14,7 +14,10 @@ class Signal(Base):
     entry_zone_min: Mapped[float] = mapped_column(Numeric, nullable=False)
     entry_zone_max: Mapped[float] = mapped_column(Numeric, nullable=False)
     stop_loss: Mapped[float] = mapped_column(Numeric, nullable=False)
-    take_profit: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # NULL for strategies with no fixed target (DONCHIAN exits on a ratcheting
+    # trailing stop) — same "value does not exist" precedent as
+    # trades.pnl_r (migration 010). Consumers must render NULL, not 0.
+    take_profit: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     rr_ratio: Mapped[float] = mapped_column(Numeric, nullable=False)
     volume_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(20), default="PENDING")

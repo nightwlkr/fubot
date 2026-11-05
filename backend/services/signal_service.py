@@ -28,6 +28,11 @@ from backend.indicators.choch import detect_choch
 from backend.indicators.volume_profile import get_volume_confirmed_filter
 from backend.indicators.orb import detect_orb
 from backend.indicators.vwap import detect_vwap_reversion
+from backend.indicators.donchian import (
+    DEFAULT_SYMBOLS as DONCHIAN_DEFAULT_SYMBOLS,
+    closed_bars as donchian_closed_bars,
+    detect_donchian_breakout,
+)
 from backend.models.signal import Signal as SignalModel
 
 logger = logging.getLogger(__name__)
@@ -120,7 +125,9 @@ class Signal:
     entry_zone_min: Decimal
     entry_zone_max: Decimal
     stop_loss: Decimal
-    take_profit: Decimal
+    # None for no-fixed-target strategies (DONCHIAN trails its stop instead);
+    # the signals.take_profit column is nullable for exactly this case.
+    take_profit: Decimal | None
     rr_ratio: Decimal
     volume_confirmed: bool
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -156,6 +163,13 @@ class SignalService:
         # for that symbol/strategy forever.
         await self._expire_stale_pending(symbol)
 
+        # DONCHIAN (paper-only, 1d): detect BEFORE the intraday pipeline's
+        # early returns — the validated backtest spec used no funding or
+        # regime filter, so a funding-rate trip or a candle outage must not
+        # silently skip a daily breakout. Long-only per spec (shorts were
+        # negative in all three backtest windows).
+        donchian_pending = await self._donchian_candidates(symbol)
+
         # 1. Fetch all timeframes in parallel
         try:
             k1h, k5m, k15m = await asyncio.gather(
@@ -165,10 +179,10 @@ class SignalService:
             )
         except Exception as exc:
             logger.warning("[%s] Candle fetch failed: %s", symbol, exc)
-            return []
+            return await self._donchian_only_result(symbol, donchian_pending)
         if not k1h or not k5m or not k15m:
             logger.debug("[%s] Insufficient candle data", symbol)
-            return []
+            return await self._donchian_only_result(symbol, donchian_pending)
 
         # 2. Context: ATR(14) on 1h, trend bias on 1h closes
         atr_1h = calculate_atr(k1h, period=14) or 0.0
@@ -194,7 +208,7 @@ class SignalService:
         funding_skip_threshold = float(self.settings.get("funding_skip_threshold", -0.0001))
         if funding_filter_enabled and funding_rate < funding_skip_threshold:
             logger.info("[%s] Skipping: extreme negative funding rate %.6f", symbol, funding_rate)
-            return []
+            return await self._donchian_only_result(symbol, donchian_pending)
 
         # 3. Detect patterns — only on the RECENT window to filter out stale
         # patterns. The backtester looks at the last few bars; live used to
@@ -266,7 +280,7 @@ class SignalService:
                 candidates.append(("VWAP", direction, sig.entry_price, sig.entry_price,
                                    sig.stop_loss, sig.take_profit, sig.rr_ratio))
 
-        if not candidates:
+        if not candidates and not donchian_pending:
             return []
 
         # 4/5. Apply filters and persist (deduped, one fresh session per scan)
@@ -347,6 +361,13 @@ class SignalService:
             signals.append(signal)
             to_persist.append((signal, volume_confirmed))
 
+        # DONCHIAN candidates bypass the filter chain entirely — the validated
+        # spec used no trend/regime/volume/R:R filters — but they share the
+        # same PENDING dedup and persistence path as every other strategy.
+        for s in donchian_pending:
+            signals.append(s)
+            to_persist.append((s, False))
+
         await self._persist_signals(symbol, to_persist)
 
         logger.info("[%s] scan: %d candidates (%d pending, %d skipped)",
@@ -354,6 +375,77 @@ class SignalService:
                     sum(1 for s in signals if s.status == "PENDING"),
                     sum(1 for s in signals if s.status == "SKIPPED"))
         return signals
+
+    async def _donchian_candidates(self, symbol: str) -> list[Signal]:
+        """DONCHIAN daily breakout candidates for `symbol` — PAPER MODE ONLY.
+
+        Triple gate, all required:
+          1. `strategy_donchian_enabled` setting is true (default False —
+             opt-in, like the other prototype toggles);
+          2. `bot_mode == "paper"` — hard gate, the validated spec was only
+             measured on simulated fills and has NO live order path;
+          3. `symbol` is in the Donchian universe (`donchian_symbols`
+             setting, comma-separated; defaults to the 15 backtest perps).
+
+        The engine only calls scan_symbol for enabled symbols, so the
+        symbols-table enabled flag still applies on top of the universe.
+        """
+        if not bool(self.settings.get("strategy_donchian_enabled", False)):
+            return []
+        if str(self.settings.get("bot_mode", "")).lower() != "paper":
+            return []
+        if symbol.upper() not in self._donchian_universe():
+            return []
+        try:
+            raw = await self.binance.get_klines(symbol, "1d", 80)
+        except Exception as exc:
+            logger.debug("[%s] DONCHIAN 1d kline fetch failed: %s", symbol, exc)
+            return []
+        hit = detect_donchian_breakout(donchian_closed_bars(raw))
+        if hit is None or hit["direction"] != "LONG":
+            return []
+
+        entry = float(hit["entry_price"])
+        stop = float(hit["stop_loss"])
+        # Min-risk floor, "whichever is wider" (mirrors the ATR floor in
+        # evaluate_three_candle_entry): a stop closer than min_risk_pct of
+        # entry is widened DOWN to the floor so degenerate tight stops cannot
+        # produce huge |R| moves. Widening here means the persisted signal
+        # and the position carry the same floored stop.
+        min_risk_pct = float(self.settings.get("min_risk_pct", 0.005))
+        floor_stop = entry * (1.0 - min_risk_pct)
+        if floor_stop < stop:
+            stop = floor_stop
+
+        return [Signal(
+            symbol=symbol,
+            strategy_type="DONCHIAN",
+            direction="LONG",
+            entry_zone_min=Decimal(str(entry)),
+            entry_zone_max=Decimal(str(entry)),
+            stop_loss=Decimal(str(stop)),
+            take_profit=None,   # no fixed target — trailing stop is the exit
+            rr_ratio=Decimal("0"),
+            volume_confirmed=False,
+            status="PENDING",
+        )]
+
+    def _donchian_universe(self) -> set[str]:
+        """Donchian symbol universe: `donchian_symbols` setting (comma-
+        separated) or the 15 backtest perps when unset/empty."""
+        raw = str(self.settings.get("donchian_symbols", "") or "")
+        if raw.strip():
+            return {s.strip().upper() for s in raw.split(",") if s.strip()}
+        return set(DONCHIAN_DEFAULT_SYMBOLS)
+
+    async def _donchian_only_result(self, symbol: str,
+                                    pending: list[Signal]) -> list[Signal]:
+        """Early-return path for the intraday pipeline's aborts: persist any
+        DONCHIAN candidates detected before the abort and return them."""
+        if not pending:
+            return []
+        await self._persist_signals(symbol, [(s, False) for s in pending])
+        return pending
 
     async def _persist_signals(self, symbol: str, to_persist: list[tuple[Signal, bool]]) -> None:
         """Persist actionable signals and sample each rejected setup once per expiry window.

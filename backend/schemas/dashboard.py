@@ -167,6 +167,7 @@ class TradingSettings(BaseModel):
     strategy_choch_enabled: bool = True
     strategy_obfvg_enabled: bool = True
     strategy_obfvg_max_age_bars: int = 2
+    strategy_donchian_enabled: bool = False
 
 
 # --- Order ---

@@ -6,7 +6,7 @@ export interface Signal {
   entry_zone_min: number
   entry_zone_max: number
   stop_loss: number
-  take_profit: number
+  take_profit: number | null
   rr_ratio: number
   volume_confirmed: boolean
   status: 'PENDING' | 'TRIGGERED' | 'EXPIRED' | 'SKIPPED'

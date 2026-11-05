@@ -58,6 +58,11 @@ class TradingSettingsResponse(BaseModel):
     # accumulate in a UTC trading day. Default 5.0R; raise to ride out volatile
     # weeks, lower to tighten the cap.
     weekly_drawdown_limit_r: float = 5.0
+    # DONCHIAN daily trend strategy — PAPER MODE ONLY (hard-gated in code;
+    # this flag cannot enable it in live). Off by default.
+    strategy_donchian_enabled: bool = False
+    # Comma-separated symbol universe override; empty = the 15 backtest perps.
+    donchian_symbols: str = ""
 
 
 class TradingSettingsUpdate(BaseModel):
@@ -116,6 +121,9 @@ class TradingSettingsUpdate(BaseModel):
     profit_lock_trail_r2: float | None = Field(default=None, ge=0.05, le=2.0)
     # Weekly drawdown guard limit in R
     weekly_drawdown_limit_r: float | None = Field(default=None, ge=1.0, le=20.0)
+    # DONCHIAN is paper-only by construction; the flag only gates paper scans.
+    strategy_donchian_enabled: bool | None = None
+    donchian_symbols: str | None = Field(default=None, max_length=500)
 
 
 class SymbolConfigResponse(BaseModel):

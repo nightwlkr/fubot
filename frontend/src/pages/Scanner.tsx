@@ -15,7 +15,8 @@ export interface Signal {
   entry_zone_min: number
   entry_zone_max: number
   stop_loss: number
-  take_profit: number
+  // NULL for no-fixed-target strategies (DONCHIAN trails its stop instead).
+  take_profit: number | null
   rr_ratio: number
   volume_confirmed: boolean
   status: 'PENDING' | 'TRIGGERED' | 'EXPIRED' | 'SKIPPED'
@@ -76,7 +77,9 @@ function SignalCard({ signal }: { signal: Signal }) {
         </div>
         <div>
           <p className="text-xs text-muted uppercase tracking-wide">Take Profit</p>
-          <p className="text-sm font-mono text-success font-medium mt-0.5">{signal.take_profit.toFixed(2)}</p>
+          <p className="text-sm font-mono text-success font-medium mt-0.5">
+            {signal.take_profit != null ? signal.take_profit.toFixed(2) : 'trail'}
+          </p>
         </div>
         <div>
           <p className="text-xs text-muted uppercase tracking-wide">R:R</p>

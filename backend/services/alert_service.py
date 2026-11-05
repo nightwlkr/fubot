@@ -54,9 +54,11 @@ class AlertService:
     # ---- Trading events ------------------------------------------------
 
     async def trade_executed(self, symbol: str, direction: str, entry: float,
-                             sl: float, tp: float, rr: float) -> None:
+                             sl: float, tp: float | None, rr: float) -> None:
+        # tp is None for no-fixed-target strategies (DONCHIAN trails its stop).
+        tp_txt = f"{tp:.4f}" if tp is not None else "trail"
         await self.signal(
-            f"🚀 Entry: {symbol} {direction} @ {entry:.4f} | SL {sl:.4f} | TP {tp:.4f} | R:R 1:{rr:.1f}",
+            f"🚀 Entry: {symbol} {direction} @ {entry:.4f} | SL {sl:.4f} | TP {tp_txt} | R:R 1:{rr:.1f}",
             level="INFO", symbol=symbol,
         )
 

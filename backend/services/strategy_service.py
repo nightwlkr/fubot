@@ -143,6 +143,17 @@ class StrategyService:
         if signal.status != "PENDING":
             return TradeDecision("SKIP", skip_reason=f"Signal is {signal.status}")
 
+        # DONCHIAN has its own decision path — no fixed TP/R:R (the exit is a
+        # ratcheting trailing stop managed by PositionManager) and a HARD
+        # paper-mode gate: the validated spec was only measured on simulated
+        # fills, so a DONCHIAN signal must never reach the live order path.
+        if signal.strategy_type == "DONCHIAN":
+            return await self._evaluate_donchian(
+                signal, paper_mode=paper_mode,
+                open_positions=open_positions,
+                correlation_guard=correlation_guard,
+            )
+
         # 0.5. Strategy toggle gate — skip if this strategy is disabled
         strategy_key = f"strategy_{signal.strategy_type.lower()}_enabled"
         if not bool(self.settings.get(strategy_key, True)):
@@ -554,6 +565,145 @@ class StrategyService:
 
     # ---- helpers ---------------------------------------------------------
 
+    async def _evaluate_donchian(
+        self,
+        signal,
+        paper_mode: bool,
+        open_positions: Optional[dict] = None,
+        correlation_guard=None,
+    ) -> TradeDecision:
+        """DONCHIAN decision path — PAPER MODE ONLY, long-only trend follower.
+
+        Reuses the same guards as the generic path (open-position, max
+        positions, correlation, signal age, price-deviation, stop-side,
+        sizing, notional cap) but skips everything R:R/target-shaped: there
+        is no take-profit — PositionManager ratchets `stop_loss` to the
+        trailing Donchian channel and the SL_HIT check performs the exit.
+        """
+        symbol = signal.symbol
+        self._mode = "paper" if paper_mode else "live"
+
+        # HARD GATE — checked before anything else, including the toggle.
+        # Even if a DONCHIAN signal row exists (e.g. mode flipped to live
+        # while one was PENDING), live mode must never execute it.
+        if not paper_mode:
+            signal.status = "SKIPPED"
+            await self._mark_signal(signal.db_id, "SKIPPED",
+                                    "DONCHIAN is paper-mode only")
+            return TradeDecision("SKIP",
+                                 skip_reason="DONCHIAN is paper-mode only")
+        if not bool(self.settings.get("strategy_donchian_enabled", False)):
+            return TradeDecision("SKIP", skip_reason="Strategy DONCHIAN disabled")
+
+        # 1. Open position on this symbol? (exchange AND paper positions in DB)
+        existing = (open_positions.get(symbol) if open_positions is not None
+                    else await self.order_svc.get_current_position(symbol))
+        if existing and existing.get("quantity", 0) > 0:
+            return TradeDecision("SKIP", skip_reason=f"Position already open on {symbol}")
+        if self.session_factory is not None and await self._has_open_db_position(symbol):
+            return TradeDecision("SKIP", skip_reason=f"Position already open on {symbol}")
+
+        # 2. Max simultaneous positions
+        max_positions = int(self.settings.get("max_positions", 3))
+        if self.session_factory is not None:
+            open_count = await self._count_open_positions()
+            if open_count >= max_positions:
+                return TradeDecision(
+                    "SKIP", skip_reason=f"Max positions ({max_positions}) already open")
+
+        # 2b. Correlation guard — same exposure rule as every other strategy
+        if correlation_guard is not None and open_positions is not None:
+            can_trade, reason = correlation_guard.check_correlation(
+                symbol, signal.direction, open_positions
+            )
+            if not can_trade:
+                return TradeDecision("SKIP", skip_reason=f"Correlation: {reason}")
+
+        # 3. Signal age (a daily breakout is only actionable while fresh)
+        max_age_min = float(self.settings.get("signal_max_age_minutes", 60))
+        created_at = signal.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age_min = (datetime.now(timezone.utc) - created_at).total_seconds() / 60
+        if age_min > max_age_min:
+            signal.status = "EXPIRED"
+            await self._mark_signal(signal.db_id, "EXPIRED")
+            return TradeDecision("SKIP", skip_reason=f"Signal older than {max_age_min:.0f} min")
+
+        # 4. Price deviation from the signal close (zone is a single price)
+        market_price = await self._current_price(symbol)
+        if market_price is None:
+            return TradeDecision("SKIP", skip_reason="Could not fetch current price")
+        if signal.direction == "LONG":
+            if market_price > float(signal.entry_zone_max) * 1.01:
+                return TradeDecision("SKIP", skip_reason="Price moved too far above zone")
+            if market_price < float(signal.entry_zone_min) * 0.99:
+                return TradeDecision("SKIP", skip_reason="Price already below zone")
+        else:
+            if market_price < float(signal.entry_zone_min) * 0.99:
+                return TradeDecision("SKIP", skip_reason="Price moved too far below zone")
+            if market_price > float(signal.entry_zone_max) * 1.01:
+                return TradeDecision("SKIP", skip_reason="Price already above zone")
+
+        # 4b. The stop must still be on the correct side of the market.
+        stop_px = float(signal.stop_loss)
+        violation = self._side_violation(signal.direction, stop_px, None, market_price)
+        if violation:
+            signal.status = "SKIPPED"
+            await self._mark_signal(signal.db_id, "SKIPPED", f"Setup void: {violation}")
+            return TradeDecision("SKIP", skip_reason=f"Setup void: {violation}")
+
+        entry = (signal.entry_zone_min + signal.entry_zone_max) / 2
+        risk_distance = abs(float(entry) - stop_px)
+        if risk_distance <= 0:
+            signal.status = "SKIPPED"
+            await self._mark_signal(signal.db_id, "SKIPPED", "Zero risk distance")
+            return TradeDecision("SKIP", skip_reason="Zero risk distance")
+
+        # 5. Sizing — same balance/risk-percent/notional-cap chain as the
+        #    generic path. The aggregate stop-risk cap is live-only by design
+        #    (paper exposure is local and capped by max_positions).
+        balance = await self._account_balance(True)
+        if balance is None:
+            return TradeDecision("SKIP", skip_reason="Could not fetch account balance")
+        risk_percent = Decimal(str(self.settings.get("risk_percent", 1.0)))
+        size = self.risk_svc.calc_position_size(
+            balance, risk_percent, Decimal(str(entry)), signal.stop_loss
+        )
+        notional_pct = Decimal(str(self.settings.get("max_position_notional_pct", 50.0)))
+        size = self.risk_svc.cap_position_notional(
+            size, Decimal(str(entry)), balance, notional_pct / Decimal("100"))
+        if size == Decimal("0"):
+            return TradeDecision("SKIP", skip_reason="Position size too small")
+
+        plan = {
+            "symbol": symbol,
+            "direction": signal.direction,
+            "entry": float(entry),
+            "stop_loss": stop_px,
+            "take_profit": None,
+            "size": float(size),
+            "rr_ratio": 0.0,
+            "initial_risk_distance": risk_distance,
+        }
+
+        # 6. Execute — simulated paper fill at the signal close, same as the
+        #    generic paper path (zone midpoint == the daily close here).
+        position_id = await self._create_position(
+            signal, float(entry), size, True, initial_risk_distance=risk_distance)
+        await self.order_svc.place_order(
+            symbol, "BUY", "MARKET", size, price=Decimal(str(entry)),
+            stop_loss=signal.stop_loss, take_profit=None,
+            simulate=True,
+        )
+
+        signal.status = "TRIGGERED"
+        signal.triggered_at = datetime.now(timezone.utc)
+        await self._mark_signal(signal.db_id, "TRIGGERED")
+
+        logger.info("[%s] DONCHIAN executed (paper): %s", symbol, plan)
+        return TradeDecision("EXECUTE", plan=plan, position_id=position_id, paper=True)
+
     async def _has_open_db_position(self, symbol: str) -> bool:
         """Paper positions live only in the DB — guard against re-entry."""
         async with self.session_factory() as session:
@@ -638,8 +788,8 @@ class StrategyService:
             logger.debug("[%s] get_mark_price failed: %s", symbol, exc)
             return None
 
-    def _side_violation(self, direction: str, stop_px: float, tp_px: float,
-                        market_px: Optional[float]) -> Optional[str]:
+    def _side_violation(self, direction: str, stop_px: float,
+                        tp_px: float | None, market_px: Optional[float]) -> Optional[str]:
         """Why the planned SL/TP cannot be placed at `market_px`, else None.
 
         Binance rejects a conditional order whose trigger condition is already
@@ -656,12 +806,12 @@ class StrategyService:
         if direction == "LONG":
             if stop_px >= market_px:
                 return "stop is no longer below the market"
-            if tp_px <= market_px:
+            if tp_px is not None and tp_px <= market_px:
                 return "target is no longer above the market"
         else:
             if stop_px <= market_px:
                 return "stop is no longer above the market"
-            if tp_px >= market_px:
+            if tp_px is not None and tp_px >= market_px:
                 return "target is no longer below the market"
         return None
 
@@ -706,7 +856,9 @@ class StrategyService:
                 quantity=float(size),
                 leverage=int(self.settings.get(leverage_key, 10)),
                 stop_loss=float(signal.stop_loss),
-                take_profit=float(signal.take_profit),
+                # None for no-fixed-target strategies (DONCHIAN).
+                take_profit=(float(signal.take_profit)
+                             if signal.take_profit is not None else None),
                 initial_risk_distance=initial_risk_distance,
                 strategy_type=getattr(signal, "strategy_type", None) or "UNKNOWN",
                 status="OPEN",

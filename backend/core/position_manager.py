@@ -22,6 +22,7 @@ from backend.core.websocket_manager import ws_manager
 from backend.core import risk_units
 from backend.core.cost_model import TAKER_FEE
 from backend.services.alert_service import AlertService
+from backend.indicators.donchian import closed_bars, donchian_trailing_stop
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,10 @@ class PositionManager:
         # DB query per tick — see _on_tick. Refreshed by the 30s _check_all_positions
         # pass and after every close.
         self._open_positions_cache: list[dict] = []
+        # DONCHIAN trail bookkeeping: position_id -> open_time of the last
+        # closed 1d bar already folded into the stop, so the 30s pass does
+        # not rewrite an unchanged trail every cycle.
+        self._donchian_trail_bar: dict[int, int] = {}
         # "paper" | "live" — set by BotEngine.start(). In live mode, closing a
         # position must also place a market order on the exchange (manual close)
         # or leave the exchange SL/TP to fire (auto TP/SL); the exchange SL/TP
@@ -577,6 +582,7 @@ class PositionManager:
                     "take_profit": float(r["take_profit"]) if r["take_profit"] is not None else None,
                     "signal_id": r["signal_id"],
                     "mode": r["mode"],
+                    "strategy_type": r["strategy_type"],
                     "opened_at": r["opened_at"],
                     "initial_risk_distance": (
                         float(r["initial_risk_distance"])
@@ -716,6 +722,16 @@ class PositionManager:
                 continue
             elif sl_hit:
                 await self._close_position(position, "SL_HIT", current_price)
+                continue
+
+            # DONCHIAN (paper-only): the validated spec manages its own exit —
+            # a ratcheting daily trailing stop — so the generic BE/profit/
+            # runner/stale trails must not touch it. The ratchet writes
+            # stop_loss via _trail_stop_to_be; the SL_HIT check above (mark
+            # price, every tick + every 30s pass) performs the close.
+            if (position.get("mode") == "paper"
+                    and position.get("strategy_type") == "DONCHIAN"):
+                await self._check_donchian_trail(position)
                 continue
 
             # Check BE trailing (REST-only; needs klines)
@@ -906,6 +922,54 @@ class PositionManager:
             f"[{position['symbol']}] {side} runner-trail: +{profit/float(risk):.2f}R, "
             f"trailing stop to {new_stop:.6f} (locks +{locked_r:.2f}R)")
         await self._trail_stop_to_be(position["id"], new_stop)
+
+    async def _check_donchian_trail(self, position: dict):
+        """Ratchet a paper DONCHIAN position's stop to the trailing-channel
+        extreme (lowest low of the prior 10 closed daily bars for LONG).
+
+        Spec mapping (scripts/donchian_backtest.py): the backtest recomputes
+        the trail at each closed 1d bar and exits at the NEXT bar's open.
+        Here the ratcheted value becomes `stop_loss` via `_trail_stop_to_be`
+        (one-way, paper = DB only, no exchange orders) and the regular
+        mark-price SL_HIT check performs the close — an approximation of
+        "exit next bar open": a stop only updates on daily closes, but a
+        cross of an already-updated stop exits intraday at mark rather than
+        waiting for the next open.
+        """
+        if self.binance is None:
+            return
+        symbol = position["symbol"]
+        side = position["side"]
+        try:
+            raw = await self.binance.get_klines(symbol, "1d", 80)
+        except Exception as exc:
+            logger.debug("[%s] DONCHIAN trail kline fetch failed: %s", symbol, exc)
+            return
+        candles = closed_bars(raw)
+        if not candles:
+            return
+        # The trail only changes when a NEW daily bar has closed — skip the
+        # DB write when the last closed bar is the one already applied.
+        bar_key = int(candles[-1].get("open_time") or 0)
+        pid = position["id"]
+        if self._donchian_trail_bar.get(pid) == bar_key:
+            return
+        trail = donchian_trailing_stop(candles, side)
+        if trail is None:
+            return
+        current = position.get("stop_loss")
+        # One-way ratchet on the pass snapshot: _trail_stop_to_be repeats
+        # this check against the fresh row, but comparing here avoids a DB
+        # session every 30s while the trail is unchanged.
+        if current is not None:
+            if side == "LONG" and trail <= float(current):
+                self._donchian_trail_bar[pid] = bar_key
+                return
+            if side == "SHORT" and trail >= float(current):
+                self._donchian_trail_bar[pid] = bar_key
+                return
+        await self._trail_stop_to_be(pid, trail)
+        self._donchian_trail_bar[pid] = bar_key
 
     async def _check_stale_trade(self, position: dict):
         """Close stale profitable trades that aren't reaching TP.
@@ -1326,6 +1390,9 @@ class PositionManager:
                             .values(pnl_r=None)
                         )
                         await session.commit()
+
+        # Bookkeeping cleanup — the DONCHIAN trail cache is keyed by position id.
+        self._donchian_trail_bar.pop(position["id"], None)
 
         # Update daily summary + alert outside the session
         await self.daily_reset.update_daily_summary(pnl_r, pnl_usdt)

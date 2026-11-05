@@ -8,7 +8,7 @@ SQLAlchemy 2.0 async migrations for all FUBOT database tables. All schema change
 
 Owner: FUBOT project team
 Location: `/Users/vick/Documents/Projects/fubot/alembic/`
-Status: local and production head `011_daily_risk_state` (production upgrade verified 2026-10-23 after commit `1138142`); 10 revisions exist
+Status: local head `012_nullable_signal_take_profit` (applied to the dev DB 2026-11 after stamping the out-of-band `011` — `daily_risk_state` already existed via `create_all` while `alembic_version` read 010); production remains at `011_daily_risk_state`; 11 revisions exist
 
 ## Local Contracts
 
@@ -20,7 +20,7 @@ Status: local and production head `011_daily_risk_state` (production upgrade ver
 ## Work Guidance
 
 ### Current State
-- Chain: `001_initial` → `002_seed_data` → `003_initial_risk` → `004_account_testnet` → `005_order_position_id` → `006_position_strategy_type` → `008_add_more_symbols` → `009_add_mode` → `010_nullable_trade_pnl_r` → `011_daily_risk_state` (mode-scoped daily breaker latch and manual-reset cutoff) — local head
+- Chain: `001_initial` → `002_seed_data` → `003_initial_risk` → `004_account_testnet` → `005_order_position_id` → `006_position_strategy_type` → `008_add_more_symbols` → `009_add_mode` → `010_nullable_trade_pnl_r` → `011_daily_risk_state` → `012_nullable_signal_take_profit` (`signals.take_profit` nullable for no-fixed-target strategies — DONCHIAN) — local head
 - `002_seed_data` inserts into the JSON `settings.value` via raw `sa.text()` — values MUST be `json.dumps()`-ed because asyncpg's JSON codec takes pre-serialized text, not Python objects
 - Fresh environment provisioning:
 ```bash
@@ -59,7 +59,7 @@ alembic history
 
 ## Verification
 
-- `PYTHONPATH=. alembic history` — shows the full chain ending at `011_daily_risk_state (head)` (installed alembic 1.13.1 has no `--enumerate` flag)
+- `PYTHONPATH=. alembic history` — shows the full chain ending at `012_nullable_signal_take_profit (head)` (installed alembic 1.13.1 has no `--enumerate` flag)
 - `PYTHONPATH=. alembic upgrade head --sql` — renders the migration SQL offline; apply only after tests and deployment review
 - `PYTHONPATH=. alembic current` — checks the connected database; production reported `011_daily_risk_state (head)` after the 2026-10-23 deployment
 - All 10 tables + seed rows verified present in PostgreSQL

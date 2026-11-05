@@ -82,6 +82,7 @@ async def get_trading_settings(
         "funding_rate_filter_enabled", "funding_skip_threshold", "atr_stop_mult",
         "profit_lock_trigger_r2", "profit_lock_trail_r2",
         "weekly_drawdown_limit_r",
+        "strategy_donchian_enabled", "donchian_symbols",
     ]
     defaults = {
         "risk_percent": 1.0,
@@ -116,6 +117,12 @@ async def get_trading_settings(
         "profit_lock_trigger_r2": 1.0,
         "profit_lock_trail_r2": 0.25,
         "weekly_drawdown_limit_r": 5.0,
+        # DONCHIAN trend strategy — PAPER MODE ONLY (hard-gated in
+        # SignalService/StrategyService regardless of this flag). Default off;
+        # `donchian_symbols` is a comma-separated universe override, empty =
+        # the 15 backtest perps in indicators/donchian.py.
+        "strategy_donchian_enabled": False,
+        "donchian_symbols": "",
     }
 
     settings = {}
@@ -159,6 +166,8 @@ async def get_trading_settings(
         profit_lock_trigger_r2=float(settings.get("profit_lock_trigger_r2", 1.0)),
         profit_lock_trail_r2=float(settings.get("profit_lock_trail_r2", 0.25)),
         weekly_drawdown_limit_r=float(settings.get("weekly_drawdown_limit_r", 5.0)),
+        strategy_donchian_enabled=bool(settings.get("strategy_donchian_enabled", False)),
+        donchian_symbols=str(settings.get("donchian_symbols", "") or ""),
     )
 
 

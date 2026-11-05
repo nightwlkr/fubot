@@ -36,7 +36,7 @@ def _format_signal(s: Signal) -> SignalResponse:
         entry_zone_min=float(s.entry_zone_min),
         entry_zone_max=float(s.entry_zone_max),
         stop_loss=float(s.stop_loss),
-        take_profit=float(s.take_profit),
+        take_profit=float(s.take_profit) if s.take_profit is not None else None,
         rr_ratio=float(s.rr_ratio),
         volume_confirmed=s.volume_confirmed,
         status=s.status,
